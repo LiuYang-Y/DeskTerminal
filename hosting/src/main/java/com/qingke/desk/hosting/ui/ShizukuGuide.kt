@@ -91,30 +91,6 @@ fun ShizukuStatusChip(
 }
 
 /**
- * 首页顶部的状态栏。目前只放 [ShizukuStatusChip]，但它是**一整条**而不是一个浮动的角标：
- * 后面还要放网络/连接状态，浮动的角标没有地方长。
- */
-@Composable
-fun ShizukuStatusBar(
-    status: ShizukuStatus,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(DeskDimens.statusBarHeight)
-            .padding(
-                start = DeskDimens.screenPadding,
-                end = DeskDimens.screenPadding,
-            ),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        ShizukuStatusChip(status = status, onClick = onClick)
-    }
-}
-
-/**
  * 引导页。点状态栏上的指示进到这里。
  *
  * 原则与 [BlockedNotice] 相同：每一步都是**用户能照着做的动作**，

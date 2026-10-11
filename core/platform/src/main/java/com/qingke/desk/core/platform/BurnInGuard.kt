@@ -4,10 +4,15 @@ import kotlin.math.PI
 import kotlin.math.sin
 
 /**
- * OLED 防烧屏：分时段亮度 + 固定元素缓慢微位移。
+ * OLED 防烧屏：固定元素缓慢微位移。
  *
- * 两者都由挂钟时间纯函数推导，不持有状态、不需要定时器，
+ * 由挂钟时间纯函数推导，不持有状态、不需要定时器，
  * 因此配置重建（旋转、主题切换）不会让漂移位置跳变。
+ *
+ * 2026-10-12 删掉了原来的 `scheduledBrightness(hourOfDay)`（按小时分档设窗口亮度）：
+ * 它是在 onResume 里无条件执行的，结果是**每次进入应用都把用户自己的亮度拉走一档**
+ * （真机投诉"进来就变暗"）。亮度现在只跟屏保走 —— 见 MainActivity.applyScreensaverBrightness。
+ * 以后若还想要分时段亮度，那应该是一个用户显式打开的设置项，而不是无条件的覆盖。
  */
 object BurnInGuard {
 
@@ -28,19 +33,5 @@ object BurnInGuard {
         val x = (sin(t) * rangeDp).toFloat()
         val y = (sin(2.0 * t) * rangeDp * 0.6f).toFloat()
         return x to y
-    }
-
-    /**
-     * 分时段窗口亮度。夜里压到最低档，白天给足。
-     *
-     * TODO(adb) [待校正]：具体档位需要按这台机器的面板亮度和摆放位置实测，
-     *           现在是拍脑袋的保守值。
-     */
-    fun scheduledBrightness(hourOfDay: Int): Float = when (hourOfDay) {
-        in 0..6 -> 0.20f
-        in 7..8 -> 0.50f
-        in 9..17 -> 0.85f
-        in 18..21 -> 0.60f
-        else -> 0.30f
     }
 }

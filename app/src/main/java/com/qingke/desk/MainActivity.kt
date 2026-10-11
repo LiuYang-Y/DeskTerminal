@@ -13,11 +13,10 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.qingke.desk.core.model.DisplayInfo
-import com.qingke.desk.core.platform.BurnInGuard
 import com.qingke.desk.core.platform.DisplayController
 import com.qingke.desk.core.platform.WindowDisplayController
+import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.shell.DeskRoot
-import java.util.Calendar
 
 /**
  * HOME Activity。单 Activity + 全 Compose。
@@ -50,15 +49,25 @@ class MainActivity : ComponentActivity() {
                 repository = DeskGraph.homeRepository,
                 displayInfo = DeskGraph.displayInfo,
                 onMessage = ::showMessage,
+                onScreensaverChange = ::applyScreensaverBrightness,
             )
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        // 分时段亮度：每次回前台按当前小时重算一次。
-        val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
-        displayController.setWindowBrightness(BurnInGuard.scheduledBrightness(hour))
+    /**
+     * 窗口亮度策略：**只有屏保会压暗，其余时候一律不碰**。
+     *
+     * 2026-10-12 修：以前是在 onResume 里按小时数强制设一次
+     * （BurnInGuard.scheduledBrightness），结果是每次进入应用都把用户自己
+     * 调好的亮度拉走一档 —— 真机投诉"进来就变暗"。那条分时段策略整个删掉了。
+     *
+     * 现在：进屏保压到 [DeskDimens.SCREENSAVER_BRIGHTNESS]（防 OLED 残影），
+     * 屏保一退立刻传 null 交还系统亮度。窗口级设置，不写系统设置，不需要权限。
+     */
+    private fun applyScreensaverBrightness(screensaverVisible: Boolean) {
+        displayController.setWindowBrightness(
+            if (screensaverVisible) DeskDimens.SCREENSAVER_BRIGHTNESS else null,
+        )
     }
 
     private fun showMessage(text: String) {

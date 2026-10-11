@@ -14,6 +14,7 @@ import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.effects.vibrancy
+import com.kyant.backdrop.highlight.Highlight
 
 /**
  * 液态玻璃效果的封装层：**整个工程只有本文件 import 第三方玻璃库**。
@@ -105,15 +106,25 @@ fun Modifier.deskGlassSource(backdrop: LayerBackdrop?): Modifier =
     if (backdrop == null) this else this.layerBackdrop(backdrop)
 
 /**
- * 玻璃表面。给需要浮在内容之上的那一层用（本项目的底部图标栏）。
+ * 玻璃表面。给需要浮在内容之上的那一层用（本项目的侧边栏）。
+ *
+ * 同一块 [backdrop] 可以被**多层**同时使用（侧栏整块 + 里面的选中指示块），
+ * 只要两者都只是"读"这块层、没有谁再 `layerBackdrop` 录一遍，就不会形成
+ * glass-on-glass 的自采样循环 —— 官方教程警告的是"在 drawBackdrop 之后又
+ * layerBackdrop 同一块内容"（RenderThread SIGSEGV），那是 `exportedBackdrop`
+ * 参数存在的理由。本工程不碰那个参数，靠**共用同一个源**绕开整类问题。
  *
  * @param surfaceColor 蒙版色：它决定可读性，深色主题下宜用白色低透明度。
+ * @param alpha 蒙版不透明度。**这是拉出层次的主要手段**：同一块背景层上，
+ *              数值越大越"亮"、越像一块实体玻璃。侧栏 0.12、选中指示块 0.26。
+ * @param highlight 边缘高光。默认取库的 [Highlight.Default]。
  */
 fun Modifier.deskGlassSurface(
     backdrop: LayerBackdrop?,
     shape: () -> Shape,
     surfaceColor: Color = Color.White,
     alpha: Float = DeskGlass.surfaceAlpha,
+    highlight: () -> Highlight = { Highlight.Default },
 ): Modifier {
     if (backdrop == null) return this
     return this.drawBackdrop(
@@ -125,6 +136,16 @@ fun Modifier.deskGlassSurface(
             blur(DeskGlass.blurRadius.toPx())
             lens(DeskGlass.refractionHeight.toPx(), DeskGlass.refractionAmount.toPx())
         },
+        highlight = highlight,
         onDrawSurface = { drawRect(surfaceColor.copy(alpha = alpha)) },
     )
 }
+
+/**
+ * 选中指示块的不透明度：比侧栏底色[DeskGlass.surfaceAlpha]高一倍多，
+ * 这样"一块更亮的玻璃滑到哪一项后面"才看得出来。
+ *
+ * 为什么不用再叠一层模糊来区分：那需要 second backdrop（glass on glass），
+ * 是本工程明确要避开的坑（见 [deskGlassSurface] 的类注释）。
+ */
+val DeskGlass.indicatorAlpha: Float get() = 0.26f

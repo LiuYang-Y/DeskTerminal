@@ -9,8 +9,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.DeskTheme
@@ -19,7 +21,7 @@ import com.qingke.desk.hosting.ShizukuDebugOverride
 import com.qingke.desk.hosting.ShizukuStatus
 import com.qingke.desk.hosting.ui.ShizukuBootPromptCard
 import com.qingke.desk.hosting.ui.ShizukuGuideScreen
-import com.qingke.desk.hosting.ui.ShizukuStatusBar
+import com.qingke.desk.hosting.ui.ShizukuStatusChip
 
 /**
  * **仅 debug 变体**：把首页状态栏指示、Shizuku 引导页、重启后的一次性提示
@@ -63,9 +65,18 @@ class ShizukuPreviewActivity : ComponentActivity() {
             DeskTheme {
                 PreviewHost {
                     when (view) {
-                        VIEW_CHIP -> Column(modifier = Modifier.fillMaxSize()) {
-                            Spacer(modifier = Modifier.height(DeskDimens.statusBarTopPadding))
-                            ShizukuStatusBar(status = status, onClick = { })
+                        // 2026-10-12：指示改成右上角悬浮角标之后，它不再被包在
+                        // 一条状态栏里 —— 预览页直接渲染这个 chip 本身。
+                        VIEW_CHIP -> Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(
+                                    top = DeskDimens.statusChipTopPadding,
+                                    end = DeskDimens.statusChipSidePadding,
+                                ),
+                            contentAlignment = Alignment.TopEnd,
+                        ) {
+                            ShizukuStatusChip(status = status, onClick = { })
                         }
 
                         VIEW_PROMPT -> ShizukuBootPromptCard(

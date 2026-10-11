@@ -9,14 +9,16 @@ import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -32,13 +34,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
+import com.kyant.backdrop.backdrops.LayerBackdrop
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.qingke.desk.connection.ConnectionOrchestrator
 import com.qingke.desk.core.data.HomeRepository
+import com.qingke.desk.core.data.ShellSettings
+import com.qingke.desk.core.data.SidebarSide
 import com.qingke.desk.core.model.DisplayInfo
 import com.qingke.desk.core.model.HomeCardKind
 import com.qingke.desk.core.platform.BurnInGuard
@@ -52,12 +59,10 @@ import com.qingke.desk.feature.media.MediaUiState
 import com.qingke.desk.hosting.ShizukuGate
 import com.qingke.desk.hosting.ShizukuStatus
 import com.qingke.desk.hosting.ShizukuStatusMonitor
-import com.qingke.desk.hosting.HostState
-import com.qingke.desk.hosting.VdHostController
-import com.qingke.desk.hosting.ui.HostingOverlay
-import com.qingke.desk.hosting.ui.HostingPanel
 import com.qingke.desk.hosting.ui.ShizukuBootPromptCard
 import com.qingke.desk.hosting.ui.ShizukuGuideScreen
+import com.qingke.desk.hosting.ui.ShizukuStatusChip
+import com.qingke.desk.map.MapPane
 import com.qingke.desk.projection.api.AvailabilityAction
 import com.qingke.desk.projection.api.AvailabilityResult
 import com.qingke.desk.projection.api.ProjectionKind
@@ -69,26 +74,39 @@ import kotlinx.coroutines.delay
 /** 壳层的生命周期日志 tag。排查"到底算不算从外部回来"时靠它（adb logcat -s DeskShell）。 */
 private const val SHELL_TAG = "DeskShell"
 
-/** 彻底失败后停留多久自动回首页。留一点时间让人看清原因。 */
-private const val FAILED_AUTO_EXIT_MS = 3500L
-
 enum class DeskScreen {
     HOME,
     PROJECTION,
-    /** 应用托管（:hosting）：把第三方应用画进主区域。 */
-    HOSTING,
-    /** Shizuku 的引导页。从首页状态栏的常驻指示进来。 */
+    /**
+     * 地图布局（:map）。方案 C：地图铺满整屏，卡片压成一层浮在侧栏的对侧，可收起。
+     *
+     * 2026-10-12 之前这一屏叫 HOSTING，走的是 :hosting 的虚拟屏把高德 App 整个
+     * 搬过来；现在改用高德 SDK（MapView 直接挂进 Compose），虚拟屏不再参与。
+     * :hosting 模块保留不删 —— 虚拟屏能力本身还在，只是这条链路上暂时不用它。
+     */
+    MAP,
+    /** Shizuku 的引导页。从右上角的悬浮状态角标进来。 */
     SHIZUKU_GUIDE,
 }
 
 /**
- * 壳层根。三个屏幕：首页 / 全屏投屏 / 应用托管，以及它们之间的切换。
+ * 壳层根。四个屏幕：首页 / 全屏投屏 / 地图布局 / Shizuku 引导，以及它们之间的切换。
  *
- * 投屏页是**全屏**的（连底栏一起盖掉），托管页**不是** —— 它把画面铺在主区域，
- * 底栏留在原地，否则把第三方应用铺满之后就没有出口了。
+ * 布局骨架（2026-10-12 定稿，横屏 794 × 361 dp）：
  *
- * 混合形态（投屏 + 侧边图标条）不在本轮范围，等 EMBEDDED_SURFACE 链路
- * 跑通真机后再加 —— 那时只需要改这里的 when 分支，契约不动。
+ *   挖孔区(40) | 侧栏(76) |          内容区          [| 卡片浮层 240 + 手柄 24]
+ *
+ *  · **侧栏**常驻在左或右（用户可长按切换、重启后保持），浮在内容之上，
+ *    是液态玻璃采样内容的那一层。**它不碰挖孔区** —— 两块各占各的。
+ *  · **挖孔区不放任何东西、也不铺色**（2026-10-12 改）：整条留给外层底色，
+ *    那一块的像素值因此与别处完全相同，亮度拉高也看不出色差；以后换壁纸背景
+ *    它会自然透出来。它在**哪一侧由系统实时插图决定**（手机倒转 180° 时会翻到
+ *    另一边，写死一侧必然错位），与侧栏在哪一侧无关。
+ *  · **地图布局**下地图铺满整屏（一路铺到挖孔下面），卡片浮层收起后地图全露。
+ *
+ * 投屏页与引导页是**全屏**的，不吃这套骨架（侧栏不画）。
+ *
+ * @param onScreensaverChange 进出屏保的通知，用来只在屏保时压暗窗口亮度。
  */
 @Composable
 fun DeskRoot(
@@ -96,6 +114,7 @@ fun DeskRoot(
     repository: HomeRepository,
     displayInfo: DisplayInfo = DisplayInfo.Unspecified,
     onMessage: ((String) -> Unit)? = null,
+    onScreensaverChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var screen by remember { mutableStateOf(DeskScreen.HOME) }
@@ -129,23 +148,6 @@ fun DeskRoot(
     val lifecycleOwner = LocalLifecycleOwner.current
     val appContext = LocalContext.current.applicationContext
     val context = LocalContext.current
-
-    // ---- 应用托管（:hosting）------------------------------------------------
-    //
-    // 控制器只是"到 VdHostService 的把手"，真正的虚拟屏活在那边的 Service 里。
-    // 这里**刻意不在离开托管页时把它关掉**：从地图切到投屏再切回来要能立刻恢复，
-    // 每切一次就重建虚拟屏 + 重新拉起高德是不可接受的（实测一次拉起要 1~2 秒）。
-    // 想彻底收掉用托管页右上角的「退出」。
-    val hostingController = remember(context) { VdHostController(context) }
-    val hostingState by hostingController.state.collectAsState()
-
-    // 重试耗尽：看完原因自动回首页，不把用户丢在一块什么都没有的面板上。
-    LaunchedEffect(hostingState, screen) {
-        if (hostingState is HostState.Failed && screen == DeskScreen.HOSTING) {
-            delay(FAILED_AUTO_EXIT_MS)
-            screen = DeskScreen.HOME
-        }
-    }
 
     // ---- Shizuku 状态 -------------------------------------------------------
     //
@@ -280,26 +282,53 @@ fun DeskRoot(
     )
 
     DeskTheme {
-        // 玻璃背景层必须在"内容区"和"底栏"共同的父层创建：
-        // 它录的是内容、画在底栏上，两头都要用同一个句柄。
+        // 玻璃背景层必须在"内容区"和"侧栏"共同的父层创建：
+        // 它录的是内容、画在侧栏上，两头都要用同一个句柄。
         // ENABLED=false 时它返回 null，两个 Modifier 自动退化为空操作。
         val glassBackdrop = rememberDeskGlassBackdrop(
             background = MaterialTheme.colorScheme.background,
         )
 
-        // 外层 Box 负责"铺满全屏并上色"：基准机横屏时左侧有 137px 挖孔，
-        // 窗口已经延伸到挖孔下面（见 MainActivity 的 shortEdges 设置），
-        // 这里让底色把挖孔区一起画掉，避免出现一条黑带；
-        // 而真正的内容用 displayCutout 插图挡开，不会被摄像头孔压住。
+        // ---- 侧栏在哪一侧 ----------------------------------------------------
+        //
+        // 初值读持久化设置，长按侧栏改它并**立刻落盘**（commit 而不是 apply：
+        // 用户切完就熄屏的话，apply 的异步写盘可能还没发生，这次选择就丢了）。
+        var sidebarSide by remember { mutableStateOf(ShellSettings.sidebarSide(context)) }
+        var mapPaneCollapsed by remember { mutableStateOf(false) }
+
+        // ---- 挖孔在哪一侧：一律问系统，不猜 ----------------------------------
+        //
+        // 手机倒转 180° 时挖孔会跑到另一边，写死"在左边"的那天就是错位那天。
+        // 这里每次重组都读实时插图，倒转之后布局自己跟着翻，代码一行不改。
+        val density = LocalDensity.current
+        val layoutDirection = LocalLayoutDirection.current
+        val cutout = WindowInsets.displayCutout
+        val cutoutLeft = with(density) { cutout.getLeft(density, layoutDirection).toDp() }
+        val cutoutRight = with(density) { cutout.getRight(density, layoutDirection).toDp() }
+        val cutoutTop = with(density) { cutout.getTop(density).toDp() }
+        val cutoutBottom = with(density) { cutout.getBottom(density).toDp() }
+
+        // 挖孔区与侧栏**各占各的**：侧栏的玻璃块不延伸到挖孔区里去。
+        // （先试过让侧栏延伸过去吃掉挖孔那一条，真机上看像贴歪了 —— 见 SideBar 的类注释。）
+        // 挖孔区本身也不再铺色，交给外层底色透出来（删 CutoutBand 的理由见其说明）。
+
+        // 哪几屏带"壳"（侧栏）。投屏页全屏、引导页自带返回，两者都不带。
+        val chromeScreen = screen == DeskScreen.HOME || screen == DeskScreen.MAP
+
+        // 外层 Box 负责"铺满全屏并上色"：窗口已经延伸到挖孔下面
+        // （见 MainActivity 的 shortEdges 设置），底色把挖孔区一起画掉，避免黑带。
         Box(
             modifier = modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background),
         ) {
+            // 屏保要能盖住**全部**内容（含铺满的地图），所以地图也得在 IdleGuard 之内；
+            // 而"避让挖孔"是更内层骨架的事 —— 地图本来就是要盖住挖孔区的，
+            // 不能跟着一起避让。
             IdleGuard(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .windowInsetsPadding(WindowInsets.displayCutout),
+                modifier = Modifier.fillMaxSize(),
+                // 屏保进出要通知上层改窗口亮度：只有屏保压暗，平时绝不碰用户自己的亮度。
+                onIdleChange = onScreensaverChange,
                 screensaver = {
                     Screensaver(
                         timeText = cards.firstOrNull { it.kind == HomeCardKind.CLOCK }?.title.orEmpty(),
@@ -308,138 +337,194 @@ fun DeskRoot(
                     )
                 },
             ) {
-                // 底栏与页面内容放在**同一个 Box**里，而整个 Box 又在 IdleGuard 之内：
-                // 这样屏保能把它一起盖住（原来底栏在 HomeScreen 内部，就是这个效果）。
-                // 反过来说，底栏不能提到 IdleGuard 外面 —— 那样屏保亮着的时候
-                // 底栏还浮在上面可点，用户会在"睡着了"的屏幕上误切页面。
                 Box(modifier = Modifier.fillMaxSize()) {
-                    // 首页与"地图布局"是**同一个页面**，只差右侧有没有那块托管面板。
-                    // 抽成一个 lambda 是为了让两条分支共用同一份参数，
-                    // 避免以后加卡片 / 加参数时只改了一边。
-                    val homePane: @Composable ((@Composable () -> Unit)?) -> Unit = { panel ->
-                        HomeScreen(
-                            cards = cards,
-                            driftX = drift.first.dp,
-                            driftY = drift.second.dp,
-                            onDockSelect = { item ->
-                                screen = handleDockSelect(item, orchestrator, onMessage, screen)
-                            },
-                            onCardSelect = { card ->
-                                if (card.kind == HomeCardKind.PROJECTION) {
-                                    orchestrator.connect(ProjectionKind.CARPLAY)
-                                    screen = DeskScreen.PROJECTION
-                                } else {
-                                    onMessage?.invoke("${card.title} 尚未支持点击")
-                                }
-                            },
-                            mediaState = mediaState,
-                            onMediaCommand = mediaMonitor::command,
-                            onMediaRequestPermission = {
-                                MediaPermission.openSettings(context, onFailure = { reason ->
-                                    onMessage?.invoke(reason)
-                                })
-                            },
-                            // 地图布局背后是 SurfaceView —— 它走独立图层，Compose 的
-                            // 背景层采不到它的内容（会录成一片黑）。那时候给底栏玻璃
-                            // 只会得到一条发黑的条子，所以地图布局直接关掉玻璃。
-                            glassBackdrop = if (panel == null) glassBackdrop else null,
-                            shizukuStatus = shizukuStatus,
-                            onShizukuIndicatorClick = { screen = DeskScreen.SHIZUKU_GUIDE },
-                            hostingPanel = panel,
-                        )
+                    // A. 地图：铺满**整屏**，含挖孔区。它是这一屏的底。
+                    //    玻璃在这里是关掉的：MapView 走独立图层，Compose 的背景层
+                    //    采不到它的内容（会录成一片黑）。
+                    if (screen == DeskScreen.MAP) {
+                        MapPane(modifier = Modifier.fillMaxSize())
                     }
 
-                    when (screen) {
-                        DeskScreen.HOME -> homePane(null)
+                    // B. 挖孔区：**什么都不画**。
+                    //
+                    // 2026-10-12 改：这里原本铺一层 surfaceVariant@55%，
+                    // 真机上把屏幕亮度拉高后，挖孔那一条与旁边的底色看得出色差
+                    // （半透明色压上去必然偏一档，亮度越高越明显）。
+                    // 现在整条留给底色 —— 外层的 Box 已经把 colorScheme.background
+                    // 铺满整个窗口（含挖孔区），那一块于是和别处**完全同一个像素值**，
+                    // 没有接缝。以后换成壁纸背景时它也会自然透出来，
+                    // 不需要再回来改这里：**别在这里加任何上色**。
+                    //
+                    // 代价：地图布局下地图会一路铺到挖孔底下（不再被压一条色带）。
+                    // 这正是我们要的 —— 那一条的颜色跟地图一致，同样没有接缝。
 
-                        DeskScreen.SHIZUKU_GUIDE -> ShizukuGuideScreen(
-                            status = shizukuStatus,
-                            onRefresh = {
-                                shizukuMonitor.refresh()
-                                hostingController.refresh()
-                            },
-                            onRequestPermission = { ShizukuGate.requestPermission() },
-                            onOpenShizuku = {
-                                val intent = ShizukuGate.launchIntent(context)
-                                if (intent != null) {
-                                    runCatching { context.startActivity(intent) }
-                                        .onFailure { onMessage?.invoke("没能打开 Shizuku，请手动打开它") }
-                                } else {
-                                    onMessage?.invoke("设备上没有安装 Shizuku")
-                                }
-                            },
-                            onExit = { screen = DeskScreen.HOME },
-                        )
-
-                        // 地图布局：首页 + 右侧竖屏托管面板。面板本身只有一个画面出口，
-                        // 被挡住 / 失败由下面的整屏浮层说明。
-                        DeskScreen.HOSTING -> homePane {
-                            HostingPanel(
-                                controller = hostingController,
-                                onExitToHome = { screen = DeskScreen.HOME },
+                    // C. 骨架：侧栏 + 内容区。**这一层才避让挖孔** ——
+                    //    上面两块本来就是要盖住挖孔区的，不能跟着一起避让。
+                    //    挖孔区整段让给外层底色，侧栏从它右边（或左边）开始。
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(
+                                start = cutoutLeft,
+                                end = cutoutRight,
+                                top = cutoutTop,
+                                bottom = cutoutBottom,
+                            ),
+                    ) {
+                        if (sidebarSide == SidebarSide.LEFT) {
+                            SideBarSlot(
+                                sidebarSide = sidebarSide,
+                                screen = screen,
+                                glassBackdrop = glassBackdrop,
+                                context = context,
+                                orchestrator = orchestrator,
+                                onMessage = onMessage,
+                                onScreenChange = { screen = it },
+                                onSideChange = { sidebarSide = it },
                             )
                         }
 
-                        DeskScreen.PROJECTION -> ProjectionScreen(
-                            uiState = connectionState,
-                            session = session,
-                            displayInfo = displayInfo,
-                            onExit = {
-                                orchestrator.disconnect(StopReason.USER_HOME_GESTURE)
-                                screen = DeskScreen.HOME
-                            },
-                            onRetry = orchestrator::retryNow,
-                            onRemedy = { unavailable -> runRemedy(unavailable, context, onMessage) },
-                        )
-                    }
-
-                    // 托管被挡住 / 失败：整屏说明页。放在底栏**之前**，让底栏仍然露在上面 ——
-                    // 出问题的时候，用户最需要的是"还能从这儿切走"，而不是被一块提示页关在里面。
-                    if (screen == DeskScreen.HOSTING) {
-                        val hostingNow = hostingState
-                        if (hostingNow is HostState.Blocked || hostingNow is HostState.Failed) {
-                            HostingOverlay(
-                                state = hostingNow,
-                                onRefresh = { hostingController.refresh() },
-                                onRequestPermission = { hostingController.requestShizukuPermission() },
-                                onExit = { screen = DeskScreen.HOME },
-                            )
-                        }
-                    }
-
-                    // 底栏浮在页面内容之上，首页与托管页共用；
-                    // 投屏页全屏、引导页自带「返回」，两者都不带底栏。
-                    if (screen == DeskScreen.HOME || screen == DeskScreen.HOSTING) {
+                        // 内容区。侧栏占掉的那一条由 Row 剩下的 weight 给出，
+                        // 内容**不**伸到侧栏底下 —— 上一版底栏让内容探进去 24dp
+                        // 给玻璃当采样素材，真机结果是第二排卡片被压住，被投诉过。
+                        // 代价是侧栏玻璃背后只剩纯底色，"模糊背后的内容"这一项失去
+                        // 意义；但 lens 的边缘折射与 highlight 仍是按形状算的，
+                        // 玻璃的轮廓和高光照样在。
                         Box(
                             modifier = Modifier
-                                // 地图布局里底栏必须**靠左站**：底栏整体约 468 dp 宽，
-                                // 居中时右端会伸到 x≈631 dp，而托管面板的左边界在 543 dp
-                                // ——真机上「手机投屏」那一项就是被面板盖掉的。
-                                // 靠左之后底栏止于约 524 dp，与面板之间留出约 20 dp。
-                                .align(
-                                    if (screen == DeskScreen.HOSTING) {
-                                        Alignment.BottomStart
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .padding(
+                                    start = if (sidebarSide == SidebarSide.LEFT) {
+                                        DeskDimens.sidebarSpacing
                                     } else {
-                                        Alignment.BottomCenter
+                                        0.dp
                                     },
-                                )
-                                .windowInsetsPadding(WindowInsets.displayCutout),
+                                    end = if (sidebarSide == SidebarSide.RIGHT) {
+                                        DeskDimens.sidebarSpacing
+                                    } else {
+                                        0.dp
+                                    },
+                                ),
                         ) {
-                            DockBar(
-                                items = defaultDockItems(),
-                                selectedId = when (screen) {
-                                    DeskScreen.HOME, DeskScreen.SHIZUKU_GUIDE -> DockIds.HOME
-                                    DeskScreen.HOSTING -> DockIds.HOSTING
-                                    DeskScreen.PROJECTION -> DockIds.PROJECTION
-                                },
-                                onSelect = { item ->
-                                    screen = handleDockSelect(item, orchestrator, onMessage, screen)
-                                },
-                                // 托管页背后是 SurfaceView —— 它走独立图层，Compose 的
-                                // 背景层采不到它的内容（会录成一片黑）。这时候给底栏玻璃
-                                // 只会得到一条发黑的条子，所以托管页直接关掉玻璃。
-                                glassBackdrop =
-                                    if (screen == DeskScreen.HOME) glassBackdrop else null,
+                            when (screen) {
+                                DeskScreen.HOME -> HomeScreen(
+                                    cards = cards,
+                                    driftX = drift.first.dp,
+                                    driftY = drift.second.dp,
+                                    onShellSelect = { item ->
+                                        screen = handleShellSelect(item, orchestrator, onMessage, screen)
+                                    },
+                                    onCardSelect = { card ->
+                                        if (card.kind == HomeCardKind.PROJECTION) {
+                                            orchestrator.connect(ProjectionKind.CARPLAY)
+                                            screen = DeskScreen.PROJECTION
+                                        } else {
+                                            onMessage?.invoke("${card.title} 尚未支持点击")
+                                        }
+                                    },
+                                    mediaState = mediaState,
+                                    onMediaCommand = mediaMonitor::command,
+                                    onMediaRequestPermission = {
+                                        MediaPermission.openSettings(context, onFailure = { reason ->
+                                            onMessage?.invoke(reason)
+                                        })
+                                    },
+                                    glassBackdrop = glassBackdrop,
+                                )
+
+                                // 地图布局：地图在底层铺满了，这里只放卡片浮层，
+                                // 它待在**侧栏的对侧**，可收成一条手柄让地图全露。
+                                DeskScreen.MAP -> MapCardPane(
+                                    cards = cards,
+                                    sidebarSide = sidebarSide,
+                                    collapsed = mapPaneCollapsed,
+                                    onToggleCollapsed = { mapPaneCollapsed = !mapPaneCollapsed },
+                                    driftX = drift.first.dp,
+                                    driftY = drift.second.dp,
+                                    mediaState = mediaState,
+                                    onMediaCommand = mediaMonitor::command,
+                                    onMediaRequestPermission = {
+                                        MediaPermission.openSettings(context, onFailure = { reason ->
+                                            onMessage?.invoke(reason)
+                                        })
+                                    },
+                                    modifier = Modifier.align(
+                                        if (sidebarSide == SidebarSide.LEFT) {
+                                            Alignment.CenterEnd
+                                        } else {
+                                            Alignment.CenterStart
+                                        },
+                                    ),
+                                )
+
+                                DeskScreen.SHIZUKU_GUIDE -> ShizukuGuideScreen(
+                                    status = shizukuStatus,
+                                    onRefresh = { shizukuMonitor.refresh() },
+                                    onRequestPermission = { ShizukuGate.requestPermission() },
+                                    onOpenShizuku = {
+                                        val intent = ShizukuGate.launchIntent(context)
+                                        if (intent != null) {
+                                            runCatching { context.startActivity(intent) }
+                                                .onFailure { onMessage?.invoke("没能打开 Shizuku，请手动打开它") }
+                                        } else {
+                                            onMessage?.invoke("设备上没有安装 Shizuku")
+                                        }
+                                    },
+                                    onExit = { screen = DeskScreen.HOME },
+                                )
+
+                                DeskScreen.PROJECTION -> ProjectionScreen(
+                                    uiState = connectionState,
+                                    session = session,
+                                    displayInfo = displayInfo,
+                                    onExit = {
+                                        orchestrator.disconnect(StopReason.USER_HOME_GESTURE)
+                                        screen = DeskScreen.HOME
+                                    },
+                                    onRetry = orchestrator::retryNow,
+                                    onRemedy = { unavailable -> runRemedy(unavailable, context, onMessage) },
+                                )
+                            }
+
+                            // Shizuku 悬浮角标：**只在异常时出现**（未装 / 未运行 / 未授权），
+                            // 一切正常时屏幕上没有它 —— 常亮设备不该为一个正常状态
+                            // 长期占着一块地方。位置跟着侧栏镜像：侧栏在左则贴右上，
+                            // 侧栏在右则贴左上（右上角那时被侧栏占着）。
+                            if (chromeScreen && shizukuStatus != ShizukuStatus.READY) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(
+                                            if (sidebarSide == SidebarSide.LEFT) {
+                                                Alignment.TopEnd
+                                            } else {
+                                                Alignment.TopStart
+                                            },
+                                        )
+                                        .padding(
+                                            top = DeskDimens.statusChipTopPadding,
+                                            start = DeskDimens.statusChipSidePadding,
+                                            end = DeskDimens.statusChipSidePadding,
+                                        ),
+                                ) {
+                                    ShizukuStatusChip(
+                                        status = shizukuStatus,
+                                        onClick = { screen = DeskScreen.SHIZUKU_GUIDE },
+                                    )
+                                }
+                            }
+                        }
+
+                        if (sidebarSide == SidebarSide.RIGHT) {
+                            SideBarSlot(
+                                sidebarSide = sidebarSide,
+                                screen = screen,
+                                glassBackdrop = glassBackdrop,
+                                context = context,
+                                orchestrator = orchestrator,
+                                onMessage = onMessage,
+                                onScreenChange = { screen = it },
+                                onSideChange = { sidebarSide = it },
                             )
                         }
                     }
@@ -521,30 +606,36 @@ private fun runRemedy(
     }
 }
 
-/** 底栏点选。返回切换后的目标屏幕。 */
-private fun handleDockSelect(
-    item: DockItem,
+/** 侧栏点选。返回切换后的目标屏幕。 */
+private fun handleShellSelect(
+    item: ShellItem,
     orchestrator: ConnectionOrchestrator,
     onMessage: ((String) -> Unit)?,
     current: DeskScreen,
 ): DeskScreen = when (item.id) {
     // 从投屏态回首页必须顺手把会话关掉：否则下点，Session 还活着，
     // 状态机停在 STREAMING，再点进来就是"连一个已经存在的会话"这种脏状态。
-    DockIds.HOME -> {
+    ShellIds.HOME -> {
         if (current == DeskScreen.PROJECTION) {
             orchestrator.disconnect(StopReason.USER_EXPLICIT_EXIT)
         }
         DeskScreen.HOME
     }
 
-    // 虚拟屏由 Service 持有，所以"切到托管页"只是把画面重新挂上来，
-    // 不需要在这里做任何启动动作 —— 挂 Surface 的动作在 HostingScreen 里。
-    // 反过来，从托管页切走也**不关掉**托管：切到投屏再切回来要能立刻恢复。
-    DockIds.HOSTING -> DeskScreen.HOSTING
+    // 地图布局：:map 的 MapView 由 MapPane 自己管理生命周期，
+    // 这里只是切屏，不做任何启动动作。
+    ShellIds.MAP -> DeskScreen.MAP
 
-    DockIds.PROJECTION -> {
+    ShellIds.PROJECTION -> {
         orchestrator.connect(ProjectionKind.CARPLAY)
         DeskScreen.PROJECTION
+    }
+
+    // 「智能家居」从默认条目里去掉了，但分支留着 ——
+    // 以后加回侧栏（或换成别的方式唤起）时不用再补这段。
+    ShellIds.SMART_HOME -> {
+        onMessage?.invoke("智能家居尚未实现")
+        current
     }
 
     else -> {
@@ -554,6 +645,60 @@ private fun handleDockSelect(
         current
     }
 }
+
+/** 当前屏幕对应侧栏里的哪一项（决定玻璃指示块停在哪儿）。 */
+private fun selectedShellId(screen: DeskScreen): String = when (screen) {
+    DeskScreen.HOME, DeskScreen.SHIZUKU_GUIDE -> ShellIds.HOME
+    DeskScreen.MAP -> ShellIds.MAP
+    DeskScreen.PROJECTION -> ShellIds.PROJECTION
+}
+
+/**
+ * 侧栏槽位。左/右两次调用共用这一份实现，差别只在 [extendOnStart]。
+ *
+ * 抽出来是为了让"切换后卡片区、收起手柄、状态指示都要跟着镜像"这件事
+ * 只有一处代码：两边各写一遍，改一处漏一处就是错位。
+ */
+@Composable
+private fun RowScope.SideBarSlot(
+    sidebarSide: SidebarSide,
+    screen: DeskScreen,
+    glassBackdrop: LayerBackdrop?,
+    context: Context,
+    orchestrator: ConnectionOrchestrator,
+    onMessage: ((String) -> Unit)?,
+    onScreenChange: (DeskScreen) -> Unit,
+    onSideChange: (SidebarSide) -> Unit,
+) {
+    SideBar(
+        items = defaultShellItems(),
+        selectedId = selectedShellId(screen),
+        onSelect = { item ->
+            onScreenChange(handleShellSelect(item, orchestrator, onMessage, screen))
+        },
+        glassBackdrop = glassBackdrop,
+        onToggleSide = {
+            val next = ShellSettings.setSidebarSide(context, sidebarSide.flipped())
+            onSideChange(next)
+            onMessage?.invoke(
+                "侧栏已切到${if (next == SidebarSide.LEFT) "左侧" else "右侧"}",
+            )
+        },
+        modifier = Modifier.align(Alignment.CenterVertically),
+    )
+}
+
+/**
+ * 挖孔区不再单独铺色（2026-10-12 删）。
+ *
+ * 原来的 [CutoutBand] 铺 `surfaceVariant @55%`，用意是"让挖孔那一条看起来像边框"。
+ * 真机上把亮度拉高后它和旁边的底色有色差 —— 半透明色叠在底色上必然偏一档，
+ * 屏幕越亮越明显。现在整条交给外层底色（将来是壁纸）自己透出来，
+ * 像素值与别处完全一致，没有接缝。
+ *
+ * 这里留一段说明而不是留空函数：**别再往挖孔区加任何上色**，
+ * 换壁纸那天一加上去就又成了色差。
+ */
 
 /**
  * 屏保。内容刻意简单：只有时间，且持续漂移。

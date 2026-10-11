@@ -45,4 +45,8 @@ dependencies {
     implementation(project(":feature:media"))
     // 托管页（:hosting）由壳层直接渲染到底栏之上的主区域，所以 :shell 要能看到它。
     implementation(project(":hosting"))
+    // :map 提供地图布局里铺满整屏的那一层（高德 MapView 挂在 Compose 里）。
+    // 它取代了"用 :hosting 的虚拟屏把高德 App 整个搬过来"的旧做法，
+    // :hosting 保留不删（虚拟屏能力本身还有别的用处）。
+    implementation(project(":map"))
 }

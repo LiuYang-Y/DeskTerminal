@@ -48,13 +48,24 @@
         android:supportsRtl="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
+        <!--
+            screenOrientation 用 sensorLandscape 而不是 landscape：
+            两者都只允许横向，但 sensorLandscape 同时接受 90° 与 270° ——
+            也就是**手机倒转 180° 时界面会跟着翻**。桌面终端可能被摆成任意朝向
+            （支架、车机位），而挖孔在哪一侧正是随朝向变的
+            （见 DeskRoot 里读 displayCutout 的那一段）；锁死单一方向会让
+            "倒转后挖孔跑到另一边"这件事根本测不出来。
+
+            注意：注释只能放在标签**外面** —— 塞在属性之间会让 manifest 合并器
+            报 "Error parsing AndroidManifest.xml"，这个坑踩过一次。
+        -->
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboardHidden|uiMode"
             android:exported="true"
             android:launchMode="singleTask"
             android:resizeableActivity="false"
-            android:screenOrientation="landscape">
+            android:screenOrientation="sensorLandscape">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 

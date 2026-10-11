@@ -134,7 +134,7 @@ private fun ProjectionBody(card: HomeCard) {
                     imageVector = Icons.Default.Cast,
                     contentDescription = null,
                     tint = Color.White,
-                    modifier = Modifier.size(DeskDimens.dockIconSize * 1.4f),
+                    modifier = Modifier.size(DeskDimens.cardIconSize * 1.4f),
                 )
                 Text(
                     text = card.title,
@@ -215,7 +215,7 @@ private fun MusicBody(card: HomeCard) {
             imageVector = Icons.Default.MusicNote,
             contentDescription = null,
             tint = Color.White,
-            modifier = Modifier.size(DeskDimens.dockIconSize),
+            modifier = Modifier.size(DeskDimens.cardIconSize),
         )
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
