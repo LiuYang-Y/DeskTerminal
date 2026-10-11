@@ -45,9 +45,12 @@ import com.qingke.desk.core.platform.BurnInGuard
 import com.qingke.desk.core.platform.RemedyIntents
 import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.DeskTheme
+import com.qingke.desk.core.ui.rememberDeskGlassBackdrop
 import com.qingke.desk.feature.media.MediaPermission
 import com.qingke.desk.feature.media.MediaSessionMonitor
 import com.qingke.desk.feature.media.MediaUiState
+import com.qingke.desk.hosting.VdHostController
+import com.qingke.desk.hosting.ui.HostingScreen
 import com.qingke.desk.projection.api.AvailabilityAction
 import com.qingke.desk.projection.api.AvailabilityResult
 import com.qingke.desk.projection.api.ProjectionKind
@@ -62,10 +65,15 @@ private const val SHELL_TAG = "DeskShell"
 enum class DeskScreen {
     HOME,
     PROJECTION,
+    /** 应用托管（:hosting）：把第三方应用画进主区域。 */
+    HOSTING,
 }
 
 /**
- * 壳层根。第一版只有两个屏幕：首页 / 全屏投屏，以及两者之间的切换。
+ * 壳层根。三个屏幕：首页 / 全屏投屏 / 应用托管，以及它们之间的切换。
+ *
+ * 投屏页是**全屏**的（连底栏一起盖掉），托管页**不是** —— 它把画面铺在主区域，
+ * 底栏留在原地，否则把第三方应用铺满之后就没有出口了。
  *
  * 混合形态（投屏 + 侧边图标条）不在本轮范围，等 EMBEDDED_SURFACE 链路
  * 跑通真机后再加 —— 那时只需要改这里的 when 分支，契约不动。
@@ -109,6 +117,15 @@ fun DeskRoot(
     val lifecycleOwner = LocalLifecycleOwner.current
     val appContext = LocalContext.current.applicationContext
     val context = LocalContext.current
+
+    // ---- 应用托管（:hosting）------------------------------------------------
+    //
+    // 控制器只是"到 VdHostService 的把手"，真正的虚拟屏活在那边的 Service 里。
+    // 这里**刻意不在离开托管页时把它关掉**：从地图切到投屏再切回来要能立刻恢复，
+    // 每切一次就重建虚拟屏 + 重新拉起高德是不可接受的（实测一次拉起要 1~2 秒）。
+    // 想彻底收掉用托管页右上角的「退出」。
+    val hostingController = remember(context) { VdHostController(context) }
+
     val screenNow = rememberUpdatedState(screen)
     var awaitingReturn by remember { mutableStateOf(false) }
     var screenOffWhileBackgrounded by remember { mutableStateOf(false) }
@@ -212,6 +229,13 @@ fun DeskRoot(
     )
 
     DeskTheme {
+        // 玻璃背景层必须在"内容区"和"底栏"共同的父层创建：
+        // 它录的是内容、画在底栏上，两头都要用同一个句柄。
+        // ENABLED=false 时它返回 null，两个 Modifier 自动退化为空操作。
+        val glassBackdrop = rememberDeskGlassBackdrop(
+            background = MaterialTheme.colorScheme.background,
+        )
+
         // 外层 Box 负责"铺满全屏并上色"：基准机横屏时左侧有 137px 挖孔，
         // 窗口已经延伸到挖孔下面（见 MainActivity 的 shortEdges 设置），
         // 这里让底色把挖孔区一起画掉，避免出现一条黑带；
@@ -233,42 +257,80 @@ fun DeskRoot(
                     )
                 },
             ) {
-                when (screen) {
-                    DeskScreen.HOME -> HomeScreen(
-                        cards = cards,
-                        driftX = drift.first.dp,
-                        driftY = drift.second.dp,
-                        onDockSelect = { item ->
-                            screen = handleDockSelect(item, orchestrator, onMessage, screen)
-                        },
-                        onCardSelect = { card ->
-                            if (card.kind == HomeCardKind.PROJECTION) {
-                                orchestrator.connect(ProjectionKind.CARPLAY)
-                                screen = DeskScreen.PROJECTION
-                            } else {
-                                onMessage?.invoke("${card.title} 尚未支持点击")
-                            }
-                        },
-                        mediaState = mediaState,
-                        onMediaCommand = mediaMonitor::command,
-                        onMediaRequestPermission = {
-                            MediaPermission.openSettings(context, onFailure = { reason ->
-                                onMessage?.invoke(reason)
-                            })
-                        },
-                    )
+                // 底栏与页面内容放在**同一个 Box**里，而整个 Box 又在 IdleGuard 之内：
+                // 这样屏保能把它一起盖住（原来底栏在 HomeScreen 内部，就是这个效果）。
+                // 反过来说，底栏不能提到 IdleGuard 外面 —— 那样屏保亮着的时候
+                // 底栏还浮在上面可点，用户会在"睡着了"的屏幕上误切页面。
+                Box(modifier = Modifier.fillMaxSize()) {
+                    when (screen) {
+                        DeskScreen.HOME -> HomeScreen(
+                            cards = cards,
+                            driftX = drift.first.dp,
+                            driftY = drift.second.dp,
+                            onDockSelect = { item ->
+                                screen = handleDockSelect(item, orchestrator, onMessage, screen)
+                            },
+                            onCardSelect = { card ->
+                                if (card.kind == HomeCardKind.PROJECTION) {
+                                    orchestrator.connect(ProjectionKind.CARPLAY)
+                                    screen = DeskScreen.PROJECTION
+                                } else {
+                                    onMessage?.invoke("${card.title} 尚未支持点击")
+                                }
+                            },
+                            mediaState = mediaState,
+                            onMediaCommand = mediaMonitor::command,
+                            onMediaRequestPermission = {
+                                MediaPermission.openSettings(context, onFailure = { reason ->
+                                    onMessage?.invoke(reason)
+                                })
+                            },
+                            glassBackdrop = glassBackdrop,
+                        )
 
-                    DeskScreen.PROJECTION -> ProjectionScreen(
-                        uiState = connectionState,
-                        session = session,
-                        displayInfo = displayInfo,
-                        onExit = {
-                            orchestrator.disconnect(StopReason.USER_HOME_GESTURE)
-                            screen = DeskScreen.HOME
-                        },
-                        onRetry = orchestrator::retryNow,
-                        onRemedy = { unavailable -> runRemedy(unavailable, context, onMessage) },
-                    )
+                        DeskScreen.HOSTING -> HostingScreen(
+                            controller = hostingController,
+                            onExitToHome = { screen = DeskScreen.HOME },
+                        )
+
+                        DeskScreen.PROJECTION -> ProjectionScreen(
+                            uiState = connectionState,
+                            session = session,
+                            displayInfo = displayInfo,
+                            onExit = {
+                                orchestrator.disconnect(StopReason.USER_HOME_GESTURE)
+                                screen = DeskScreen.HOME
+                            },
+                            onRetry = orchestrator::retryNow,
+                            onRemedy = { unavailable -> runRemedy(unavailable, context, onMessage) },
+                        )
+                    }
+
+                    // 底栏浮在页面内容之上，首页与托管页共用；投屏页是全屏的，不带底栏。
+                    if (screen != DeskScreen.PROJECTION) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .windowInsetsPadding(WindowInsets.displayCutout),
+                        ) {
+                            DockBar(
+                                items = defaultDockItems(),
+                                selectedId = when (screen) {
+                                    DeskScreen.HOME -> DockIds.HOME
+                                    DeskScreen.HOSTING -> DockIds.HOSTING
+                                    DeskScreen.PROJECTION -> DockIds.PROJECTION
+                                },
+                                onSelect = { item ->
+                                    screen = handleDockSelect(item, orchestrator, onMessage, screen)
+                                },
+                                // 托管页背后是 SurfaceView —— 它走独立图层，Compose 的
+                                // 背景层采不到它的内容（会录成一片黑）。这时候给底栏玻璃
+                                // 只会得到一条发黑的条子，所以托管页直接关掉玻璃。
+                                glassBackdrop =
+                                    if (screen == DeskScreen.HOME) glassBackdrop else null,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -349,6 +411,11 @@ private fun handleDockSelect(
         }
         DeskScreen.HOME
     }
+
+    // 虚拟屏由 Service 持有，所以"切到托管页"只是把画面重新挂上来，
+    // 不需要在这里做任何启动动作 —— 挂 Surface 的动作在 HostingScreen 里。
+    // 反过来，从托管页切走也**不关掉**托管：切到投屏再切回来要能立刻恢复。
+    DockIds.HOSTING -> DeskScreen.HOSTING
 
     DockIds.PROJECTION -> {
         orchestrator.connect(ProjectionKind.CARPLAY)

@@ -43,4 +43,6 @@ dependencies {
     implementation(project(":projection:api"))
     implementation(project(":feature:home"))
     implementation(project(":feature:media"))
+    // 托管页（:hosting）由壳层直接渲染到底栏之上的主区域，所以 :shell 要能看到它。
+    implementation(project(":hosting"))
 }

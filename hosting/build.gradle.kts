@@ -19,8 +19,11 @@ android {
     buildFeatures {
         compose = true
         // User Service 走 AIDL 接口：app 进程与 Shizuku 起的服务进程之间
-        // 靠它传 Surface、displayId 和触摸事件。
+        // 靠它传命令行与执行结果。
         aidl = true
+        // 只为 HostLog 服务：它要在 debug 构建里把日志写进外部私有目录。
+        // 发布构建里 BuildConfig.DEBUG 恒为 false，那条分支会被整段剔除。
+        buildConfig = true
     }
 }
 

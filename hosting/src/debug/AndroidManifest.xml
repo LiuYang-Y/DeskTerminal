@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  仅 debug 变体：托管提示页的预览入口。
+
+  为什么要单独做一个：这四种"被挡住"的状态里，有两种在真机上**没法安全地造出来** ——
+  "未运行"需要把 Shizuku 服务停掉（这台设备没有 adb 启动脚本，停了就起不来了），
+  "未授权"需要撤销授权。预览页让这些页面可以直接被截图验收，
+  而且它复用 [com.qingke.desk.hosting.ui.BlockedNotice] 这份真代码，不是另写一份。
+
+  release 构建不会包含本文件与对应 Activity。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+
+        <activity
+            android:name=".debug.NoticePreviewActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboardHidden|uiMode"
+            android:exported="true"
+            android:label="托管提示页预览"
+            android:screenOrientation="landscape" />
+
+    </application>
+
+</manifest>

@@ -2,6 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
+     前台服务：虚拟屏必须活在一个不受 Activity 重建影响的持有者里，所以放 Service。
+     选 specialUse 是因为标准类型（mediaPlayback / connectedDevice / dataSync 等）
+     没有一个对得上"把第三方应用画进自己的界面"这件事；Android 14+ 必须声明 subtype，
+     否则 startForeground 直接被拒。
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!--
      托管第三方应用需要的包可见性。
      targetSdk >= 30 上没有这段，PackageManager 查不到高德，
      会把"已安装"误判成"未安装"（:projection 那边为 DiPlay 踩过同一个坑）。
@@ -9,7 +18,7 @@
     -->
     <queries>
         <package android:name="com.autonavi.minimap" />
-        <!-- Shizuku 客户端要能查到 Shizuku 自身 -->
+        <!-- Shizuku 客户端要能查到 Shizuku 自身，用来区分"没装"和"没运行" -->
         <package android:name="moe.shizuku.privileged.api" />
     </queries>
 
@@ -30,16 +39,17 @@
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
         <!--
-         Q1 的实验探针：验证"普通应用能否创建承载第三方窗口的虚拟屏"。
-         它只是一个带 logcat 输出的空 Activity，实验做完会删掉。
+         虚拟屏持有者。不导出：它只服务本应用，Surface 也只能由本进程传进来。
         -->
-        <activity
-            android:name=".probe.VdProbeActivity"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboardHidden|uiMode"
-            android:excludeFromRecents="true"
-            android:exported="true"
-            android:label="VD Probe"
-            android:screenOrientation="landscape" />
+        <service
+            android:name=".VdHostService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="在自建虚拟屏上托管第三方应用，把它的画面画进本应用主界面" />
+        </service>
 
     </application>
 
