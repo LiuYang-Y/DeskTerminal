@@ -81,6 +81,10 @@ dependencies {
     // LocalLifecycleOwner：把 MapView 的生命周期接到宿主上
     implementation(libs.androidx.lifecycle.runtime.compose)
 
+    // 昼夜判定（白天/夜间地图样式）。它自己不联网，
+    // 但留了"天气 API 的 sunrise/sunset 注入后优先"这条路。
+    implementation(project(":core:platform"))
+
     // 高德地图 SDK。
     //
     // 坐标与版本已核实（2026-10-11 查 Maven Central 与官方文档）：

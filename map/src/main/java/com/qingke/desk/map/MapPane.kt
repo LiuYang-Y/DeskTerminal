@@ -21,6 +21,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,7 +33,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.qingke.desk.core.platform.Daylight
 import com.qingke.desk.map.BuildConfig
+import kotlinx.coroutines.delay
 
 /**
  * 地图面板 + 隐私闸门。
@@ -42,17 +46,21 @@ import com.qingke.desk.map.BuildConfig
  * 拒绝的后果要说清楚：不同意也能继续用桌面终端的其它部分，只是这块位置没有地图。
  * 不写"不同意就退出" —— 那是在绑架用户，而且本项目也没有那个动机。
  *
+ * @param style 地图样式。**null（默认）= 日出日落自动切换**：白天 NORMAL、夜里 NIGHT。
+ *              传具体样式则不自动切换（给调试预览页用）。
  * @param onConsentChanged 可选回调，让外层知道当前能不能显示地图（用于排布局）。
  */
 @Composable
 fun MapPane(
     modifier: Modifier = Modifier,
-    style: AMapStyle = AMapStyle.NORMAL,
+    style: AMapStyle? = null,
     showMyLocation: Boolean = true,
     onConsentChanged: ((Boolean) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     var agreed by remember { mutableStateOf(AMapPrivacy.isAgreed(context)) }
+
+    val effectiveStyle = style ?: rememberAutoMapStyle()
 
     // Key 没配就别去构造 MapView：高德会返回 INVALID_USER_KEY，
     // 表现出来的就是一块白屏加一条只在 logcat 里的错误 —— 而本机 adb logcat 恒为空，
@@ -68,7 +76,7 @@ fun MapPane(
     if (agreed) {
         AMapCanvas(
             modifier = modifier,
-            style = style,
+            style = effectiveStyle,
             showMyLocation = showMyLocation,
         )
         return
@@ -88,6 +96,49 @@ fun MapPane(
         },
     )
 }
+
+/**
+ * 按日出日落选地图样式，并在翻转时刻自动更新。
+ *
+ * 为什么不做每分钟轮询：这台设备是 24 小时常亮的，而夜间↔白天一天只翻两次，
+ * 所以协程直接睡到下一个翻转点（日出或日落），醒了再重新判定。
+ * 只有结论真的变了才写 state —— 换一次 mapType 整层地图要重画，白翻一次很显眼。
+ *
+ * 天气 API 后来注入的 sunrise/sunset 会替换本地算出来的值（见 [Daylight.publish]），
+ * 所以把 [Daylight.external] 当作 key：数据一到，协程重启，底色立刻跟着换。
+ */
+@Composable
+private fun rememberAutoMapStyle(): AMapStyle {
+    val external by Daylight.external.collectAsState()
+    var style by remember { mutableStateOf(mapStyleForDaylight()) }
+
+    LaunchedEffect(external) {
+        // 每次进来先报一句当前判定（含日出日落与下一次翻转还要多久），
+        // 这样在真机上不用猜"为什么是这个底色"。
+        MapLog.i(
+            "daylight now: ${style.name} ${Daylight.sunTimes()}, " +
+                "next switch in ${Daylight.millisUntilNextSwitch() / 60_000} min",
+        )
+        while (true) {
+            val wanted = mapStyleForDaylight()
+            if (wanted != style) {
+                style = wanted
+                val times = Daylight.sunTimes()
+                MapLog.i(
+                    "daylight -> ${wanted.name} " +
+                        "(sunrise=${times.sunriseMinuteOfDay} sunset=${times.sunsetMinuteOfDay})",
+                )
+            }
+            delay(Daylight.millisUntilNextSwitch())
+        }
+    }
+
+    return style
+}
+
+/** 昼夜结论 → 具体地图样式。这张映射放在 :map 里，[Daylight] 只管日夜、不管地图。 */
+private fun mapStyleForDaylight(): AMapStyle =
+    if (Daylight.isDaylight()) AMapStyle.NORMAL else AMapStyle.NIGHT
 
 /**
  * 隐私说明卡。

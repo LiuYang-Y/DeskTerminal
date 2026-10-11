@@ -10,6 +10,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import com.qingke.desk.core.platform.Daylight
 import com.qingke.desk.map.AMapStyle
 import com.qingke.desk.map.MapLog
 import com.qingke.desk.map.MapPane
@@ -29,7 +30,10 @@ class MapPreviewActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // null = 按日出日落自动（MapPane 的默认行为）。探针页要的是"钉死某一套"，
+        // 所以这里默认 NORMAL，只有显式 --es style auto 才走自动那条路。
         val style = when (intent.getStringExtra(EXTRA_STYLE)) {
+            "auto" -> null
             "night" -> AMapStyle.NIGHT
             "satellite" -> AMapStyle.SATELLITE
             else -> AMapStyle.NORMAL
@@ -41,7 +45,17 @@ class MapPreviewActivity : ComponentActivity() {
             MapLog.i("probe: privacy reset to declined")
         }
 
-        MapLog.i("probe: start style=${style.name}")
+        MapLog.i("probe: start style=${style?.name ?: "auto (by sunrise/sunset)"}")
+
+        // 外部注入日出日落 —— 提前把"以后接天气 API"那条路铺好，也方便当场调自动化：
+        //   adb shell am start ... --es style auto --es sunrise 06:20 --es sunset 17:40
+        // 把 sunset 设成"两分钟后"就能不等天黑看到自动翻转。
+        val sunrise = intent.getStringExtra(EXTRA_SUNRISE)
+        val sunset = intent.getStringExtra(EXTRA_SUNSET)
+        if (sunrise != null && sunset != null) {
+            Daylight.publish(sunriseClock = sunrise, sunsetClock = sunset)
+            MapLog.i("probe: external daylight $sunrise / $sunset")
+        }
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -62,6 +76,8 @@ class MapPreviewActivity : ComponentActivity() {
 
     private companion object {
         const val EXTRA_STYLE = "style"
+        const val EXTRA_SUNRISE = "sunrise"
+        const val EXTRA_SUNSET = "sunset"
         const val EXTRA_RESET_PRIVACY = "resetprivacy"
     }
 }
