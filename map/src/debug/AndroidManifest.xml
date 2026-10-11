@@ -17,6 +17,17 @@
             android:exported="true"
             android:label="MapProbe"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density" />
+
+        <!--
+         导航探针页。与 MapProbe 同款定位：只在 debug 变体存在，只回答一个问题
+         ——"这把 Key 有没有导航权限"。界面刻意做得很糙（纯文本滚动），
+         因为它不是给人用的，是给结论用的。
+        -->
+        <activity
+            android:name="com.qingke.desk.map.debug.NaviProbeActivity"
+            android:exported="true"
+            android:label="NaviProbe"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density" />
     </application>
 
 </manifest>
