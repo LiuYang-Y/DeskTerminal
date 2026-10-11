@@ -40,6 +40,14 @@ android {
 
         // 高德 SDK 只提供 armeabi-v7a / arm64-v8a 两个 ABI 的 so，
         // 不裁的话合并阶段会因为缺 x86 变体报错（模拟器上跑不了，真机没问题）。
+        //
+        // 换导航合包后这两个 ABI 的体积差被拉得很大，值得记一笔：
+        //   libAMapSDK_NAVI_v11_3_100.so  arm64-v8a 约 68 MB / armeabi-v7a 约 47 MB，
+        // 外加语音包（libnui / libneonui_shared）与 openssl。两个 ABI 全留 = APK 里
+        // 装着近 130 MB 的 so，而基准机 PKR110 是 arm64。
+        // 这里**先不动**：当前阶段的目标是"换包后行为不变"，裁剪 ABI 属于另一个
+        // 独立变更（要么只留 arm64-v8a，要么交给 App Bundle 按 ABI 拆包），
+        // 混在一起会让"回归通过/不通过"的结论说不清。
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
@@ -85,19 +93,24 @@ dependencies {
     // 但留了"天气 API 的 sunrise/sunset 注入后优先"这条路。
     implementation(project(":core:platform"))
 
-    // 高德地图 SDK。
+    // 高德 SDK —— **导航合包**（2026-10-12 由纯地图包整体替换而来）。
     //
-    // 坐标与版本已核实（2026-10-11 查 Maven Central 与官方文档）：
-    //   · 官方 Android Studio 配置文档给的写法是
-    //       implementation 'com.amap.api:3dmap-location-search:latest.integration'
-    //     并明确"3D地图 so 及 jar 已经包含定位和搜索功能，无需单独引用"。
-    //   · Maven Central 上这个 artifact 的最新固定版本是
-    //       10.1.300_loc6.4.9_sea9.7.4（10.1.300 地图 / 6.4.9 定位 / 9.7.4 搜索，
-    //       发布于 2025-05-26），共 7 个版本。
-    //   · 注意官方"相关下载"页（2026-09-24 更新）列的是 3D地图 V11.3.100，
-    //     那是**离线 SDK 包**的版本号，Maven 上并没有 11.x。要用 11.x 只能下 zip
-    //     手动放进 libs；这里仍然选 Maven 版，理由是可复现、不需要往仓库里塞二进制。
-    //   · 这个 artifact 是 jar 不是 aar：so 在 lib/<abi>/、地图资源在 assets/map_assets/、
-    //     classes 在 com/ 下。已解压确认（.verify/amap/），合并进 APK 的情况在构建后另验。
-    implementation(libs.amap.map)
+    // 换包原因：要接导航，而导航 SDK 自带 3D 地图 SDK，与 3dmap-location-search
+    // 同时引入会 duplicate class。官方"相关下载"页原文把导航包列为
+    // 「定位 + 3D地图 + 导航 + 搜索」，所以这是**整体替换**，不是新增。
+    //
+    // 已核实（2026-10-12 查 repo1.maven.org 的 maven-metadata.xml）：
+    //   com.amap.api:navi-3dmap-location-search
+    //   11.3.100_3dmap11.3.100_loc11.3.000_sea9.8.1（2026-09-23 发布，共 14 个版本）
+    //   命名 = 导航版本_3dmap地图版本_loc定位版本_sea搜索版本。
+    //   packaging = jar，so 在 lib/<abi>/、地图资源在 assets/map_assets/、
+    //   classes 在 com/ 下（已解压确认，见 .verify/navi/）。
+    //
+    // 对上层**零改动**是这次换包能这么快的前提：合包里
+    //   · com/amap/api/maps/** 仍在（AMap / MapView / MapsInitializer 都在），
+    //     所以 AMapCanvas 的地图代码与 AMapPrivacy 的合规闸门一行没改；
+    //   · com/amap/api/navi/** 是新增能力，还没被任何代码引用。
+    // 换包后真机回归结论（地图显示 / 隐私同意与撤回 / 日夜切换 / 浮层展开收起 /
+    // 侧栏左右切换）见本次提交说明与 .verify/navi-regress/。
+    implementation(libs.amap.navi)
 }

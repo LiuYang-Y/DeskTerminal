@@ -25,13 +25,27 @@ backdrop = "2.0.0"
 # 已核实（2026-10-11 查 repo1.maven.org/maven2 metadata）：dev.rikka.shizuku:{api,provider} 最新为 13.1.5
 shizuku = "13.1.5"
 
-# 已核实（2026-10-11 查 Maven Central 与官方文档）：
-# com.amap.api:3dmap-location-search 最新固定版本 10.1.300_loc6.4.9_sea9.7.4
-# （地图 10.1.300 / 定位 6.4.9 / 搜索 9.7.4，2025-05-26 发布，共 7 个版本）。
-# 注意官方"相关下载"页（2026-09-24 更新）写的是 3D地图 V11.3.100 —— 那是**离线
-# SDK 包**的版本号，Maven 上并没有 11.x；要用 11.x 只能下 zip 手动放进 libs。
-# 取舍与理由写在 map/build.gradle.kts 里。
-amap = "10.1.300_loc6.4.9_sea9.7.4"
+# 高德 —— **导航合包**，已整体替换掉原来的纯地图包（2026-10-12）。
+#
+# 为什么必须整体换、不能并存：导航 SDK 自带 3D 地图 SDK（官方"相关下载"页原文列明
+# 导航包 = 定位 + 3D地图 + 导航 + 搜索），与 3dmap-location-search 同时引入会
+# duplicate class（两个包都带 com.amap.api.maps.**）。
+#
+# 已核实（2026-10-12 查 repo1.maven.org/maven2/com/amap/api/ 的 maven-metadata.xml）：
+#   com.amap.api:navi-3dmap-location-search
+#   最新版 11.3.100_3dmap11.3.100_loc11.3.000_sea9.8.1，2026-09-23 发布，共 14 个版本。
+#   命名规则 = 导航版本_3dmap地图版本_loc定位版本_sea搜索版本。
+#   packaging 是 jar（与旧包同形）：so 在 lib/<abi>/、资源在 assets/map_assets/。
+#   已解压确认（.verify/navi/）：
+#     · com/amap/api/navi      468 个 class（含 AmapNaviPage / AMapNaviView / NaviSetting）
+#     · com/amap/api/maps      279 个 class（AMap / MapView / MapsInitializer 都在，
+#                              所以 :map 现有的地图代码与隐私闸门无需改动）
+#     · com/amap/api/location / services（定位 + 搜索）
+#     · lib/arm64-v8a 与 lib/armeabi-v7a 各 7 个 so
+#
+# 旧坐标 10.1.300_loc6.4.9_sea9.7.4 已不再使用（保留在此仅作对照，不要再引用）。
+# 换包后的回归验证结论见 map/build.gradle.kts 与 README。
+amap = "11.3.100_3dmap11.3.100_loc11.3.000_sea9.8.1"
 
 # TODO(step-2): 以下依赖版本尚未核实，首次 sync 时按 IDE 提示补全后再写入
 # room-runtime + room-ktx + ksp（:core:data 持久化）
@@ -60,7 +74,8 @@ kyant-backdrop = { group = "io.github.kyant0", name = "backdrop", version.ref = 
 rikka-shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
 rikka-shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
 
-amap-map = { group = "com.amap.api", name = "3dmap-location-search", version.ref = "amap" }
+# 导航合包 = 导航 + 3D地图 + 定位 + 搜索（四个能力一个 jar，不能与纯地图包并存）。
+amap-navi = { group = "com.amap.api", name = "navi-3dmap-location-search", version.ref = "amap" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

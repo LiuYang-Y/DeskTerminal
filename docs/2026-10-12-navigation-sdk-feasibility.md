@@ -49,9 +49,39 @@
 ### 2.2 版本与 32 位
 
 - 官方下载页：**Android 导航 SDK V11.2.000 起不支持 32 位**。
-- Maven 上 `com.amap.api` 系列目前查到的固定版本仍是 `10.1.300` 档（无 11.x），
-  要用 11.x 只能下官方 zip 手动放进 `libs` —— 这与当初选 Maven 的理由（可复现、不往仓库塞二进制）冲突，
-  需要重新取舍。导航在 Maven 上的确切坐标与版本**我尚未核实**，列在"待确认"里。
+- Maven Central 上 `com.amap.api` 系列现在**有** 11.x 了（2026-10-12 复核）：
+  `navi-3dmap-location-search` 的最新版是
+  `11.3.100_3dmap11.3.100_loc11.3.000_sea9.8.1`（2026-09-23 发布，共 14 个版本）。
+  本文 2.1 引用下载页时说"11.x 只能下官方 zip" —— **那句只对离线包成立**，
+  Maven 上这条 11.x 已经发布了，已改用 Maven 版（可复现、不必往仓库塞二进制）。
+- **"不支持 32 位"与 Maven 包的实际情况不一致，据实记录**：
+  已下载该 jar 解压核对（`.verify/navi/navi.jar`，106 MB），
+  `lib/armeabi-v7a/` 里**确实有** 7 个 so（含 `libAMapSDK_NAVI_v11_3_100.so` 47 MB），
+  `lib/arm64-v8a/` 同样 7 个（同名 so 68 MB）。
+  所以"V11.2.000 起不支持 32 位"应当理解为**官方对 support/质量的口径**
+  （32 位不再保证），而不是"包里没有 32 位产物"。本模块两个 ABI 都保留，
+  没有因为这句去裁掉 v7a —— 那是一次独立变更，不该混在"换包回归"里。
+
+### 2.2b 合包实际内容（已解压核对，不是推测）
+
+`navi-3dmap-location-search:11.3.100_...` 是个 jar（与旧包同形：so 在 `lib/<abi>/`、
+地图资源在 `assets/map_assets/`、classes 在 `com/` 下），共 5931 个条目：
+
+| 包 | class 数 | 说明 |
+|---|---|---|
+| `com/amap/api/col` | 1080 | 高德内部实现 |
+| `com/amap/api/navi` | 468 | 导航。含 `AmapNaviPage` / `AMapNaviView` / `AMapNavi` / `NaviSetting` |
+| `com/amap/api/services` | 368 | 搜索 |
+| `com/amap/api/maps` | 279 | 3D 地图。`AMap` / `MapView` / `MapsInitializer` 都在 |
+| `com/amap/api/location` | 26 | 定位 |
+
+**这条解释了为什么换包能"零改上层代码"**：`:map` 现在用的
+`com.amap.api.maps.*`（AMapCanvas）与 `MapsInitializer`（AMapPrivacy）
+在合包里同名同包仍在，所以换包只动了 Gradle 坐标。
+
+**类名勘误**：导航组件的类名是 **`com.amap.api.navi.AmapNaviPage`**
+（`Amap`，不是 `AMap`）。网上大量文章写 `AMapNaviPage`，在 11.3.100 这个包里
+不存在；写错的表现是编译期 `Unresolved reference`。
 
 ### 2.3 Key
 
@@ -62,6 +92,27 @@
 同页两条注意事项：
 - "1 个 KEY 只能用于一个应用（多渠道安装包属于多个应用），1 个 Key 在多个应用上使用会出现服务调用失败。"
 - package 必须与 `applicationId` 完全一致，否则 `INVALID_USER_SCODE`（我们踩过这个坑）。
+
+**待实测（用户 2026-10-12 的决定）**：官方文档没写"导航要不要在控制台单独开通"，
+用户决定**不猜**，改为在真机上直接跑一次路线规划：如果 Key 没开通导航服务，
+SDK 会返回一个明确的错误码/文案（而不是静默失败），把原文交给用户去控制台处理。
+这一步安排在第 4 阶段（Step 4）执行。
+
+### 2.3b 个人及设备信息采集开关（README 的"如何关闭"要用）
+
+官方同页还有一节"个人及设备信息采集设置"，原文：
+
+```java
+/**
+ * 基础库设置是否允许采集个人及设备信息
+ * @param collectEnable: true 允许采集 false 不允许采集
+ */
+AMapUtilCoreApi.setCollectInfoEnable(boolean collectEnable);
+```
+
+这是高德给的一个**总开关**，与上一节"撤回隐私同意"是两件事：撤回同意是不让 SDK 跑，
+`setCollectInfoEnable(false)` 是继续用但不上报个人信息。README 的隐私章节应当把它补进去
+—— 目前 README 只写了"撤回同意"这一条路径，不够完整。
 
 ### 2.4 权限（官方原文清单）
 
@@ -172,7 +223,17 @@ if (mAMapNavi != null) { /* TODO */ }                  // 并做空判断
 
 ## 五、明确尚未核实的东西（不猜）
 
-- 导航合包在 Maven Central 上的确切坐标与最新版本号（官方下载页只给 zip）。
+**已经核实、移出本清单的**（2026-10-12）：
+
+- ~~导航合包在 Maven Central 上的确切坐标与最新版本号~~ → 已核实，见 2.2 / 2.2b。
+- ~~11.x 导航包是不是只有 64 位~~ → 已解压确认两个 ABI 都在，见 2.2。
+
+**仍未核实的**：
+
 - 导航是否需要在控制台单独开通、是否限企业认证（公开文档未写）。
-- 11.x 导航包在我们这台机器（Android 16 / 64 位）上的实际运行表现。
+  → 改为在真机上跑一次路线规划，用 SDK 返回的错误原文回答（Step 4）。
+- 11.x 导航包在我们这台机器（Android 16 / arm64）上的**实际运行表现**
+  （换包后的地图回归已验证；导航本身要等 Step 4）。
 - 导航过程的流量/配额消耗量级（关系到是否需要商用授权）。
+- 语音播报在这台机器上是否真的出声（导航组件默认朗读，但设备音量/音频通道
+  都可能影响）—— Step 4 一并验。
