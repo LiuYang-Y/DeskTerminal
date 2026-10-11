@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+     只有 debug 变体才注册的地图探针页。
+
+     用途：首页怎么摆地图还没定（见布局草案），但"SDK 能不能出图、触摸能不能拖动缩放、
+     息屏回来还在不在"这些跟摆放无关，可以先单独验一遍。
+     正式构建里这个文件不参与合并（src/debug 只在 debug 变体生效）。
+
+     用法见 MapPreviewActivity 的类注释（那里能写命令行参数，
+     XML 注释里不允许出现连续的两个连字符，写不下去）。
+    -->
+    <application>
+        <activity
+            android:name="com.qingke.desk.map.debug.MapPreviewActivity"
+            android:exported="true"
+            android:label="MapProbe"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density" />
+    </application>
+
+</manifest>

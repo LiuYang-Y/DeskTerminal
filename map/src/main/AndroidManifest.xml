@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+     权限按高德官方《开发注意事项》的地图 SDK + 定位 SDK 清单声明。
+     注意：这里只**声明**，运行时权限（位置）仍要在用之前向用户申请 ——
+     Android 6.0 起声明不等于拿到。
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- 定位小蓝点：粗略 + 精确都要，只给粗略时高德会退化到基站定位 -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- 卫星定位加速（A-GPS） -->
+    <uses-permission android:name="android.permission.ACCESS_LOCATION_EXTRA_COMMANDS" />
+    <!-- 官方列为"用于问题排查"的可选权限，不声明也能跑；这里不声明显式写出来，
+         避免为了一个可选权限在商店审核时多一条解释。 -->
+
+    <application>
+
+        <!--
+         Key 从 local.properties 经 manifestPlaceholders 注入（见 build.gradle.kts）。
+         这里**不写任何明文 Key**，仓库里也就不会有。
+        -->
+        <meta-data
+            android:name="com.amap.api.v2.apikey"
+            android:value="${amapApiKey}" />
+
+        <!-- 定位 SDK 要求的常驻服务。缺了它只有地图能显示、定位永远拿不到结果。 -->
+        <service android:name="com.amap.api.location.APSService" />
+
+    </application>
+
+</manifest>

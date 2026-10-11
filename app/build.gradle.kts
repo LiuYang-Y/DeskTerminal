@@ -51,4 +51,7 @@ dependencies {
     implementation(project(":core:common"))
     implementation(project(":projection:auto"))
     implementation(project(":hosting"))
+    // 高德地图 SDK 的封装。**只提供地图画面**，摆在哪里由 :shell 决定 ——
+    // 见 map/README 式的说明在各文件头注释里（尤其是 AMapCanvas 的三条约束）。
+    implementation(project(":map"))
 }

@@ -25,6 +25,14 @@ backdrop = "2.0.0"
 # 已核实（2026-10-11 查 repo1.maven.org/maven2 metadata）：dev.rikka.shizuku:{api,provider} 最新为 13.1.5
 shizuku = "13.1.5"
 
+# 已核实（2026-10-11 查 Maven Central 与官方文档）：
+# com.amap.api:3dmap-location-search 最新固定版本 10.1.300_loc6.4.9_sea9.7.4
+# （地图 10.1.300 / 定位 6.4.9 / 搜索 9.7.4，2025-05-26 发布，共 7 个版本）。
+# 注意官方"相关下载"页（2026-09-24 更新）写的是 3D地图 V11.3.100 —— 那是**离线
+# SDK 包**的版本号，Maven 上并没有 11.x；要用 11.x 只能下 zip 手动放进 libs。
+# 取舍与理由写在 map/build.gradle.kts 里。
+amap = "10.1.300_loc6.4.9_sea9.7.4"
+
 # TODO(step-2): 以下依赖版本尚未核实，首次 sync 时按 IDE 提示补全后再写入
 # room-runtime + room-ktx + ksp（:core:data 持久化）
 # media3-exoplayer（:feature:music）
@@ -51,6 +59,8 @@ kyant-backdrop = { group = "io.github.kyant0", name = "backdrop", version.ref = 
 
 rikka-shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
 rikka-shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
+
+amap-map = { group = "com.amap.api", name = "3dmap-location-search", version.ref = "amap" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

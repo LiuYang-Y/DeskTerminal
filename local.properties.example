@@ -1,2 +1,18 @@
 # Android SDK 路径。本机当前未安装 SDK，请填入你机器上的实际路径。
 sdk.dir=
+
+# 高德地图 Key（Android 平台 SDK）。
+#
+# 申请：https://lbs.amap.com/dev/key/app → 创建应用 → 添加 Key
+#   · 服务平台选「Android 平台 SDK」
+#   · Package name 填 com.qingke.desk（必须与 app 的 applicationId 完全一致，
+#     不一致时高德返回 INVALID_USER_SCODE）
+#   · 调试版安全码 SHA1：用下面这条命令拿
+#       keytool -list -v -keystore ~/.android/debug.keystore \
+#               -alias androiddebugkey -storepass android
+#   · 发布版安全码 SHA1：换成自己的 release keystore 再跑一遍
+#
+# 一个 Key 只能绑一个应用；调试版与发布版是两个 SHA1，但可以填在同一个 Key 里。
+# 本文件已加入 .gitignore，Key 不会入库。缺这一项时编译仍然通过，
+# 但地图会白屏（构建时会有 warn 提示）。
+amap.api.key=

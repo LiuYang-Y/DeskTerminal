@@ -36,5 +36,6 @@ include(
     ":projection:auto",
     ":feature:home",
     ":feature:media",
-    ":hosting"
+    ":hosting",
+    ":map"
 )
