@@ -31,6 +31,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.qingke.desk.map.BuildConfig
 
 /**
  * 地图面板 + 隐私闸门。
@@ -52,6 +53,17 @@ fun MapPane(
 ) {
     val context = LocalContext.current
     var agreed by remember { mutableStateOf(AMapPrivacy.isAgreed(context)) }
+
+    // Key 没配就别去构造 MapView：高德会返回 INVALID_USER_KEY，
+    // 表现出来的就是一块白屏加一条只在 logcat 里的错误 —— 而本机 adb logcat 恒为空，
+    // 等于没有任何线索。**把原因直接画在屏幕上**比什么都强。
+    if (BuildConfig.AMAP_API_KEY.isBlank()) {
+        AMapPlaceholder(
+            modifier = modifier,
+            text = "地图未配置 Key：在 local.properties 里填 amap.api.key 后重新编译",
+        )
+        return
+    }
 
     if (agreed) {
         AMapCanvas(

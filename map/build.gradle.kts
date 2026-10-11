@@ -45,6 +45,12 @@ android {
         }
 
         manifestPlaceholders["amapApiKey"] = amapApiKey
+
+        // 同一个值再导出一份到 BuildConfig：运行时要用它判断"Key 到底配没配"。
+        // 没配的时候与其让用户盯着一块白屏猜，不如直接把原因写在地图上。
+        // 值本身不是秘密（它会随 APK 一起发出去），秘密是"绑定关系"，
+        // 而绑定关系由包名 + SHA1 决定，不在这个字符串里。
+        buildConfigField("String", "AMAP_API_KEY", "\"${amapApiKey.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
     }
 
     compileOptions {
