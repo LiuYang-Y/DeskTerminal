@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+     通知使用权（NotificationListenerService）是第三方 App 读取第三方播放器
+     MediaSession 的**唯一公开途径**：
+
+       MediaSessionManager.getActiveSessions() 要求调用方满足二选一 ——
+         1. 持有 android.permission.MEDIA_CONTENT_CONTROL（signature 级，第三方永远拿不到）；
+         2. 是一个"已启用"的 NotificationListenerService，并把该组件的 ComponentName 传进去。
+
+     所以这里必须声明这个 Service。它被系统绑定后，我们才有资格取会话列表。
+     授权**不能由 App 自己开**，只能跳到 Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS 由用户勾选。
+
+     隐私说明：一旦被授权，系统会推送这台设备的**全部通知**给本 Service，
+     不限于媒体类。但本 Service 不实现任何 onNotificationPosted 逻辑 ——
+     它只作为一个"已启用"的凭证存在，真正的取数走 MediaSessionManager。
+    -->
+    <application>
+        <service
+            android:name=".MediaNotificationListener"
+            android:exported="true"
+            android:label="@string/media_listener_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+    </application>
+
+</manifest>

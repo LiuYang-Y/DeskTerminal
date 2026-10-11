@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 网络：天气 / 智能家居 / 投屏发现（同 LAN） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+     投屏链路要"连自己的 Wi-Fi 节点"，但本应用**只读** Wi-Fi 状态，从不改开关：
+     开不开 Wi-Fi 是用户的决定（见 WifiGate / 提示页的"去开启"按钮）。
+     所以这里刻意声明 ACCESS_WIFI_STATE（读取，安装即授权），不保留 CHANGE_WIFI_STATE ——
+     留着只会误导后来的人以为可以偷偷替用户打开,而那在系统限制下也调不动。
+    -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+
+    <!-- 投屏：蓝牙引导链路；Android 12+ 不再需要定位权限 -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- 常亮 / 后台保活 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <!-- 通知（连接状态） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 本地音乐（:feature:music）Android 13+ -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <!--
+     包可见性声明。没有这一段，targetSdk >= 30 上 PackageManager 查不到 DiPlay，
+     checkAvailability() 会把"已安装"误判成"未安装"（实测必踩）。
+     这里只放行阶段一依赖的那一个包，不用 QUERY_ALL_PACKAGES 那种宽口径。
+    -->
+    <queries>
+        <package android:name="com.shihab.diplay" />
+    </queries>
+
+    <application
+        android:name=".DeskApplication"
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:supportsRtl="false"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboardHidden|uiMode"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="false"
+            android:screenOrientation="landscape">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- TODO(step-2): :connection 的前台保活 Service 到位后在此声明 -->
+    </application>
+
+</manifest>
