@@ -58,7 +58,10 @@ fun MapPane(
     onConsentChanged: ((Boolean) -> Unit)? = null,
 ) {
     val context = LocalContext.current
-    var agreed by remember { mutableStateOf(AMapPrivacy.isAgreed(context)) }
+    // 同意状态走 AMapPrivacy 的流，而不是本地的 remember：
+    // 用户可能在设置浮层里撤回同意，这边必须**立刻**把地图摘掉（见 AMapPrivacy.agreed）。
+    val agreed by AMapPrivacy.agreed.collectAsState()
+    LaunchedEffect(Unit) { AMapPrivacy.syncState(context) }
 
     val effectiveStyle = style ?: rememberAutoMapStyle()
 
@@ -87,7 +90,6 @@ fun MapPane(
         onAgree = {
             AMapPrivacy.agree(context)
             MapLog.i("privacy agreed at ${AMapPrivacy.agreedAt(context)}")
-            agreed = true
             onConsentChanged?.invoke(true)
         },
         onDecline = {

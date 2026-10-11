@@ -84,6 +84,31 @@ object DeskDimens {
     val statusChipTopPadding: Dp = 12.dp
     val statusChipSidePadding: Dp = 12.dp
 
+    /** 右上角悬浮区里，设置按钮与 Shizuku 角标之间的间距。 */
+    val statusChipGap: Dp = 8.dp
+
+    /**
+     * 设置浮层宽度。794 dp 宽的屏幕取 380 —— 接近半屏，但**不会碰到侧栏**
+     * （侧栏 76 + 挖孔 40 + 两侧留白，浮层从另一边算起还有约 440 dp 的余量），
+     * 所以"切到左侧/右侧"这两个按钮在浮层里始终是完整可见的。
+     */
+    val settingsPaneWidth: Dp = 380.dp
+
+    /**
+     * 设置齿轮的边长。40 dp 与状态角标的高度 28 dp 拉开差距：
+     * 常驻的入口比"只在异常时出现"的角标大一圈，手指不用在两者之间犹豫。
+     */
+    val settingsChipSize: Dp = 40.dp
+
+    /** 浮层里按钮 / 开关的统一高度，保证与卡片一样一次点中。 */
+    val settingsControlHeight: Dp = 40.dp
+
+    /** 浮层内边距。比常规卡片的 18 dp 小一档，为的是横屏 361 dp 里装得下三项设置。 */
+    val settingsPanePadding: Dp = 14.dp
+
+    /** 浮层里各设置项之间的间距。 */
+    val settingsItemGap: Dp = 10.dp
+
     // ---------- 地图布局（方案 C：地图铺满，卡片浮层压在一侧）----------
 
     /**
@@ -234,16 +259,12 @@ object DeskDimens {
     /** 时钟等固定元素的最大漂移半径。 */
     val burnInDriftRange: Dp = 6.dp
 
-    /** 完成一次完整漂移循环所需分钟数。 */
-    const val BURN_IN_DRIFT_PERIOD_MIN: Long = 10L
-
-    /** 空闲多久后转低亮屏保。 */
-    const val IDLE_TIMEOUT_MS: Long = 120_000L
-
     /**
-     * 屏保窗口亮度（窗口级，不写系统设置，因此无需 WRITE_SETTINGS）。
-     * TODO(真机观感) [待校正]：0.08f 是保守起点，adb 读不出来这个值 ——
-     *   需要在真机暗光环境下目视确认"够暗防残影、又不至于看不见"再定稿。
+     * 完成一次完整漂移循环所需分钟数。
+     *
+     * 这是**唯一**留下来的防烧屏手段（2026-10-12）：屏保与"屏保时压暗亮度"都删掉了。
+     * 漂移只作用在**固定元素**（时钟、卡片文字）上，让它们不长期停在同一批像素上；
+     * 它不挡内容、不改亮度、不需要用户介入，代价只有一个 —— 内容整体会缓慢游走。
      */
-    const val SCREENSAVER_BRIGHTNESS: Float = 0.08f
+    const val BURN_IN_DRIFT_PERIOD_MIN: Long = 10L
 }

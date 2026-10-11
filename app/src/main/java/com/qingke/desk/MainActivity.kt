@@ -15,14 +15,17 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.qingke.desk.core.model.DisplayInfo
 import com.qingke.desk.core.platform.DisplayController
 import com.qingke.desk.core.platform.WindowDisplayController
-import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.shell.DeskRoot
 
 /**
  * HOME Activity。单 Activity + 全 Compose。
  *
- * 三件事：常亮、读取屏幕信息、把根交给 :shell。
+ * 三件事：把窗口交给常亮开关、读取屏幕信息、把根交给 :shell。
  * 业务逻辑一律不在这里。
+ *
+ * 2026-10-12：常亮不再是"onCreate 里无条件开"，而是由 :shell 把设置里的当前值
+ * 回调过来（[DeskRoot] 的 onKeepScreenOnChange），用户在设置浮层里一改就生效。
+ * 屏保与窗口亮度调整整个删掉了 —— **本应用不碰用户的亮度**。
  */
 class MainActivity : ComponentActivity() {
 
@@ -32,7 +35,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         displayController = WindowDisplayController(window)
-        displayController.keepScreenOn(true)
 
         enterDeskImmersiveMode()
 
@@ -49,25 +51,12 @@ class MainActivity : ComponentActivity() {
                 repository = DeskGraph.homeRepository,
                 displayInfo = DeskGraph.displayInfo,
                 onMessage = ::showMessage,
-                onScreensaverChange = ::applyScreensaverBrightness,
+                // 常亮的**当前值**由 :shell 从 ShellSettings 读出后在这里回调一次，
+                // 之后每次用户在设置浮层里改开关都会再回调一次 —— 改完立刻生效。
+                // 不在 onCreate 里写死 keepScreenOn(true)：那样设置里的开关就只是个摆设。
+                onKeepScreenOnChange = displayController::keepScreenOn,
             )
         }
-    }
-
-    /**
-     * 窗口亮度策略：**只有屏保会压暗，其余时候一律不碰**。
-     *
-     * 2026-10-12 修：以前是在 onResume 里按小时数强制设一次
-     * （BurnInGuard.scheduledBrightness），结果是每次进入应用都把用户自己
-     * 调好的亮度拉走一档 —— 真机投诉"进来就变暗"。那条分时段策略整个删掉了。
-     *
-     * 现在：进屏保压到 [DeskDimens.SCREENSAVER_BRIGHTNESS]（防 OLED 残影），
-     * 屏保一退立刻传 null 交还系统亮度。窗口级设置，不写系统设置，不需要权限。
-     */
-    private fun applyScreensaverBrightness(screensaverVisible: Boolean) {
-        displayController.setWindowBrightness(
-            if (screensaverVisible) DeskDimens.SCREENSAVER_BRIGHTNESS else null,
-        )
     }
 
     private fun showMessage(text: String) {

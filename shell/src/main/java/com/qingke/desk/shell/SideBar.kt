@@ -4,7 +4,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -100,9 +100,12 @@ data class ShellItem(
  * 侧栏框规规矩矩待在挖孔条**旁边**，两块各是各的。
  * 代价是屏幕上多一条竖直分界，换来的是两个元素的边界都干净。
  *
- * @param onToggleSide 长按侧栏 → 切到屏幕另一侧。之所以用长按而不是长按某一项：
- *                     长按条目会和"选中"打架，而侧栏空白处（内边距、项间缝）
- *                     本来就没有别的用途。
+ * ---------------------------------------------------------------------------
+ * 左右切换不在这里（2026-10-12 改）
+ *
+ * 曾经把"切到屏幕另一侧"挂在侧栏长按上，真机上误触太多：侧栏是**切屏**的主入口，
+ * 而长按与单击共用同一根手指，想点"地图"却把侧栏整条甩到另一边的代价太大。
+ * 现在改到设置浮层里（右上角齿轮 → 侧栏位置），侧栏只负责选中，不再有长按动作。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -111,7 +114,6 @@ fun SideBar(
     selectedId: String?,
     onSelect: (ShellItem) -> Unit,
     glassBackdrop: LayerBackdrop?,
-    onToggleSide: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (items.isEmpty()) return
@@ -169,14 +171,6 @@ fun SideBar(
             // 让它延伸过去盖住挖孔条的做法试过，真机上看着像贴歪了 ——
             // 圆角不在屏幕边上，左半边压着一条纯装饰色带。
             .width(DeskDimens.sideBarWidth)
-            // 长按切边。indication/interactionSource 传空：侧栏整块被按住时不该泛涟漪，
-            // 那会让人以为"按下去要选中某一项"。
-            .combinedClickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onLongClick = onToggleSide,
-                onClick = {},
-            )
             .deskGlassSurface(
                 backdrop = glassBackdrop,
                 shape = { RoundedCornerShape(DeskDimens.sideBarCorner) },
@@ -266,20 +260,17 @@ fun SideBar(
                     item = item,
                     selected = item.id == selectedId,
                     onClick = { onSelect(item) },
-                    onLongClick = onToggleSide,
                 )
             }
         }
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SideBarButton(
     item: ShellItem,
     selected: Boolean,
     onClick: (ShellItem) -> Unit,
-    onLongClick: () -> Unit,
 ) {
     val tint = if (selected) {
         MaterialTheme.colorScheme.primary
@@ -290,16 +281,12 @@ private fun SideBarButton(
     Box(
         modifier = Modifier
             .size(DeskDimens.sideBarItemSize)
-            // 长按**条目**也切边。
-            //
-            // 一开始只把长按挂在侧栏容器上（想着"空白处才有空"，条目留给单击），
-            // 真机上按不出来：条目自己的 clickable 先把这一串事件吃掉了，
-            // 容器的 onLongClick 根本收不到。而侧栏的空白只有 6dp 内边距 + 8dp 项间缝，
-            // 手指压根点不准。所以挂到条目上 —— 64dp 见方，一按就有。
-            .combinedClickable(
+            // 普通单击即可，不再挂长按（理由见 [SideBar] 的"左右切换不在这里"）。
+            // indication/interactionSource 传空：侧栏条目被按住时不泛涟漪 ——
+            // 那会让人以为按下会打开新的东西，而它只是切一屏。
+            .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
-                onLongClick = onLongClick,
                 onClick = { onClick(item) },
             ),
         contentAlignment = Alignment.Center,

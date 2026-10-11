@@ -2,6 +2,9 @@ package com.qingke.desk.map
 
 import android.content.Context
 import com.amap.api.maps.MapsInitializer
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * 高德 SDK 的隐私合规闸门。
@@ -25,7 +28,23 @@ object AMapPrivacy {
     private const val KEY_AGREED = "agreed"
     private const val KEY_AGREED_AT = "agreed_at"
 
-    /** 用户是否已同意。 */
+    /**
+     * 同意状态的**可观察版本**。
+     *
+     * 为什么需要它：同意与否会在两个地方被读写 —— 地图面板（决定挂地图还是挂隐私卡）
+     * 和设置浮层（决定"撤回同意"按钮是否可点）。两边各自读一次 prefs 的话，
+     * 一边改了另一边不会知道，撤回后地图还在那儿画着，等于没撤回。
+     * 所以状态统一走这条流，[agree]/[revoke]/[syncState] 是唯一的写入点。
+     */
+    private val _agreed = MutableStateFlow(false)
+    val agreed: StateFlow<Boolean> = _agreed.asStateFlow()
+
+    /** 从磁盘同步一次到内存状态。冷启动时由 [AMapBootstrap] 调，界面侧再补一次兜底。 */
+    fun syncState(context: Context) {
+        _agreed.value = isAgreed(context)
+    }
+
+    /** 用户是否已同意。直接读磁盘。 */
     fun isAgreed(context: Context): Boolean =
         prefs(context).getBoolean(KEY_AGREED, false)
 
@@ -45,12 +64,20 @@ object AMapPrivacy {
             .putLong(KEY_AGREED_AT, System.currentTimeMillis())
             .apply()
         push(context)
+        _agreed.value = true
     }
 
-    /** 撤回同意（设置页用得上；撤回后界面必须立刻把地图摘掉）。 */
+    /**
+     * 撤回同意。设置浮层里的"撤回同意"按钮就是它。
+     *
+     * 撤回的**实际效果**：地图面板立刻换成隐私说明卡（MapPane 观察 [agreed]），
+     * 并且 SDK 的合规状态被同步为"未同意"。地图已经画出来的瓦片不会因此从
+     * 磁盘上消失（那是缓存），但下次进入地图屏不会再构造 MapView。
+     */
     fun revoke(context: Context) {
         prefs(context).edit().putBoolean(KEY_AGREED, false).apply()
         runCatching { MapsInitializer.updatePrivacyAgree(context.applicationContext, false) }
+        _agreed.value = false
     }
 
     /**
@@ -62,6 +89,7 @@ object AMapPrivacy {
      */
     fun applyIfAgreed(context: Context) {
         if (isAgreed(context)) push(context)
+        syncState(context)
     }
 
     /**

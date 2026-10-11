@@ -7,20 +7,18 @@ import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -33,10 +31,11 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import com.kyant.backdrop.backdrops.LayerBackdrop
@@ -62,6 +61,8 @@ import com.qingke.desk.hosting.ShizukuStatusMonitor
 import com.qingke.desk.hosting.ui.ShizukuBootPromptCard
 import com.qingke.desk.hosting.ui.ShizukuGuideScreen
 import com.qingke.desk.hosting.ui.ShizukuStatusChip
+import com.qingke.desk.map.AMapPrivacy
+import com.qingke.desk.map.AMapPrivacyCard
 import com.qingke.desk.map.MapPane
 import com.qingke.desk.projection.api.AvailabilityAction
 import com.qingke.desk.projection.api.AvailabilityResult
@@ -106,7 +107,14 @@ enum class DeskScreen {
  *
  * 投屏页与引导页是**全屏**的，不吃这套骨架（侧栏不画）。
  *
- * @param onScreensaverChange 进出屏保的通知，用来只在屏保时压暗窗口亮度。
+ * 2026-10-12 屏保删除：原来空闲 2 分钟会盖一层屏保并把窗口亮度压到 0.08。
+ * 现在**屏幕要么常亮、要么跟随系统息屏**（由用户在设置面板里选，默认常亮），
+ * 不再有"第三种状态"。防烧屏只保留内容微位移（[BurnInGuard]）——
+ * 它只挪固定元素的位置，不改亮度、不挡内容、不需要用户介入。
+ *
+ * @param onKeepScreenOnChange 常亮开关变化的通知。它是**窗口级**的事（FLAG_KEEP_SCREEN_ON
+ *                             挂在 Activity 的 Window 上），:shell 不直接碰窗口，
+ *                             所以由 MainActivity 传进来实现；开关一改立刻生效，不用重启。
  */
 @Composable
 fun DeskRoot(
@@ -114,7 +122,7 @@ fun DeskRoot(
     repository: HomeRepository,
     displayInfo: DisplayInfo = DisplayInfo.Unspecified,
     onMessage: ((String) -> Unit)? = null,
-    onScreensaverChange: (Boolean) -> Unit = {},
+    onKeepScreenOnChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var screen by remember { mutableStateOf(DeskScreen.HOME) }
@@ -296,6 +304,24 @@ fun DeskRoot(
         var sidebarSide by remember { mutableStateOf(ShellSettings.sidebarSide(context)) }
         var mapPaneCollapsed by remember { mutableStateOf(false) }
 
+        // ---- 屏幕常亮 -------------------------------------------------------
+        //
+        // 值存在 ShellSettings 里，但**生效**要靠上层把它写到窗口 flag 上。
+        // 用 LaunchedEffect 而不是"改设置时顺手调一次"：这样无论是从设置面板改的、
+        // 还是别处改的，走的是同一条路径，不会出现"设置存了、窗口没跟上"。
+        var keepScreenOn by remember { mutableStateOf(ShellSettings.keepScreenOn(context)) }
+        LaunchedEffect(keepScreenOn) { onKeepScreenOnChange(keepScreenOn) }
+
+        // 设置面板的开合。它是**浮层**，不占壳层骨架的位置，关掉就什么都不剩。
+        var settingsOpen by remember { mutableStateOf(false) }
+
+        // 高德隐私的同意状态。与 :map 的 MapPane 读的是同一条流，
+        // 所以在这里撤回，地图屏那边会立刻换成隐私说明卡。
+        val amapAgreed by AMapPrivacy.agreed.collectAsState()
+        // 换屏（比如从设置面板点进 Shizuku 引导页）时自动收起，
+        // 否则回来会看到一个浮在引导页上的设置面板。
+        LaunchedEffect(screen) { settingsOpen = false }
+
         // ---- 挖孔在哪一侧：一律问系统，不猜 ----------------------------------
         //
         // 手机倒转 180° 时挖孔会跑到另一边，写死"在左边"的那天就是错位那天。
@@ -322,120 +348,114 @@ fun DeskRoot(
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background),
         ) {
-            // 屏保要能盖住**全部**内容（含铺满的地图），所以地图也得在 IdleGuard 之内；
-            // 而"避让挖孔"是更内层骨架的事 —— 地图本来就是要盖住挖孔区的，
-            // 不能跟着一起避让。
-            IdleGuard(
-                modifier = Modifier.fillMaxSize(),
-                // 屏保进出要通知上层改窗口亮度：只有屏保压暗，平时绝不碰用户自己的亮度。
-                onIdleChange = onScreensaverChange,
-                screensaver = {
-                    Screensaver(
-                        timeText = cards.firstOrNull { it.kind == HomeCardKind.CLOCK }?.title.orEmpty(),
-                        driftX = drift.first.dp,
-                        driftY = drift.second.dp,
-                    )
-                },
-            ) {
-                Box(modifier = Modifier.fillMaxSize()) {
-                    // A. 地图：铺满**整屏**，含挖孔区。它是这一屏的底。
-                    //    玻璃在这里是关掉的：MapView 走独立图层，Compose 的背景层
-                    //    采不到它的内容（会录成一片黑）。
-                    if (screen == DeskScreen.MAP) {
-                        MapPane(modifier = Modifier.fillMaxSize())
+            Box(modifier = Modifier.fillMaxSize()) {
+                // A. 地图：铺满**整屏**，含挖孔区。它是这一屏的底。
+                //    玻璃在这里是关掉的：MapView 走独立图层，Compose 的背景层
+                //    采不到它的内容（会录成一片黑）。
+                //
+                //    **只在已同意隐私政策时才挂**：未同意时这里什么都不画，
+                //    隐私说明卡改由下面的内容区分支渲染 —— 铺在这里的话，
+                //    侧栏那块**半透明玻璃**会压在卡片上，两边文字叠在一起没法读
+                //    （真机截图 .verify/settings/23-map-blocked.png）。
+                if (screen == DeskScreen.MAP && amapAgreed) {
+                    MapPane(modifier = Modifier.fillMaxSize())
+                }
+
+                // B. 挖孔区：**什么都不画**。
+                //
+                // 2026-10-12 改：这里原本铺一层 surfaceVariant@55%，
+                // 真机上把屏幕亮度拉高后，挖孔那一条与旁边的底色看得出色差
+                // （半透明色压上去必然偏一档，亮度越高越明显）。
+                // 现在整条留给底色 —— 外层的 Box 已经把 colorScheme.background
+                // 铺满整个窗口（含挖孔区），那一块于是和别处**完全同一个像素值**，
+                // 没有接缝。以后换成壁纸背景时它也会自然透出来，
+                // 不需要再回来改这里：**别在这里加任何上色**。
+                //
+                // 代价：地图布局下地图会一路铺到挖孔底下（不再被压一条色带）。
+                // 这正是我们要的 —— 那一条的颜色跟地图一致，同样没有接缝。
+
+                // C. 骨架：侧栏 + 内容区。**这一层才避让挖孔** ——
+                //    上面两块本来就是要盖住挖孔区的，不能跟着一起避让。
+                //    挖孔区整段让给外层底色，侧栏从它右边（或左边）开始。
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(
+                            start = cutoutLeft,
+                            end = cutoutRight,
+                            top = cutoutTop,
+                            bottom = cutoutBottom,
+                        ),
+                ) {
+                    if (sidebarSide == SidebarSide.LEFT) {
+                        SideBarSlot(
+                            sidebarSide = sidebarSide,
+                            screen = screen,
+                            glassBackdrop = glassBackdrop,
+                            context = context,
+                            orchestrator = orchestrator,
+                            onMessage = onMessage,
+                            onScreenChange = { screen = it },
+                        )
                     }
 
-                    // B. 挖孔区：**什么都不画**。
-                    //
-                    // 2026-10-12 改：这里原本铺一层 surfaceVariant@55%，
-                    // 真机上把屏幕亮度拉高后，挖孔那一条与旁边的底色看得出色差
-                    // （半透明色压上去必然偏一档，亮度越高越明显）。
-                    // 现在整条留给底色 —— 外层的 Box 已经把 colorScheme.background
-                    // 铺满整个窗口（含挖孔区），那一块于是和别处**完全同一个像素值**，
-                    // 没有接缝。以后换成壁纸背景时它也会自然透出来，
-                    // 不需要再回来改这里：**别在这里加任何上色**。
-                    //
-                    // 代价：地图布局下地图会一路铺到挖孔底下（不再被压一条色带）。
-                    // 这正是我们要的 —— 那一条的颜色跟地图一致，同样没有接缝。
-
-                    // C. 骨架：侧栏 + 内容区。**这一层才避让挖孔** ——
-                    //    上面两块本来就是要盖住挖孔区的，不能跟着一起避让。
-                    //    挖孔区整段让给外层底色，侧栏从它右边（或左边）开始。
-                    Row(
+                    // 内容区。侧栏占掉的那一条由 Row 剩下的 weight 给出，
+                    // 内容**不**伸到侧栏底下 —— 上一版底栏让内容探进去 24dp
+                    // 给玻璃当采样素材，真机结果是第二排卡片被压住，被投诉过。
+                    // 代价是侧栏玻璃背后只剩纯底色，"模糊背后的内容"这一项失去
+                    // 意义；但 lens 的边缘折射与 highlight 仍是按形状算的，
+                    // 玻璃的轮廓和高光照样在。
+                    Box(
                         modifier = Modifier
-                            .fillMaxSize()
+                            .weight(1f)
+                            .fillMaxHeight()
                             .padding(
-                                start = cutoutLeft,
-                                end = cutoutRight,
-                                top = cutoutTop,
-                                bottom = cutoutBottom,
+                                start = if (sidebarSide == SidebarSide.LEFT) {
+                                    DeskDimens.sidebarSpacing
+                                } else {
+                                    0.dp
+                                },
+                                end = if (sidebarSide == SidebarSide.RIGHT) {
+                                    DeskDimens.sidebarSpacing
+                                } else {
+                                    0.dp
+                                },
                             ),
                     ) {
-                        if (sidebarSide == SidebarSide.LEFT) {
-                            SideBarSlot(
-                                sidebarSide = sidebarSide,
-                                screen = screen,
+                        when (screen) {
+                            DeskScreen.HOME -> HomeScreen(
+                                cards = cards,
+                                driftX = drift.first.dp,
+                                driftY = drift.second.dp,
+                                onShellSelect = { item ->
+                                    screen = handleShellSelect(item, orchestrator, onMessage, screen)
+                                },
+                                onCardSelect = { card ->
+                                    if (card.kind == HomeCardKind.PROJECTION) {
+                                        orchestrator.connect(ProjectionKind.CARPLAY)
+                                        screen = DeskScreen.PROJECTION
+                                    } else {
+                                        onMessage?.invoke("${card.title} 尚未支持点击")
+                                    }
+                                },
+                                mediaState = mediaState,
+                                onMediaCommand = mediaMonitor::command,
+                                onMediaRequestPermission = {
+                                    MediaPermission.openSettings(context, onFailure = { reason ->
+                                        onMessage?.invoke(reason)
+                                    })
+                                },
                                 glassBackdrop = glassBackdrop,
-                                context = context,
-                                orchestrator = orchestrator,
-                                onMessage = onMessage,
-                                onScreenChange = { screen = it },
-                                onSideChange = { sidebarSide = it },
                             )
-                        }
 
-                        // 内容区。侧栏占掉的那一条由 Row 剩下的 weight 给出，
-                        // 内容**不**伸到侧栏底下 —— 上一版底栏让内容探进去 24dp
-                        // 给玻璃当采样素材，真机结果是第二排卡片被压住，被投诉过。
-                        // 代价是侧栏玻璃背后只剩纯底色，"模糊背后的内容"这一项失去
-                        // 意义；但 lens 的边缘折射与 highlight 仍是按形状算的，
-                        // 玻璃的轮廓和高光照样在。
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                                .padding(
-                                    start = if (sidebarSide == SidebarSide.LEFT) {
-                                        DeskDimens.sidebarSpacing
-                                    } else {
-                                        0.dp
-                                    },
-                                    end = if (sidebarSide == SidebarSide.RIGHT) {
-                                        DeskDimens.sidebarSpacing
-                                    } else {
-                                        0.dp
-                                    },
-                                ),
-                        ) {
-                            when (screen) {
-                                DeskScreen.HOME -> HomeScreen(
-                                    cards = cards,
-                                    driftX = drift.first.dp,
-                                    driftY = drift.second.dp,
-                                    onShellSelect = { item ->
-                                        screen = handleShellSelect(item, orchestrator, onMessage, screen)
-                                    },
-                                    onCardSelect = { card ->
-                                        if (card.kind == HomeCardKind.PROJECTION) {
-                                            orchestrator.connect(ProjectionKind.CARPLAY)
-                                            screen = DeskScreen.PROJECTION
-                                        } else {
-                                            onMessage?.invoke("${card.title} 尚未支持点击")
-                                        }
-                                    },
-                                    mediaState = mediaState,
-                                    onMediaCommand = mediaMonitor::command,
-                                    onMediaRequestPermission = {
-                                        MediaPermission.openSettings(context, onFailure = { reason ->
-                                            onMessage?.invoke(reason)
-                                        })
-                                    },
-                                    glassBackdrop = glassBackdrop,
-                                )
-
-                                // 地图布局：地图在底层铺满了，这里只放卡片浮层，
-                                // 它待在**侧栏的对侧**，可收成一条手柄让地图全露。
-                                DeskScreen.MAP -> MapCardPane(
+                            // 地图布局有两条路：
+                            //  · 已同意 → 地图在底层铺满，这里放卡片浮层（在侧栏对侧，
+                            //    可收成一条手柄让地图全露）；
+                            //  · 未同意 → 这里放隐私说明卡。放在内容区而不是铺满整屏，
+                            //    是为了自动避开侧栏那一条 —— 侧栏是半透明玻璃，
+                            //    压在文字上两边都读不清。代价是卡片窄一点，但可读。
+                            DeskScreen.MAP -> if (amapAgreed) {
+                                MapCardPane(
                                     cards = cards,
                                     sidebarSide = sidebarSide,
                                     collapsed = mapPaneCollapsed,
@@ -457,89 +477,148 @@ fun DeskRoot(
                                         },
                                     ),
                                 )
-
-                                DeskScreen.SHIZUKU_GUIDE -> ShizukuGuideScreen(
-                                    status = shizukuStatus,
-                                    onRefresh = { shizukuMonitor.refresh() },
-                                    onRequestPermission = { ShizukuGate.requestPermission() },
-                                    onOpenShizuku = {
-                                        val intent = ShizukuGate.launchIntent(context)
-                                        if (intent != null) {
-                                            runCatching { context.startActivity(intent) }
-                                                .onFailure { onMessage?.invoke("没能打开 Shizuku，请手动打开它") }
-                                        } else {
-                                            onMessage?.invoke("设备上没有安装 Shizuku")
-                                        }
+                            } else {
+                                AMapPrivacyCard(
+                                    modifier = Modifier.fillMaxSize(),
+                                    onAgree = {
+                                        AMapPrivacy.agree(context)
+                                        onMessage?.invoke("已同意，地图将开始显示")
                                     },
-                                    onExit = { screen = DeskScreen.HOME },
-                                )
-
-                                DeskScreen.PROJECTION -> ProjectionScreen(
-                                    uiState = connectionState,
-                                    session = session,
-                                    displayInfo = displayInfo,
-                                    onExit = {
-                                        orchestrator.disconnect(StopReason.USER_HOME_GESTURE)
-                                        screen = DeskScreen.HOME
+                                    onDecline = {
+                                        onMessage?.invoke("地图保持关闭。可随时在设置里重新同意")
                                     },
-                                    onRetry = orchestrator::retryNow,
-                                    onRemedy = { unavailable -> runRemedy(unavailable, context, onMessage) },
                                 )
                             }
 
-                            // Shizuku 悬浮角标：**只在异常时出现**（未装 / 未运行 / 未授权），
-                            // 一切正常时屏幕上没有它 —— 常亮设备不该为一个正常状态
-                            // 长期占着一块地方。位置跟着侧栏镜像：侧栏在左则贴右上，
-                            // 侧栏在右则贴左上（右上角那时被侧栏占着）。
-                            if (chromeScreen && shizukuStatus != ShizukuStatus.READY) {
-                                Box(
-                                    modifier = Modifier
-                                        .align(
-                                            if (sidebarSide == SidebarSide.LEFT) {
-                                                Alignment.TopEnd
-                                            } else {
-                                                Alignment.TopStart
-                                            },
-                                        )
-                                        .padding(
-                                            top = DeskDimens.statusChipTopPadding,
-                                            start = DeskDimens.statusChipSidePadding,
-                                            end = DeskDimens.statusChipSidePadding,
-                                        ),
-                                ) {
-                                    ShizukuStatusChip(
-                                        status = shizukuStatus,
-                                        onClick = { screen = DeskScreen.SHIZUKU_GUIDE },
-                                    )
-                                }
-                            }
-                        }
+                            DeskScreen.SHIZUKU_GUIDE -> ShizukuGuideScreen(
+                                status = shizukuStatus,
+                                onRefresh = { shizukuMonitor.refresh() },
+                                onRequestPermission = { ShizukuGate.requestPermission() },
+                                onOpenShizuku = {
+                                    val intent = ShizukuGate.launchIntent(context)
+                                    if (intent != null) {
+                                        runCatching { context.startActivity(intent) }
+                                            .onFailure { onMessage?.invoke("没能打开 Shizuku，请手动打开它") }
+                                    } else {
+                                        onMessage?.invoke("设备上没有安装 Shizuku")
+                                    }
+                                },
+                                onExit = { screen = DeskScreen.HOME },
+                            )
 
-                        if (sidebarSide == SidebarSide.RIGHT) {
-                            SideBarSlot(
-                                sidebarSide = sidebarSide,
-                                screen = screen,
-                                glassBackdrop = glassBackdrop,
-                                context = context,
-                                orchestrator = orchestrator,
-                                onMessage = onMessage,
-                                onScreenChange = { screen = it },
-                                onSideChange = { sidebarSide = it },
+                            DeskScreen.PROJECTION -> ProjectionScreen(
+                                uiState = connectionState,
+                                session = session,
+                                displayInfo = displayInfo,
+                                onExit = {
+                                    orchestrator.disconnect(StopReason.USER_HOME_GESTURE)
+                                    screen = DeskScreen.HOME
+                                },
+                                onRetry = orchestrator::retryNow,
+                                onRemedy = { unavailable -> runRemedy(unavailable, context, onMessage) },
                             )
                         }
+
                     }
 
-                    // 重启后的一次性提示。盖在首页之上，关掉就不再出现（同一个开机周期内）。
-                    val pendingPrompt = bootPromptStatus
-                    if (pendingPrompt != null && screen == DeskScreen.HOME) {
-                        ShizukuBootPromptCard(
-                            status = pendingPrompt,
-                            onOpenGuide = {
-                                bootPromptStatus = null
-                                screen = DeskScreen.SHIZUKU_GUIDE
-                            },
-                            onDismiss = { bootPromptStatus = null },
+                    if (sidebarSide == SidebarSide.RIGHT) {
+                        SideBarSlot(
+                            sidebarSide = sidebarSide,
+                            screen = screen,
+                            glassBackdrop = glassBackdrop,
+                            context = context,
+                            orchestrator = orchestrator,
+                            onMessage = onMessage,
+                            onScreenChange = { screen = it },
                         )
+                    }
+                }
+
+                // 重启后的一次性提示。盖在首页之上，关掉就不再出现（同一个开机周期内）。
+                val pendingPrompt = bootPromptStatus
+                if (pendingPrompt != null && screen == DeskScreen.HOME) {
+                    ShizukuBootPromptCard(
+                        status = pendingPrompt,
+                        onOpenGuide = {
+                            bootPromptStatus = null
+                            screen = DeskScreen.SHIZUKU_GUIDE
+                        },
+                        onDismiss = { bootPromptStatus = null },
+                    )
+                }
+
+                // ---- 设置浮层 ------------------------------------------------
+                //
+                // 两个元素，声明顺序就是 z 序，不能颠倒：
+                //   1. 遮罩层：只在浮层展开时存在，点它 → 关闭浮层；
+                //   2. 右上角悬浮区（齿轮 + Shizuku 角标 + 浮层本体）：在遮罩**之后**声明，
+                //      所以浮层展开时齿轮依然浮在遮罩之上、还能再点一次收起。
+                // 反过来写的话，遮罩会把齿轮盖住，用户只能靠"完成"按钮退出。
+                if (chromeScreen && settingsOpen) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.35f))
+                            .pointerInput(Unit) {
+                                detectTapGestures { settingsOpen = false }
+                            },
+                    )
+                }
+
+                if (chromeScreen) {
+                    // 悬浮区跟着侧栏镜像：侧栏在左则贴右上，侧栏在右则贴左上
+                    // （右上角那时被侧栏占着）。子项的对齐方向也要跟着翻，
+                    // 否则齿轮会跑到这一列的内侧去。
+                    val overlayCorner = sidebarSide == SidebarSide.LEFT
+                    Column(
+                        modifier = Modifier
+                            .align(
+                                if (overlayCorner) Alignment.TopEnd else Alignment.TopStart,
+                            )
+                            .padding(
+                                top = DeskDimens.statusChipTopPadding,
+                                start = DeskDimens.statusChipSidePadding,
+                                end = DeskDimens.statusChipSidePadding,
+                            ),
+                        horizontalAlignment = if (overlayCorner) {
+                            Alignment.End
+                        } else {
+                            Alignment.Start
+                        },
+                        verticalArrangement = Arrangement.spacedBy(DeskDimens.statusChipGap),
+                    ) {
+                        SettingsToggleChip(
+                            open = settingsOpen,
+                            onClick = { settingsOpen = !settingsOpen },
+                        )
+
+                        // Shizuku 角标：**只在异常时出现**（未装 / 未运行 / 未授权）。
+                        // 一切正常时这一行不存在，屏幕上只剩齿轮。
+                        if (shizukuStatus != ShizukuStatus.READY) {
+                            ShizukuStatusChip(
+                                status = shizukuStatus,
+                                onClick = { screen = DeskScreen.SHIZUKU_GUIDE },
+                            )
+                        }
+
+                        if (settingsOpen) {
+                            SettingsPane(
+                                sidebarSide = sidebarSide,
+                                keepScreenOn = keepScreenOn,
+                                amapAgreed = amapAgreed,
+                                onSidebarSideChange = { side ->
+                                    sidebarSide = ShellSettings.setSidebarSide(context, side)
+                                },
+                                onKeepScreenOnChange = { enabled ->
+                                    keepScreenOn = ShellSettings.setKeepScreenOn(context, enabled)
+                                },
+                                onRevokeAmapConsent = {
+                                    AMapPrivacy.revoke(context)
+                                    onMessage?.invoke("已撤回地图隐私同意，地图将不再显示")
+                                },
+                                onDismiss = { settingsOpen = false },
+                            )
+                        }
                     }
                 }
             }
@@ -668,7 +747,6 @@ private fun RowScope.SideBarSlot(
     orchestrator: ConnectionOrchestrator,
     onMessage: ((String) -> Unit)?,
     onScreenChange: (DeskScreen) -> Unit,
-    onSideChange: (SidebarSide) -> Unit,
 ) {
     SideBar(
         items = defaultShellItems(),
@@ -677,13 +755,6 @@ private fun RowScope.SideBarSlot(
             onScreenChange(handleShellSelect(item, orchestrator, onMessage, screen))
         },
         glassBackdrop = glassBackdrop,
-        onToggleSide = {
-            val next = ShellSettings.setSidebarSide(context, sidebarSide.flipped())
-            onSideChange(next)
-            onMessage?.invoke(
-                "侧栏已切到${if (next == SidebarSide.LEFT) "左侧" else "右侧"}",
-            )
-        },
         modifier = Modifier.align(Alignment.CenterVertically),
     )
 }
@@ -699,48 +770,3 @@ private fun RowScope.SideBarSlot(
  * 这里留一段说明而不是留空函数：**别再往挖孔区加任何上色**，
  * 换壁纸那天一加上去就又成了色差。
  */
-
-/**
- * 屏保。内容刻意简单：只有时间，且持续漂移。
- *
- * **漂移必须用 offset，不能用 padding。** 漂移量是 sin() 出来的有符号值
- * （-range..+range dp），而 Modifier.padding 不允许负数 —— 传负值会抛
- * IllegalArgumentException("Padding must be non-negative") 直接崩掉进程。
- * 这个坑踩过一次，现象是"应用开着大约两分钟必闪退"（空闲满 2 分钟才渲染屏保，
- * 屏保首次取到负漂移即崩）。语义上本来也该用 offset：我们要的是把内容整体**挪**一下，
- * 不是给它加内边距。
- *
- * TODO(adb) [待校正]：屏保亮度 [DeskDimens.SCREENSAVER_BRIGHTNESS] 需要在
- *           真机 OLED 上确认是否低到足够避免残影、又不至于看不见。
- */
-@Composable
-fun Screensaver(
-    timeText: String,
-    driftX: Dp,
-    driftY: Dp,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            modifier = Modifier.offset(x = driftX, y = driftY),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                text = timeText.ifBlank { "--:--" },
-                fontSize = DeskDimens.clockTime * 1.5f,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = "轻触返回",
-                fontSize = DeskDimens.cardCaption,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
-            )
-        }
-    }
-}
