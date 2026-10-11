@@ -5,6 +5,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Home
@@ -12,7 +16,6 @@ import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -29,9 +32,11 @@ import com.qingke.desk.feature.home.HomeCardTile
 import com.qingke.desk.feature.media.MediaCardTile
 import com.qingke.desk.feature.media.MediaCommand
 import com.qingke.desk.feature.media.MediaUiState
+import com.qingke.desk.hosting.ShizukuStatus
+import com.qingke.desk.hosting.ui.ShizukuStatusBar
 
 /**
- * 首页：内容区铺满。
+ * 首页：状态栏 + 内容区铺满。
  *
  * 之所以从"Column 里加一行"改成"内容铺满 + 底栏浮在其上"：液态玻璃采的是
  * **它背后那一层内容**，若底栏独占一行、背后只有纯底色，模糊与折射都无从体现
@@ -40,6 +45,10 @@ import com.qingke.desk.feature.media.MediaUiState
  *
  * 底栏上提到 [DeskRoot] 是因为**它不再只属于首页**：托管页（:hosting）也要能
  * 从底栏切走，否则把第三方应用的画面铺满主区域之后就没有出口了。
+ *
+ * 顶部状态栏是 2026-10-11 加的，放 Shizuku 的常驻指示。它**占实位**，不是浮层：
+ * 横向 361 dp 的高度里，浮层压到卡片上比少 20 dp 更糟。纵向预算的账记在
+ * [DeskDimens] 的文件头，改这里任何一个值都要回去重算那一行。
  *
  * 栅格行数不写死 —— 由可用高度除以"卡片最小高度"反推，
  * 空间不够时少放一行，而不是把卡片压扁。这样同一份代码
@@ -66,18 +75,33 @@ fun HomeScreen(
     mediaState: MediaUiState = MediaUiState.Checking,
     onMediaCommand: (MediaCommand) -> Unit = {},
     onMediaRequestPermission: () -> Unit = {},
+    /**
+     * Shizuku 的当前状态，由 [DeskRoot] 在每次回到前台时现查后下发。
+     * 顶部状态栏把它显示成一颗常驻的小灯 —— 这个模块停了不会有任何别的征兆，
+     * 只能靠它提前说。
+     */
+    shizukuStatus: ShizukuStatus = ShizukuStatus.READY,
+    /** 点状态栏上的指示 —— 进引导页。 */
+    onShizukuIndicatorClick: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    Box(
+    Column(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background),
     ) {
+        Spacer(modifier = Modifier.height(DeskDimens.statusBarTopPadding))
+        ShizukuStatusBar(
+            status = shizukuStatus,
+            onClick = onShizukuIndicatorClick,
+        )
+
         // 被录进背景层的**只有内容区**。把底栏也套进来会导致自采样：
         // 每帧把上一帧模糊过的画面再录一遍，越糊越糊。
         BoxWithConstraints(
             modifier = Modifier
-                .fillMaxSize()
+                .fillMaxWidth()
+                .weight(1f)
                 .deskGlassSource(glassBackdrop),
         ) {
             val rows = remember(maxHeight, cards.size) { computeRows(maxHeight) }
@@ -88,7 +112,7 @@ fun HomeScreen(
                 contentPadding = PaddingValues(
                     start = DeskDimens.screenPadding,
                     end = DeskDimens.screenPadding,
-                    top = DeskDimens.screenPadding,
+                    top = DeskDimens.gridTopPadding,
                     bottom = DeskDimens.dockContentBottomPadding,
                 ),
             ) { index ->
@@ -131,8 +155,9 @@ internal fun defaultDockItems(): List<DockItem> = listOf(
 /**
  * 可用高度能放下几行。
  *
- * 已按基准机（横屏 411 dp 高）核算：cardMinHeight 取 124 时可稳定得到 2 行；
- * 取 140 时会被压成 1 行。换机器不需要改这里，改 [DeskDimens.cardMinHeight] 即可。
+ * 已按基准机（横屏 361 dp 高，扣掉状态栏 40 dp 后内容区 321 dp）核算：
+ * cardMinHeight 取 124 时能稳定得到 2 行；取 140 时会被压成 1 行。
+ * 换机器不需要改这里，改 [DeskDimens.cardMinHeight] 即可。
  */
 private fun computeRows(availableHeight: Dp): Int {
     val gap = DeskDimens.gridGap

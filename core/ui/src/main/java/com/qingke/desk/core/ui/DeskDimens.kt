@@ -35,6 +35,13 @@ import androidx.compose.ui.unit.sp
  *   不是单卡实际高度。**卡片内不能再假设自己有多高**，大字号必须按可用高度反推
  *   （见 [TEXT_LINE_HEIGHT_RATIO] 与 feature:home 的时钟卡）。
  * 若 cardMinHeight 取到 140：行数会被压到 1 行（校正前实测到的情况）。
+ *
+ * 加了顶部状态栏之后的预算（2026-10-11 起，状态栏放 Shizuku 指示）：
+ *   状态栏      statusBarTopPadding 8 + statusBarHeight 32 = 40
+ *   栅格可用高  361 - 40 - dockContentBottomPadding 58 = 263
+ *   两行卡片    (263 - gridTopPadding 8*2 - gridGap 12) / 2 = 117.5 dp/张
+ *   反推行数    floor((263 + 12) / 136) = 2 —— 仍是 2 行，安全。
+ *   状态栏再高 4 dp 或 cardMinHeight 提到 132 都会掉到 1 行，改动前先算这一行。
  */
 object DeskDimens {
 
@@ -45,6 +52,26 @@ object DeskDimens {
 
     /** 卡片区与图标栏之间的间距。 */
     val dockSpacing: Dp = 12.dp
+
+    // ---------- 顶部状态栏 ----------
+
+    /**
+     * 顶部状态栏高度。里面放的是常驻的状态指示（Shizuku 是否可用等）。
+     *
+     * 32 dp 是**上限**，不是随手取的：横屏纵向预算极度紧张，
+     * 状态栏再高一点就会把卡片挤成 1 行（见下方纵向预算）。
+     */
+    val statusBarHeight: Dp = 32.dp
+
+    /** 状态栏距屏幕顶边的留白。 */
+    val statusBarTopPadding: Dp = 8.dp
+
+    /** 状态指示胶囊的高度与字号。 */
+    val statusChipHeight: Dp = 28.dp
+    val statusChipText: TextUnit = 12.sp
+
+    /** 卡片栅格距状态栏的间距。原来卡片直接贴 [screenPadding]，加了状态栏后收紧。 */
+    val gridTopPadding: Dp = 8.dp
 
     // ---------- 卡片栅格 ----------
 

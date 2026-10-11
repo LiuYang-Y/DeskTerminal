@@ -1,6 +1,7 @@
 package com.qingke.desk.hosting
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import rikka.shizuku.Shizuku
 
@@ -44,6 +45,9 @@ object ShizukuGate {
     }.getOrDefault(false)
 
     fun status(context: Context): ShizukuStatus {
+        // debug 验收用的假状态优先。发布构建里它恒为 null（见 ShizukuDebugOverride）。
+        ShizukuDebugOverride.read(context)?.let { return it }
+
         if (!isInstalled(context)) return ShizukuStatus.NOT_INSTALLED
 
         // pingBinder() 是"服务端活着吗"的唯一判据：它检查的是 binder 有没有断，
@@ -77,6 +81,18 @@ object ShizukuGate {
             HostLog.e("requestPermission failed", it)
         }
     }
+
+    /**
+     * Shizuku 应用自己的启动 Intent。没有安装时返回 null。
+     *
+     * 只是**把它的界面推到前台** —— 「启动」按钮得用户自己按：
+     * 那一步依赖无线调试的配对状态，应用替不了，也不该替。
+     */
+    fun launchIntent(context: Context): Intent? = runCatching {
+        context.packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)?.apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    }.getOrNull()
 
     /**
      * 服务端身份。只是给提示页用的展示信息 —— adb 与 root 两种模式的

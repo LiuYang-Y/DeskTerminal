@@ -49,8 +49,13 @@ import com.qingke.desk.core.ui.rememberDeskGlassBackdrop
 import com.qingke.desk.feature.media.MediaPermission
 import com.qingke.desk.feature.media.MediaSessionMonitor
 import com.qingke.desk.feature.media.MediaUiState
+import com.qingke.desk.hosting.ShizukuGate
+import com.qingke.desk.hosting.ShizukuStatus
+import com.qingke.desk.hosting.ShizukuStatusMonitor
 import com.qingke.desk.hosting.VdHostController
 import com.qingke.desk.hosting.ui.HostingScreen
+import com.qingke.desk.hosting.ui.ShizukuBootPromptCard
+import com.qingke.desk.hosting.ui.ShizukuGuideScreen
 import com.qingke.desk.projection.api.AvailabilityAction
 import com.qingke.desk.projection.api.AvailabilityResult
 import com.qingke.desk.projection.api.ProjectionKind
@@ -67,6 +72,8 @@ enum class DeskScreen {
     PROJECTION,
     /** 应用托管（:hosting）：把第三方应用画进主区域。 */
     HOSTING,
+    /** Shizuku 的引导页。从首页状态栏的常驻指示进来。 */
+    SHIZUKU_GUIDE,
 }
 
 /**
@@ -126,6 +133,20 @@ fun DeskRoot(
     // 想彻底收掉用托管页右上角的「退出」。
     val hostingController = remember(context) { VdHostController(context) }
 
+    // ---- Shizuku 状态 -------------------------------------------------------
+    //
+    // 壳层不直接碰 rikka 的 API（那是 :hosting 的事），这里只订阅一个 StateFlow。
+    // 状态一律**现查**，不缓存到磁盘：它可能随时被用户在别处启停。
+    // 缓存的只有"本次开机的提示有没有给过"（见 ShizukuBootPrompt）。
+    val shizukuMonitor = remember(context) { ShizukuStatusMonitor(context) }
+    val shizukuStatus by shizukuMonitor.state.collectAsState()
+    var bootPromptStatus by remember { mutableStateOf<ShizukuStatus?>(null) }
+    var bootPromptChecked by remember { mutableStateOf(false) }
+    DisposableEffect(shizukuMonitor) {
+        shizukuMonitor.start()
+        onDispose { shizukuMonitor.stop() }
+    }
+
     val screenNow = rememberUpdatedState(screen)
     var awaitingReturn by remember { mutableStateOf(false) }
     var screenOffWhileBackgrounded by remember { mutableStateOf(false) }
@@ -171,6 +192,22 @@ fun DeskRoot(
                     // 授权状态可能在别处被改（用户去设置页开了通知使用权），
                     // 回到前台一律重查，避免卡片停在过期的"需要授权"上。
                     mediaMonitor.refresh()
+
+                    // Shizuku 同理：用户很可能是切去 Shizuku 点了「启动」再切回来的。
+                    // 重启后的那一次提示也挂在这里 —— 只在本次进程第一次回到前台时判定，
+                    // 判定过就不再打扰。
+                    shizukuMonitor.refresh()
+                    if (!bootPromptChecked) {
+                        bootPromptChecked = true
+                        if (shizukuMonitor.consumeBootPrompt()) {
+                            Log.i(
+                                SHELL_TAG,
+                                "first launch after boot, shizuku=${shizukuMonitor.state.value} -> prompt once",
+                            )
+                            bootPromptStatus = shizukuMonitor.state.value
+                        }
+                    }
+
                     when {
                         awaitingReturn && !screenOffWhileBackgrounded -> {
                             awaitingReturn = false
@@ -286,6 +323,27 @@ fun DeskRoot(
                                 })
                             },
                             glassBackdrop = glassBackdrop,
+                            shizukuStatus = shizukuStatus,
+                            onShizukuIndicatorClick = { screen = DeskScreen.SHIZUKU_GUIDE },
+                        )
+
+                        DeskScreen.SHIZUKU_GUIDE -> ShizukuGuideScreen(
+                            status = shizukuStatus,
+                            onRefresh = {
+                                shizukuMonitor.refresh()
+                                hostingController.refresh()
+                            },
+                            onRequestPermission = { ShizukuGate.requestPermission() },
+                            onOpenShizuku = {
+                                val intent = ShizukuGate.launchIntent(context)
+                                if (intent != null) {
+                                    runCatching { context.startActivity(intent) }
+                                        .onFailure { onMessage?.invoke("没能打开 Shizuku，请手动打开它") }
+                                } else {
+                                    onMessage?.invoke("设备上没有安装 Shizuku")
+                                }
+                            },
+                            onExit = { screen = DeskScreen.HOME },
                         )
 
                         DeskScreen.HOSTING -> HostingScreen(
@@ -306,8 +364,9 @@ fun DeskRoot(
                         )
                     }
 
-                    // 底栏浮在页面内容之上，首页与托管页共用；投屏页是全屏的，不带底栏。
-                    if (screen != DeskScreen.PROJECTION) {
+                    // 底栏浮在页面内容之上，首页与托管页共用；
+                    // 投屏页全屏、引导页自带「返回」，两者都不带底栏。
+                    if (screen == DeskScreen.HOME || screen == DeskScreen.HOSTING) {
                         Box(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
@@ -316,7 +375,7 @@ fun DeskRoot(
                             DockBar(
                                 items = defaultDockItems(),
                                 selectedId = when (screen) {
-                                    DeskScreen.HOME -> DockIds.HOME
+                                    DeskScreen.HOME, DeskScreen.SHIZUKU_GUIDE -> DockIds.HOME
                                     DeskScreen.HOSTING -> DockIds.HOSTING
                                     DeskScreen.PROJECTION -> DockIds.PROJECTION
                                 },
@@ -330,6 +389,19 @@ fun DeskRoot(
                                     if (screen == DeskScreen.HOME) glassBackdrop else null,
                             )
                         }
+                    }
+
+                    // 重启后的一次性提示。盖在首页之上，关掉就不再出现（同一个开机周期内）。
+                    val pendingPrompt = bootPromptStatus
+                    if (pendingPrompt != null && screen == DeskScreen.HOME) {
+                        ShizukuBootPromptCard(
+                            status = pendingPrompt,
+                            onOpenGuide = {
+                                bootPromptStatus = null
+                                screen = DeskScreen.SHIZUKU_GUIDE
+                            },
+                            onDismiss = { bootPromptStatus = null },
+                        )
                     }
                 }
             }

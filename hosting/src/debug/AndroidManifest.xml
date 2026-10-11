@@ -20,6 +20,13 @@
             android:label="托管提示页预览"
             android:screenOrientation="landscape" />
 
+        <activity
+            android:name=".debug.ShizukuPreviewActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboardHidden|uiMode"
+            android:exported="true"
+            android:label="Shizuku 状态预览"
+            android:screenOrientation="landscape" />
+
     </application>
 
 </manifest>

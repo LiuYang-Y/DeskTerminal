@@ -65,18 +65,21 @@ fun HostingNotice(
     ) {
         val maxCardHeight = maxHeight * 0.94f
 
+        // 外边距取 12 而不是 20：这辆车横屏只有 361 dp 高，卡片内容区每多要 8 dp
+        // 就得从步骤里挤出来，而步骤是被裁得最难看的一块。
         Surface(
             modifier = Modifier
                 .widthIn(max = 560.dp)
                 .heightIn(max = maxCardHeight)
-                .padding(20.dp),
+                .padding(12.dp),
             shape = RoundedCornerShape(20.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 2.dp,
         ) {
-            Column(modifier = Modifier.padding(20.dp)) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                // 只有"标题 + 步骤"参与滚动。
+                // fill = false：内容不多时按内容收缩，卡片不会硬撑到上限。
                 Column(
-                    // fill = false：内容不多时按内容收缩，卡片不会硬撑到上限。
                     modifier = Modifier
                         .weight(1f, fill = false)
                         .verticalScroll(rememberScrollState()),
@@ -105,20 +108,24 @@ fun HostingNotice(
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                     }
+                }
 
-                    if (!note.isNullOrBlank()) {
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.tertiaryContainer,
-                        ) {
-                            Text(
-                                text = note,
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                            )
-                        }
+                // note 与按钮一样**钉在滚动区之外**。
+                // 起初它放在滚动区末尾，结果是：内容一超高，这条提醒就被卡片边缘
+                // 齐腰切断 —— 只剩半截色块、字都看不见（真机上截到过这张图）。
+                // 提醒本身是"必须被读到"的信息，不能让它成为第一个被牺牲的东西。
+                if (!note.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.tertiaryContainer,
+                    ) {
+                        Text(
+                            text = note,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        )
                     }
                 }
 
