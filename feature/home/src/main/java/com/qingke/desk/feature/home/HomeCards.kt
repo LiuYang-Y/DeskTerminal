@@ -106,27 +106,48 @@ fun HomeCardTile(
  *
  * 刻意做成"大按钮而不是另一个入口"：卡片本身高度由栅格反推（见 :shell/HomeScreen），
  * 布局不能假设有多高，所以这里只用"图标 + 主副标题"三行，且整体居中，
- * 高度被压到 120 dp 左右也不会挤。
+ * 高度被压到 110 dp 左右也不会挤。
+ *
+ * 2026-10-11 改排版：原来是「图标 | 标题/副标题」两列，副标题只分到图标右边
+ * 那一小条 —— 基准机首页 198 dp 时够用，但地图布局把卡片压到 170 dp 后，
+ * 那一小条只剩约 79 dp，而 "iPhone · CarPlay" 在 13 sp 下要 129 dp，
+ * 真机上直接显示成 "iPhon…"。现在图标与标题同行、副标题**独享整卡宽度**，
+ * 再按宽度反推字号兜底，两种布局下都能完整显示。
  */
 @Composable
 private fun ProjectionBody(card: HomeCard) {
-    Row(
-        modifier = Modifier.fillMaxSize(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Icon(
-            imageVector = Icons.Default.Cast,
-            contentDescription = null,
-            tint = Color.White,
-            modifier = Modifier.size(DeskDimens.dockIconSize * 1.4f),
-        )
-        Column(modifier = Modifier.weight(1f)) {
-            Text(card.title, fontSize = DeskDimens.cardTitle, color = Color.White)
-            Spacer(modifier = Modifier.height(4.dp))
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val subtitleSize = minOf(
+            DeskDimens.cardCaption.value,
+            fitByWidth(card.subtitle, maxWidth.value),
+        ).coerceAtLeast(11f).sp
+
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Cast,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(DeskDimens.dockIconSize * 1.4f),
+                )
+                Text(
+                    text = card.title,
+                    fontSize = DeskDimens.cardTitle,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
             Text(
-                card.subtitle,
-                fontSize = DeskDimens.cardCaption,
+                text = card.subtitle,
+                fontSize = subtitleSize,
                 color = Color.White.copy(alpha = 0.7f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -244,13 +265,96 @@ private fun fitByWidth(text: String, availableDp: Float): Float {
     return (availableDp / em).toFloat()
 }
 
+/**
+ * 天气卡：城市 / 天气（上下两段，字号按宽度反推）+ 明细行。
+ *
+ * 2026-10-11 改：城市与天气也用 [fitByWidth] 兜底（原先是写死字号），
+ * 明细行不再复用 [LineRow]。真机截图里明细行只剩一个「…」——
+ * [LineRow] 给主文字 weight(1f)、右侧 trailing 是固有宽度，窄卡里主文字被挤没了。
+ * 明细行两段同等重要，改为各分一半、字号统一反推。
+ */
 @Composable
 private fun WeatherBody(card: HomeCard) {
-    Text(card.title, fontSize = DeskDimens.cardCaption, color = Color.White.copy(alpha = 0.7f))
-    Spacer(modifier = Modifier.height(6.dp))
-    Text(card.subtitle, fontSize = DeskDimens.cardTitle, color = Color.White)
-    Spacer(modifier = Modifier.height(12.dp))
-    LinesBody(card)
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val available = maxWidth.value
+        val citySize = minOf(DeskDimens.cardCaption.value, fitByWidth(card.title, available))
+            .coerceAtLeast(10f).sp
+        val tempSize = minOf(DeskDimens.cardTitle.value, fitByWidth(card.subtitle, available))
+            .coerceAtMost(24f).coerceAtLeast(15f).sp
+
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column {
+                Text(
+                    text = card.title,
+                    fontSize = citySize,
+                    color = Color.White.copy(alpha = 0.7f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = card.subtitle,
+                    fontSize = tempSize,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            card.lines.firstOrNull()?.let { WeatherDetailRow(it) }
+        }
+    }
+}
+
+/** 天气明细行：左侧图标 + 两段等分。 */
+@Composable
+private fun WeatherDetailRow(line: CardLine) {
+    val iconBlock = 20f + 10f
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        // 两段各分"去掉图标后的一半"，再取两者能完整显示的字号的较小值。
+        val share = ((maxWidth.value - iconBlock) / 2f).coerceAtLeast(1f)
+        val size = minOf(
+            DeskDimens.cardBody.value,
+            fitByWidth(line.text, share),
+            fitByWidth(line.trailing, share),
+        ).coerceAtLeast(11f).sp
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = iconFor(line.text),
+                contentDescription = null,
+                tint = Color.White.copy(alpha = 0.55f),
+                modifier = Modifier.size(20.dp),
+            )
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = line.text,
+                    fontSize = size,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (line.trailing.isNotBlank()) {
+                    Text(
+                        text = line.trailing,
+                        fontSize = size,
+                        color = Color.White.copy(alpha = 0.6f),
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable

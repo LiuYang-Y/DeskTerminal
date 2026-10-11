@@ -26,22 +26,20 @@ import androidx.compose.ui.unit.sp
  *   1440x3200 @560dpi → 横屏 3200x1440 = 914 x 411 dp，左侧挖孔 137 px
  * ---------------------------------------------------------------------------
  *
- * 横屏纵向预算（按当前基准机 361 dp 推导，改任何一个值都要重算）：
- *   DockBar     dockItemSize 64 + dockSpacing 12 = 76
- *   卡片区      361 - 76 = 285
- *   减内边距    285 - (top screenPadding 20 + bottom dockSpacing 12) = 253
- *   两行卡片    253 - gridGap 12 = 241 / 2 = 120.5 dp/张
- * 注意：120.5 < cardMinHeight 124 —— 这是允许的，cardMinHeight 是"反推行数"的下限，
- *   不是单卡实际高度。**卡片内不能再假设自己有多高**，大字号必须按可用高度反推
- *   （见 [TEXT_LINE_HEIGHT_RATIO] 与 feature:home 的时钟卡）。
- * 若 cardMinHeight 取到 140：行数会被压到 1 行（校正前实测到的情况）。
- *
- * 加了顶部状态栏之后的预算（2026-10-11 起，状态栏放 Shizuku 指示）：
- *   状态栏      statusBarTopPadding 8 + statusBarHeight 32 = 40
- *   栅格可用高  361 - 40 - dockContentBottomPadding 58 = 263
- *   两行卡片    (263 - gridTopPadding 8*2 - gridGap 12) / 2 = 117.5 dp/张
- *   反推行数    floor((263 + 12) / 136) = 2 —— 仍是 2 行，安全。
- *   状态栏再高 4 dp 或 cardMinHeight 提到 132 都会掉到 1 行，改动前先算这一行。
+ * 横屏纵向预算（2026-10-11 重算；改任何一个值都要回来重算这一段）：
+ *   状态栏      statusBarTopPadding 6 + statusBarHeight 32 = 38
+ *   底栏        卡片区停在底栏上边缘，再往上让 gridBottomGap 4 → 距屏幕底边 86
+ *   栅格可用高  361 - 38 - 86 = 237
+ *   扣上留白    237 - gridTopPadding 6 = 231
+ *   两行卡片    (231 - gridGap 12) / 2 = 109.5 dp/张
+ *   单卡内容区  109.5 - cardPadding 28 = 81.5 dp
+ * 反推行数：floor((231 + 12) / (cardMinHeight 108 + 12)) = 2 —— 与上面的两行自洽。
+ * 注意 cardMinHeight 只用来**从可用高度反推行数**，不等于单卡实际高度；
+ *   卡片里不能再假设自己有多高，字号必须按可用宽高反推
+ *   （见 [TEXT_LINE_HEIGHT_RATIO] 与 feature:home 的时钟卡 / 天气卡）。
+ * 历史坑：cardMinHeight 取过 140 → 只剩 1 行；状态栏 40 + 底部只让出 58
+ *   （内容允许探进底栏 24 dp）→ 第二排卡片被玻璃栏压住，真机截图确认过，
+ *   2026-10-11 改成现在这套口径。
  */
 object DeskDimens {
 
@@ -64,14 +62,14 @@ object DeskDimens {
     val statusBarHeight: Dp = 32.dp
 
     /** 状态栏距屏幕顶边的留白。 */
-    val statusBarTopPadding: Dp = 8.dp
+    val statusBarTopPadding: Dp = 6.dp
 
     /** 状态指示胶囊的高度与字号。 */
     val statusChipHeight: Dp = 28.dp
     val statusChipText: TextUnit = 12.sp
 
     /** 卡片栅格距状态栏的间距。原来卡片直接贴 [screenPadding]，加了状态栏后收紧。 */
-    val gridTopPadding: Dp = 8.dp
+    val gridTopPadding: Dp = 6.dp
 
     // ---------- 地图布局（首页让出一块竖屏托管面板）----------
 
@@ -113,14 +111,22 @@ object DeskDimens {
     const val GRID_ROWS: Int = 2
 
     /**
-     * 卡片最小高度下限。
-     * 基准机实测：取 140 时可用高度只够排 1 行，取 124 可稳定排 2 行且每张约 145 dp。
+     * 卡片最小高度下限，只用于**从可用高度反推行数**。
+     * 基准机实测：取 140 时可用高度只够排 1 行；108 可得 2 行。
+     * 2026-10-11 从 124 下调到 108：卡片区底部不再允许探进底栏之后，
+     * 160 高度的可用空间换成了 235，反推值要跟着走，否则会出现
+     * "算出 2 行、实际每张只有 111.5 dp" 的口径差。
      */
-    val cardMinHeight: Dp = 124.dp
+    val cardMinHeight: Dp = 108.dp
 
     val gridGap: Dp = 12.dp
     val cardCorner: Dp = 20.dp
-    val cardPadding: Dp = 16.dp
+
+    /**
+     * 卡片内边距。2026-10-11 由 16 收到 14：纵向预算里每张卡只多出 4 dp 内容区，
+     * 但这 4 dp 正好是"天气卡第四行不被裁"与"被裁"的分界。
+     */
+    val cardPadding: Dp = 14.dp
 
     // ---------- 大触控区（CarPlay 观感的核心）----------
 
@@ -148,15 +154,27 @@ object DeskDimens {
     val dockBarHeight: Dp = dockBarBottomMargin + dockItemSize + dockSpacing
 
     /**
-     * 内容允许探到图标栏下方的深度。
-     * 取值上限由卡片内容决定：基准机单卡约 135 dp 高、内容顶部对齐且四周有 16 dp 内边距，
-     * 底部约有一指宽是空的，探 24 dp 压不到任何文字。
-     * TODO(目视) [待校正]：这个值直接决定玻璃效果明不明显，需要真机截图确认。
+     * 卡片区底部与底栏玻璃胶囊上边缘之间再留的缝。
+     *
+     * 真机实测：只让出 [dockBarHeight]（等于胶囊上边缘到屏幕底边的距离）时，
+     * 第二排卡片底边正好压在胶囊的圆角留白里（差 10 px ≈ 3 dp），
+     * 视觉上像被"切"了一刀。补这 4 dp 之后卡片底边在胶囊上方 14 px 处，彻底不相干。
      */
-    val dockContentOverlap: Dp = 24.dp
+    val gridBottomGap: Dp = 4.dp
 
-    /** 内容区底部内边距。 = [dockBarHeight] - [dockContentOverlap]。 */
-    val dockContentBottomPadding: Dp = dockBarHeight - dockContentOverlap
+    /**
+     * 卡片区距屏幕底边的内边距：网格必须**整段停在底栏之上**。
+     *
+     * 2026-10-11 改：以前只让出 [dockBarHeight] 减 24 dp，允许内容探进底栏，
+     * 好让液态玻璃有东西可采样。但真机上第二排卡片的内容恰好落在那 24 dp 里
+     * （天气卡的「湿度 62%」、待办卡的第三行、音乐卡的进度条全被玻璃栏压住，
+     * 见真机截图）。卡片是内容、底栏是控件，让内容给装饰让路是本末倒置。
+     *
+     * 现在 = [dockBarHeight]（底栏上边缘距屏幕底边的距离）+ [gridBottomGap]，
+     * 网格下边缘与底栏之间留一条干净的缝。
+     * 代价是玻璃栏背后只剩纯底色、模糊效果变弱，这是刻意的取舍。
+     */
+    val gridBottomPadding: Dp = dockBarHeight + gridBottomGap
 
     /** 玻璃容器的圆角。做成浮动胶囊，四个边才有折射可看。 */
     val dockCorner: Dp = 28.dp

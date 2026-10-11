@@ -48,8 +48,12 @@ import kotlin.math.ceil
  *
  * 之所以从"Column 里加一行"改成"内容铺满 + 底栏浮在其上"：液态玻璃采的是
  * **它背后那一层内容**，若底栏独占一行、背后只有纯底色，模糊与折射都无从体现
- * （详见 DeskGlass 的说明）。现在内容区直接铺到屏幕底，底栏由 [DeskRoot] 统一浮在底部，
- * 并允许内容探进去 [DeskDimens.dockContentOverlap]，玻璃才有东西可采样。
+ * （详见 DeskGlass 的说明）。现在内容区直接铺到屏幕底，底栏由 [DeskRoot] 统一浮在底部。
+ *
+ * 但**卡片不铺到屏幕底**：卡片区底部按 [DeskDimens.gridBottomPadding] 停在底栏
+ * 上边缘齐平处。曾经允许内容探进底栏 24 dp 好给玻璃当采样素材，真机结果是
+ * 第二排卡片被玻璃栏压住（天气卡明细行、待办卡第三行、音乐卡进度条全被挡），
+ * 2026-10-11 改回"内容不与底栏重叠"。
  *
  * 底栏上提到 [DeskRoot] 是因为**它不再只属于首页**：地图布局（:hosting 的面板）
  * 也要从底栏切走，否则把第三方应用的画面铺出来之后就没有出口了。
@@ -188,8 +192,7 @@ fun HomeScreen(
  * 卡片区。
  *
  * 两件事在这里定：
- *  1. **行数**由"状态栏以下、底栏以上"的可用高度反推（口径与加状态栏之前一致：
- *     仍按整段内容区高度算，避免多出来的一行把卡片压扁）；
+ *  1. **行数**由"状态栏以下、底栏以上"的可用高度反推（口径见 [usableHeight]）；
  *  2. **超出可见行数时改为可滚动** —— 内容按总行数算出确定高度，可见区不变。
  *     今天 6 张卡 3 列正好 2 行，走不到滚动分支；等卡片变多（或地图布局把
  *     卡片区挤窄）时，行为是"能滚"而不是"把第 3 行裁掉"。
@@ -207,7 +210,7 @@ private fun CardArea(
     onMediaRequestPermission: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val rows = remember(areaHeight, cards.size) { computeRows(areaHeight) }
+    val rows = remember(areaHeight, cards.size) { computeRows(usableHeight(areaHeight)) }
     val totalRows = remember(columns, cards.size) {
         ceil(cards.size / columns.toFloat()).toInt().coerceAtLeast(1)
     }
@@ -245,18 +248,14 @@ private fun CardArea(
                 start = DeskDimens.screenPadding,
                 end = DeskDimens.screenPadding,
                 top = DeskDimens.gridTopPadding,
-                bottom = DeskDimens.dockContentBottomPadding,
+                bottom = DeskDimens.gridBottomPadding,
             ),
             itemContent = layoutsCards,
         )
         return
     }
 
-    val visibleHeight = (
-        areaHeight -
-            DeskDimens.gridTopPadding -
-            DeskDimens.dockContentBottomPadding
-        ).coerceAtLeast(0.dp)
+    val visibleHeight = usableHeight(areaHeight).coerceAtLeast(0.dp)
     val gap = DeskDimens.gridGap
     val cardHeight = ((visibleHeight - gap * (rows - 1)) / rows).coerceAtLeast(1.dp)
     val contentHeight = cardHeight * totalRows + gap * (totalRows - 1)
@@ -267,7 +266,7 @@ private fun CardArea(
                 start = DeskDimens.screenPadding,
                 end = DeskDimens.screenPadding,
                 top = DeskDimens.gridTopPadding,
-                bottom = DeskDimens.dockContentBottomPadding,
+                bottom = DeskDimens.gridBottomPadding,
             )
             .verticalScroll(rememberScrollState()),
     ) {
@@ -295,10 +294,19 @@ internal fun defaultDockItems(): List<DockItem> = listOf(
 )
 
 /**
+ * 卡片区真正能用的高度：内容区高度扣掉上留白与底部让给底栏的那一段。
+ *
+ * 口径统一在这里，**不写第二遍** —— 以前 computeRows 用整段内容区高度、
+ * 铺卡时又用扣过内边距的高度，两边不一致，结果"算出来 2 行"但每行实际矮了一截。
+ */
+private fun usableHeight(areaHeight: Dp): Dp =
+    (areaHeight - DeskDimens.gridTopPadding - DeskDimens.gridBottomPadding).coerceAtLeast(0.dp)
+
+/**
  * 可用高度能放下几行。
  *
- * 已按基准机（横屏 361 dp 高，扣掉状态栏 40 dp 后内容区 321 dp）核算：
- * cardMinHeight 取 124 时能稳定得到 2 行；取 140 时会被压成 1 行。
+ * 已按基准机（横屏 361 dp 高，状态栏 38 + 底栏让位 82 → 可用 235 dp）核算：
+ * cardMinHeight 取 108 时得到 2 行；取 140 时会被压成 1 行。
  * 换机器不需要改这里，改 [DeskDimens.cardMinHeight] 即可。
  */
 private fun computeRows(availableHeight: Dp): Int {
