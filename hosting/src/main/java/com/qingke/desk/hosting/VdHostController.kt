@@ -77,6 +77,10 @@ class VdHostController(
                     pendingAttach = null
                     svc.attach(it.surface, it.width, it.height, it.densityDpi)
                 }
+                // 每次接上都要重查一次 Shizuku：Service 可能还停在上一轮的
+                // Blocked(ShizukuNotRunning) 上，而用户刚刚已经把服务启起来了。
+                // 不查的话面板会一直是黑的，直到下一次 onResume。
+                svc.refreshShizuku()
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {

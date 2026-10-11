@@ -5,10 +5,17 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Home
@@ -34,6 +41,7 @@ import com.qingke.desk.feature.media.MediaCommand
 import com.qingke.desk.feature.media.MediaUiState
 import com.qingke.desk.hosting.ShizukuStatus
 import com.qingke.desk.hosting.ui.ShizukuStatusBar
+import kotlin.math.ceil
 
 /**
  * 首页：状态栏 + 内容区铺满。
@@ -43,8 +51,8 @@ import com.qingke.desk.hosting.ui.ShizukuStatusBar
  * （详见 DeskGlass 的说明）。现在内容区直接铺到屏幕底，底栏由 [DeskRoot] 统一浮在底部，
  * 并允许内容探进去 [DeskDimens.dockContentOverlap]，玻璃才有东西可采样。
  *
- * 底栏上提到 [DeskRoot] 是因为**它不再只属于首页**：托管页（:hosting）也要能
- * 从底栏切走，否则把第三方应用的画面铺满主区域之后就没有出口了。
+ * 底栏上提到 [DeskRoot] 是因为**它不再只属于首页**：地图布局（:hosting 的面板）
+ * 也要从底栏切走，否则把第三方应用的画面铺出来之后就没有出口了。
  *
  * 顶部状态栏是 2026-10-11 加的，放 Shizuku 的常驻指示。它**占实位**，不是浮层：
  * 横向 361 dp 的高度里，浮层压到卡片上比少 20 dp 更糟。纵向预算的账记在
@@ -83,6 +91,14 @@ fun HomeScreen(
     shizukuStatus: ShizukuStatus = ShizukuStatus.READY,
     /** 点状态栏上的指示 —— 进引导页。 */
     onShizukuIndicatorClick: () -> Unit = {},
+    /**
+     * 非空时切到**地图布局**：右侧让出一块竖屏面板给 :hosting 的虚拟屏，
+     * 卡片退到左侧，底栏原地不动。
+     *
+     * 面板只有画面出口，没有自己的状态提示 —— 被挡住 / 失败由 [DeskRoot]
+     * 用整屏提示盖住（面板只有 230×307 dp，塞不下三段步骤加两个按钮）。
+     */
+    hostingPanel: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -104,41 +120,167 @@ fun HomeScreen(
                 .weight(1f)
                 .deskGlassSource(glassBackdrop),
         ) {
-            val rows = remember(maxHeight, cards.size) { computeRows(maxHeight) }
-            CardGrid(
-                itemCount = cards.size,
-                columns = DeskDimens.GRID_COLUMNS,
-                rows = rows,
-                contentPadding = PaddingValues(
-                    start = DeskDimens.screenPadding,
-                    end = DeskDimens.screenPadding,
-                    top = DeskDimens.gridTopPadding,
-                    bottom = DeskDimens.dockContentBottomPadding,
-                ),
-            ) { index ->
-                val card = cards[index]
-                if (card.kind == HomeCardKind.MUSIC) {
-                    MediaCardTile(
-                        state = mediaState,
-                        onCommand = onMediaCommand,
-                        onRequestPermission = onMediaRequestPermission,
+            val areaHeight = maxHeight
+
+            if (hostingPanel == null) {
+                CardArea(
+                    cards = cards,
+                    columns = DeskDimens.GRID_COLUMNS,
+                    areaHeight = areaHeight,
+                    driftX = driftX,
+                    driftY = driftY,
+                    onCardSelect = onCardSelect,
+                    mediaState = mediaState,
+                    onMediaCommand = onMediaCommand,
+                    onMediaRequestPermission = onMediaRequestPermission,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                // 面板高度吃掉"状态栏以下、底栏以上"的整段，宽度由竖屏比例反推 ——
+                // 面板必须尽量大，它是这里唯一要看清的东西。
+                val panelHeight = (
+                    areaHeight -
+                        DeskDimens.hostingPanelTopGap -
+                        DeskDimens.hostingPanelBottomGap
+                    ).coerceAtLeast(0.dp)
+                val panelWidth = panelHeight * DeskDimens.HOSTING_PANEL_ASPECT
+
+                // 右侧留 [DeskDimens.screenPadding]：面板虽然靠右站，
+                // 但不该贴着屏幕物理边缘 —— 左边卡片有 20 dp 呼吸空间，
+                // 面板贴边会显得是"没做完"。
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(end = DeskDimens.screenPadding),
+                ) {
+                    CardArea(
+                        cards = cards,
+                        columns = DeskDimens.GRID_COLUMNS,
+                        areaHeight = areaHeight,
                         driftX = driftX,
                         driftY = driftY,
+                        onCardSelect = onCardSelect,
+                        mediaState = mediaState,
+                        onMediaCommand = onMediaCommand,
+                        onMediaRequestPermission = onMediaRequestPermission,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight(),
                     )
-                } else {
-                    HomeCardTile(
-                        card = card,
-                        driftX = driftX,
-                        driftY = driftY,
-                        onClick = if (card.kind == HomeCardKind.PROJECTION) {
-                            { onCardSelect(card) }
-                        } else {
-                            null
-                        },
-                    )
+                    Spacer(modifier = Modifier.width(DeskDimens.hostingPanelGap))
+                    // 用 offset 而不是 padding 定位：offset 不参与测量，
+                    // 面板的"高度"就还是那 307 dp，不会被外边距挤小一圈。
+                    Box(
+                        modifier = Modifier
+                            .offset(y = DeskDimens.hostingPanelTopGap)
+                            .width(panelWidth)
+                            .height(panelHeight),
+                    ) {
+                        hostingPanel()
+                    }
                 }
             }
         }
+    }
+}
+
+/**
+ * 卡片区。
+ *
+ * 两件事在这里定：
+ *  1. **行数**由"状态栏以下、底栏以上"的可用高度反推（口径与加状态栏之前一致：
+ *     仍按整段内容区高度算，避免多出来的一行把卡片压扁）；
+ *  2. **超出可见行数时改为可滚动** —— 内容按总行数算出确定高度，可见区不变。
+ *     今天 6 张卡 3 列正好 2 行，走不到滚动分支；等卡片变多（或地图布局把
+ *     卡片区挤窄）时，行为是"能滚"而不是"把第 3 行裁掉"。
+ */
+@Composable
+private fun CardArea(
+    cards: List<HomeCard>,
+    columns: Int,
+    areaHeight: Dp,
+    driftX: Dp,
+    driftY: Dp,
+    onCardSelect: (HomeCard) -> Unit,
+    mediaState: MediaUiState,
+    onMediaCommand: (MediaCommand) -> Unit,
+    onMediaRequestPermission: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val rows = remember(areaHeight, cards.size) { computeRows(areaHeight) }
+    val totalRows = remember(columns, cards.size) {
+        ceil(cards.size / columns.toFloat()).toInt().coerceAtLeast(1)
+    }
+    val layoutsCards: @Composable (Int) -> Unit = { index ->
+        val card = cards[index]
+        if (card.kind == HomeCardKind.MUSIC) {
+            MediaCardTile(
+                state = mediaState,
+                onCommand = onMediaCommand,
+                onRequestPermission = onMediaRequestPermission,
+                driftX = driftX,
+                driftY = driftY,
+            )
+        } else {
+            HomeCardTile(
+                card = card,
+                driftX = driftX,
+                driftY = driftY,
+                onClick = if (card.kind == HomeCardKind.PROJECTION) {
+                    { onCardSelect(card) }
+                } else {
+                    null
+                },
+            )
+        }
+    }
+
+    if (totalRows <= rows) {
+        CardGrid(
+            itemCount = cards.size,
+            modifier = modifier,
+            columns = columns,
+            rows = rows,
+            contentPadding = PaddingValues(
+                start = DeskDimens.screenPadding,
+                end = DeskDimens.screenPadding,
+                top = DeskDimens.gridTopPadding,
+                bottom = DeskDimens.dockContentBottomPadding,
+            ),
+            itemContent = layoutsCards,
+        )
+        return
+    }
+
+    val visibleHeight = (
+        areaHeight -
+            DeskDimens.gridTopPadding -
+            DeskDimens.dockContentBottomPadding
+        ).coerceAtLeast(0.dp)
+    val gap = DeskDimens.gridGap
+    val cardHeight = ((visibleHeight - gap * (rows - 1)) / rows).coerceAtLeast(1.dp)
+    val contentHeight = cardHeight * totalRows + gap * (totalRows - 1)
+
+    Box(
+        modifier = modifier
+            .padding(
+                start = DeskDimens.screenPadding,
+                end = DeskDimens.screenPadding,
+                top = DeskDimens.gridTopPadding,
+                bottom = DeskDimens.dockContentBottomPadding,
+            )
+            .verticalScroll(rememberScrollState()),
+    ) {
+        CardGrid(
+            itemCount = cards.size,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(contentHeight),
+            columns = columns,
+            rows = totalRows,
+            contentPadding = PaddingValues(0.dp),
+            itemContent = layoutsCards,
+        )
     }
 }
 

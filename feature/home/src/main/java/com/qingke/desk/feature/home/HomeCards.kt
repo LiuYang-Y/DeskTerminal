@@ -142,6 +142,11 @@ private fun ProjectionBody(card: HomeCard) {
  * 本机实测单卡内容区只有约 88.5 dp，而 56.sp 时钟 + 副标题需要约 95 dp ——
  * 写死字号会把日期裁掉一半（真机截图确认过的现象）。
  * 这里改成"副标题先占位，剩下的给时钟"，任何机器都不会再被裁。
+ *
+ * **宽度也要一起算**（2026-10-11 补）：地图布局把卡片区从 3×230 dp 压到 3×150 dp，
+ * 只按高度反推会让"08:37"直接被右边裁成"08:3"（真机截图确认过，不是估算）。
+ * 时间位数是已知的（HH:mm，5 个字符），数字字宽约为字号的 0.62 倍，
+ * 据此反推一个宽度上限，取两者的小值。
  */
 @Composable
 private fun ClockBody(card: HomeCard) {
@@ -150,9 +155,14 @@ private fun ClockBody(card: HomeCard) {
         val captionBlock = DeskDimens.cardBody.value * DeskDimens.TEXT_LINE_HEIGHT_RATIO
         val maxTimeSize = (maxHeight.value - gapDp - captionBlock) /
             DeskDimens.TEXT_LINE_HEIGHT_RATIO
-        val timeSize = maxTimeSize
+        val timeSize = minOf(maxTimeSize, fitByWidth(card.title, maxWidth.value))
             .coerceAtMost(DeskDimens.clockTime.value)
             .coerceAtLeast(24f)
+            .sp
+        // 副标题（"10月10日 星期六"）在窄卡里同样会溢出被裁，
+        // 同一个道理：能缩就缩，缩到 11 sp 还不下才轮到省略号。
+        val subtitleSize = minOf(DeskDimens.cardBody.value, fitByWidth(card.subtitle, maxWidth.value))
+            .coerceAtLeast(11f)
             .sp
 
         Column(
@@ -168,9 +178,10 @@ private fun ClockBody(card: HomeCard) {
             Spacer(modifier = Modifier.height(gapDp.dp))
             Text(
                 text = card.subtitle,
-                fontSize = DeskDimens.cardBody,
+                fontSize = subtitleSize,
                 color = Color.White.copy(alpha = 0.72f),
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
@@ -208,6 +219,29 @@ private fun MusicBody(card: HomeCard) {
         Icon(Icons.Default.MusicNote, contentDescription = "歌单", tint = Color.White.copy(alpha = 0.5f))
         Icon(Icons.Default.Cloud, contentDescription = "设备", tint = Color.White.copy(alpha = 0.5f))
     }
+}
+
+/**
+ * 非中日韩字符的宽度约为字号的多少倍。
+ *
+ * 只用于"反推字号上限"这一个用途，所以取一个偏保守的值：
+ * 数字实际约 0.55~0.58 em，冒号更窄，取 0.62 留出安全余量。
+ */
+private const val CLOCK_CHAR_WIDTH_RATIO = 0.62f
+
+/**
+ * 反推"这段文字在 [availableDp] 宽里完整显示的最大字号"。
+ *
+ * 中日韩字符按 1 em 宽、其余按 [CLOCK_CHAR_WIDTH_RATIO] em 估。
+ * 只是个估算，不做精确排版 —— 它的用途是"别把字裁掉"，而不是对齐像素。
+ * 真机（560 dpi，fontScale 1.0）核过两个样本：
+ * "08:37" 与 "10月10日 星期六" 在约 150 dp 宽的卡里都能完整显示。
+ */
+private fun fitByWidth(text: String, availableDp: Float): Float {
+    if (text.isEmpty()) return Float.MAX_VALUE
+    val em = text.sumOf { if (it.code > 0x2E80) 1.0 else CLOCK_CHAR_WIDTH_RATIO.toDouble() }
+    if (em <= 0.0) return Float.MAX_VALUE
+    return (availableDp / em).toFloat()
 }
 
 @Composable

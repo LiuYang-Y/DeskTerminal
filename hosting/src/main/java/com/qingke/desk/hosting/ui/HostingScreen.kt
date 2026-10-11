@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -26,25 +25,30 @@ import com.qingke.desk.hosting.HostState
 import com.qingke.desk.hosting.HostTargets
 import com.qingke.desk.hosting.ShizukuGate
 import com.qingke.desk.hosting.VdHostController
-import kotlinx.coroutines.delay
 import rikka.shizuku.Shizuku
 
-/** 彻底失败后停留多久自动回首页。留一点时间让人看清原因。 */
-private const val FAILED_AUTO_EXIT_MS = 3500L
-
 /**
- * 托管页：把被托管应用的画面铺在主区域，并把触摸转发过去。
+ * 托管面板：**只是被托管应用的那块画面**。
+ *
+ * 它**不再是整屏**。2026-10-11 起它被放进首页的地图布局里 —— 右侧一块
+ * 230 × 307 dp 的竖屏面板（见 :core:ui 的 DeskDimens.HOSTING_PANEL_ASPECT），
+ * 左边照旧是卡片，底栏原地不动。原因是高德强制竖屏：把竖屏应用铺在横屏整屏上
+ * 只会得到"中间一条、两边全黑"，不如老实给它一块竖屏的位置。
+ *
+ * 因此这里**不画任何整屏的东西**：没有背景色、没有被挡住的提示页 ——
+ * 那些由 [HostingOverlay] 以整屏浮层的形式给出（面板只有 230 dp 宽，塞不下
+ * 三段步骤加两个按钮）。面板自己只有两样东西：画面，和右上角的「返回 / 退出」。
  *
  * 三层结构：
  *   1. SurfaceView —— 虚拟屏的画面出口。虚拟屏由 **Service** 持有（见 VdHostService），
  *      这里只负责在 surface 可用时把 Surface 交给它；Activity 重建时本 View 会重建，
  *      但虚拟屏和目标应用都不受影响。
- *   2. 手势层 —— 把 Compose 收到的点击/拖拽换算成虚拟屏坐标，
- *      交给 Service 通过 `input -d` 注入。
- *   3. 状态层 —— 启动中 / 被挡住 / 失败 三种情况的遮罩。
+ *   2. 手势层 —— 把点击/拖拽换算成虚拟屏坐标，交给 Service 通过 `input -d` 注入。
+ *      坐标天然就是这块 View 的物理像素，而虚拟屏正是按它的像素尺寸建的。
+ *   3. 启动中的一行状态条。
  */
 @Composable
-fun HostingScreen(
+fun HostingPanel(
     controller: VdHostController,
     onExitToHome: () -> Unit,
     modifier: Modifier = Modifier,
@@ -54,11 +58,13 @@ fun HostingScreen(
 
     DisposableEffect(controller) {
         controller.bind()
+        // 面板每次被挂上都重查一次：用户很可能是从引导页（或 Shizuku 应用）回来的，
+        // 而那时候本组合根本不在树上，收不到 ON_RESUME。
+        controller.refresh()
         onDispose { controller.unbind() }
     }
 
     // Shizuku 的授权弹窗由用户在系统弹窗里自己点 —— 这里只接收结果。
-    // 拿不到结果就永远不会从"未授权"变成"可用"，所以这个监听是必须的。
     DisposableEffect(controller) {
         val listener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
             HostLog.i("shizuku permission result: code=$requestCode granted=$grantResult")
@@ -68,25 +74,15 @@ fun HostingScreen(
         onDispose { Shizuku.removeRequestPermissionResultListener(listener) }
     }
 
-    // 回到前台就重查一次 Shizuku：用户很可能是切到 Shizuku App 里点了"启动"再切回来的，
-    // 不在 onResume 重查的话，界面会一直停在"未运行"直到下次冷启动。
     DisposableEffect(lifecycleOwner, controller) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                HostLog.d("hosting screen resumed -> refresh")
+                HostLog.d("hosting panel resumed -> refresh")
                 controller.refresh()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    // 重试耗尽：看完原因自动回首页，不把用户丢在一个没有画面的页面上。
-    LaunchedEffect(state) {
-        if (state is HostState.Failed) {
-            delay(FAILED_AUTO_EXIT_MS)
-            onExitToHome()
-        }
     }
 
     Box(
@@ -100,15 +96,6 @@ fun HostingScreen(
         )
 
         when (val current = state) {
-            HostState.Idle -> Unit
-
-            is HostState.Blocked -> BlockedNotice(
-                reason = current.reason,
-                onRefresh = { controller.refresh() },
-                onRequestPermission = { controller.requestShizukuPermission() },
-                onExit = onExitToHome,
-            )
-
             is HostState.Starting -> HostingStatusBar(
                 text = if (current.attempt > 1) {
                     "虚拟屏重建中（第 ${current.attempt} 次）…"
@@ -126,17 +113,47 @@ fun HostingScreen(
                 },
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(12.dp),
+                    .padding(8.dp),
             )
 
-            is HostState.Failed -> HostingNotice(
-                title = "托管未能启动",
-                steps = listOf(current.reason),
-                note = "即将返回首页。回到首页后点底栏的「地图」可以再来一次。",
-                primaryAction = "立即返回首页",
-                onPrimaryAction = onExitToHome,
-            )
+            else -> Unit
         }
+    }
+}
+
+/**
+ * 整屏浮层：托管被挡住 / 失败时的说明页。
+ *
+ * 由 [com.qingke.desk.shell.DeskRoot] 在地图布局之上盖出来，而不是画进面板里 ——
+ * 面板只有 230 dp 宽，而"三步操作 + 一段提醒 + 两个按钮"是这个模块最不能省的内容。
+ */
+@Composable
+fun HostingOverlay(
+    state: HostState,
+    onRefresh: () -> Unit,
+    onRequestPermission: () -> Unit,
+    onExit: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    when (state) {
+        is HostState.Blocked -> BlockedNotice(
+            reason = state.reason,
+            onRefresh = onRefresh,
+            onRequestPermission = onRequestPermission,
+            onExit = onExit,
+            modifier = modifier,
+        )
+
+        is HostState.Failed -> HostingNotice(
+            title = "托管未能启动",
+            steps = listOf(state.reason),
+            note = "即将返回首页。回到首页后点底栏的「地图」可以再来一次。",
+            primaryAction = "立即返回首页",
+            onPrimaryAction = onExit,
+            modifier = modifier,
+        )
+
+        else -> Unit
     }
 }
 
@@ -284,6 +301,7 @@ fun BlockedNotice(
     onRefresh: () -> Unit = {},
     onRequestPermission: () -> Unit = {},
     onExit: () -> Unit = {},
+    modifier: Modifier = Modifier,
 ) {
     when (reason) {
         BlockReason.ShizukuNotInstalled -> HostingNotice(
@@ -296,20 +314,22 @@ fun BlockedNotice(
             note = "重启手机后 Shizuku 会停止运行，需要重新打开它点一次「启动」。",
             secondaryAction = "返回首页",
             onSecondaryAction = onExit,
+            modifier = modifier,
         )
 
         BlockReason.ShizukuNotRunning -> HostingNotice(
             title = "Shizuku 未运行",
             steps = listOf(
-                "打开设备上的 Shizuku 应用。",
-                "点「启动」（首次使用需要先在 开发者选项 → 无线调试 里用配对码配对一次）。",
-                "回到本应用，点下面的「重新检测」。",
+                "到 设置 → 开发者选项 → 无线调试，把开关打开。",
+                "打开 Shizuku 应用点「启动」—— 首次要按提示用配对码配对一次。",
+                "回到本应用点「重新检测」。",
             ),
-            note = "重启手机后 Shizuku 会停止运行，需要重新打开它点一次「启动」。",
+            note = "重启手机后无线调试会关闭、Shizuku 也会停，需要再来一次。",
             primaryAction = "重新检测",
             onPrimaryAction = onRefresh,
             secondaryAction = "返回首页",
             onSecondaryAction = onExit,
+            modifier = modifier,
         )
 
         BlockReason.ShizukuNotAuthorized -> HostingNotice(
@@ -317,13 +337,14 @@ fun BlockedNotice(
             steps = listOf(
                 "点「请求授权」后会弹出 Shizuku 的授权窗口。",
                 "请在弹窗里自己点「允许」—— 这一步只能由你确认，本应用不会、也无法代替你点击。",
-                "授权后本页会自动继续；没看到弹窗就再点一次。",
+                "授权后本页会自动继续。",
             ),
             note = "当前 Shizuku 身份：${ShizukuGate.describeIdentity()}。重启手机后需重新点一次「启动」（已授予的授权通常会保留）。",
             primaryAction = "请求授权",
             onPrimaryAction = onRequestPermission,
             secondaryAction = "返回首页",
             onSecondaryAction = onExit,
+            modifier = modifier,
         )
 
         is BlockReason.TargetMissing -> HostingNotice(
@@ -334,6 +355,7 @@ fun BlockedNotice(
             ),
             secondaryAction = "返回首页",
             onSecondaryAction = onExit,
+            modifier = modifier,
         )
     }
 }

@@ -52,8 +52,10 @@ import com.qingke.desk.feature.media.MediaUiState
 import com.qingke.desk.hosting.ShizukuGate
 import com.qingke.desk.hosting.ShizukuStatus
 import com.qingke.desk.hosting.ShizukuStatusMonitor
+import com.qingke.desk.hosting.HostState
 import com.qingke.desk.hosting.VdHostController
-import com.qingke.desk.hosting.ui.HostingScreen
+import com.qingke.desk.hosting.ui.HostingOverlay
+import com.qingke.desk.hosting.ui.HostingPanel
 import com.qingke.desk.hosting.ui.ShizukuBootPromptCard
 import com.qingke.desk.hosting.ui.ShizukuGuideScreen
 import com.qingke.desk.projection.api.AvailabilityAction
@@ -66,6 +68,9 @@ import kotlinx.coroutines.delay
 
 /** 壳层的生命周期日志 tag。排查"到底算不算从外部回来"时靠它（adb logcat -s DeskShell）。 */
 private const val SHELL_TAG = "DeskShell"
+
+/** 彻底失败后停留多久自动回首页。留一点时间让人看清原因。 */
+private const val FAILED_AUTO_EXIT_MS = 3500L
 
 enum class DeskScreen {
     HOME,
@@ -132,6 +137,15 @@ fun DeskRoot(
     // 每切一次就重建虚拟屏 + 重新拉起高德是不可接受的（实测一次拉起要 1~2 秒）。
     // 想彻底收掉用托管页右上角的「退出」。
     val hostingController = remember(context) { VdHostController(context) }
+    val hostingState by hostingController.state.collectAsState()
+
+    // 重试耗尽：看完原因自动回首页，不把用户丢在一块什么都没有的面板上。
+    LaunchedEffect(hostingState, screen) {
+        if (hostingState is HostState.Failed && screen == DeskScreen.HOSTING) {
+            delay(FAILED_AUTO_EXIT_MS)
+            screen = DeskScreen.HOME
+        }
+    }
 
     // ---- Shizuku 状态 -------------------------------------------------------
     //
@@ -299,8 +313,11 @@ fun DeskRoot(
                 // 反过来说，底栏不能提到 IdleGuard 外面 —— 那样屏保亮着的时候
                 // 底栏还浮在上面可点，用户会在"睡着了"的屏幕上误切页面。
                 Box(modifier = Modifier.fillMaxSize()) {
-                    when (screen) {
-                        DeskScreen.HOME -> HomeScreen(
+                    // 首页与"地图布局"是**同一个页面**，只差右侧有没有那块托管面板。
+                    // 抽成一个 lambda 是为了让两条分支共用同一份参数，
+                    // 避免以后加卡片 / 加参数时只改了一边。
+                    val homePane: @Composable ((@Composable () -> Unit)?) -> Unit = { panel ->
+                        HomeScreen(
                             cards = cards,
                             driftX = drift.first.dp,
                             driftY = drift.second.dp,
@@ -322,10 +339,18 @@ fun DeskRoot(
                                     onMessage?.invoke(reason)
                                 })
                             },
-                            glassBackdrop = glassBackdrop,
+                            // 地图布局背后是 SurfaceView —— 它走独立图层，Compose 的
+                            // 背景层采不到它的内容（会录成一片黑）。那时候给底栏玻璃
+                            // 只会得到一条发黑的条子，所以地图布局直接关掉玻璃。
+                            glassBackdrop = if (panel == null) glassBackdrop else null,
                             shizukuStatus = shizukuStatus,
                             onShizukuIndicatorClick = { screen = DeskScreen.SHIZUKU_GUIDE },
+                            hostingPanel = panel,
                         )
+                    }
+
+                    when (screen) {
+                        DeskScreen.HOME -> homePane(null)
 
                         DeskScreen.SHIZUKU_GUIDE -> ShizukuGuideScreen(
                             status = shizukuStatus,
@@ -346,10 +371,14 @@ fun DeskRoot(
                             onExit = { screen = DeskScreen.HOME },
                         )
 
-                        DeskScreen.HOSTING -> HostingScreen(
-                            controller = hostingController,
-                            onExitToHome = { screen = DeskScreen.HOME },
-                        )
+                        // 地图布局：首页 + 右侧竖屏托管面板。面板本身只有一个画面出口，
+                        // 被挡住 / 失败由下面的整屏浮层说明。
+                        DeskScreen.HOSTING -> homePane {
+                            HostingPanel(
+                                controller = hostingController,
+                                onExitToHome = { screen = DeskScreen.HOME },
+                            )
+                        }
 
                         DeskScreen.PROJECTION -> ProjectionScreen(
                             uiState = connectionState,
@@ -364,12 +393,36 @@ fun DeskRoot(
                         )
                     }
 
+                    // 托管被挡住 / 失败：整屏说明页。放在底栏**之前**，让底栏仍然露在上面 ——
+                    // 出问题的时候，用户最需要的是"还能从这儿切走"，而不是被一块提示页关在里面。
+                    if (screen == DeskScreen.HOSTING) {
+                        val hostingNow = hostingState
+                        if (hostingNow is HostState.Blocked || hostingNow is HostState.Failed) {
+                            HostingOverlay(
+                                state = hostingNow,
+                                onRefresh = { hostingController.refresh() },
+                                onRequestPermission = { hostingController.requestShizukuPermission() },
+                                onExit = { screen = DeskScreen.HOME },
+                            )
+                        }
+                    }
+
                     // 底栏浮在页面内容之上，首页与托管页共用；
                     // 投屏页全屏、引导页自带「返回」，两者都不带底栏。
                     if (screen == DeskScreen.HOME || screen == DeskScreen.HOSTING) {
                         Box(
                             modifier = Modifier
-                                .align(Alignment.BottomCenter)
+                                // 地图布局里底栏必须**靠左站**：底栏整体约 468 dp 宽，
+                                // 居中时右端会伸到 x≈631 dp，而托管面板的左边界在 543 dp
+                                // ——真机上「手机投屏」那一项就是被面板盖掉的。
+                                // 靠左之后底栏止于约 524 dp，与面板之间留出约 20 dp。
+                                .align(
+                                    if (screen == DeskScreen.HOSTING) {
+                                        Alignment.BottomStart
+                                    } else {
+                                        Alignment.BottomCenter
+                                    },
+                                )
                                 .windowInsetsPadding(WindowInsets.displayCutout),
                         ) {
                             DockBar(

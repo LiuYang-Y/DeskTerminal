@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -143,55 +144,113 @@ private fun ActiveBody(
         }
     }
 
-    Row(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .padding(DeskDimens.cardPadding),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Artwork(track)
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight(),
-            verticalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column {
-                Text(
-                    text = track.title,
-                    fontSize = 17.sp,
-                    color = Color.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = subtitleOf(track),
-                    fontSize = 11.sp,
-                    color = Color.White.copy(alpha = 0.72f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+        // 窄卡走另一套排布：**封面先让位**。
+        //
+        // 地图布局把卡片从 230 dp 压到约 150 dp 之后，内容区只剩约 118 dp，
+        // 而封面自己就占 60 dp + 12 dp 间距 —— 剩下 46 dp 里排三个 40 dp 的控制键，
+        // 结果是被裁到只剩半个图标（真机截图确认：三键全废）。
+        // 控制键是这张卡唯一能操作的部分，不能让它第一个被牺牲，所以这里
+        // 放弃封面，把宽度还给标题和三键。
+        // maxWidth 属于 BoxWithConstraintsScope，进到 Column / Row 的 content lambda
+        // 之后隐式 receiver 就换成 ColumnScope / RowScope 了，这里先取出来带过去。
+        val availableWidth = maxWidth
+        val narrow = !canKeepArtwork(availableWidth)
 
-            if (track.hasDuration) {
-                // 注意：Material3 的 progress 参数**不是**可组合 lambda，
-                // 里面不能调 @Composable 函数。所以实时进度在外面算好再以普通值传进来。
-                val progress = progressOf(track, nowMs)
-                LinearProgressIndicator(
-                    progress = { progress },
+        val titleBlock: @Composable () -> Unit = { TitleBlock(track) }
+        val progressBlock: @Composable () -> Unit = { ProgressBlock(track, nowMs) }
+
+        if (narrow) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.SpaceBetween,
+            ) {
+                titleBlock()
+                progressBlock()
+                Controls(track, onCommand, narrowControlSize(availableWidth))
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.spacedBy(ArtGap),
+            ) {
+                Artwork(track)
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp)),
-                    color = Color.White,
-                    trackColor = Color.White.copy(alpha = 0.22f),
-                )
-            } else {
-                Spacer(modifier = Modifier.height(4.dp))
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    titleBlock()
+                    progressBlock()
+                    Controls(track, onCommand, ControlSize)
+                }
             }
-
-            Controls(track, onCommand)
         }
+    }
+}
+
+/**
+ * 封面能不能留。
+ *
+ * 判据不是"卡片有多宽"，而是"留了封面之后三个控制键还排不排得下"——
+ * 因为这张卡唯一的操作就是这三个键，它们比封面重要得多。
+ *
+ * 基准机实测：
+ *  - 首页三列时内容区 198 dp，留封面后剩 126 dp，三个 40 dp 键要 120 dp —— 刚好够，封面保留；
+ *  - 地图布局把卡片压到约 150 dp，留封面后只剩约 46 dp —— 排不下，封面让位。
+ * 原先按"卡片宽度 < 200 dp 就算窄"一刀切，结果首页（198 dp）也被误判成窄卡把封面丢了，
+ * 所以改成这种"按内容算"的写法。
+ */
+private val ArtGap: Dp = 12.dp
+
+private fun canKeepArtwork(available: Dp): Boolean =
+    available - ArtSize - ArtGap >= ControlSize * 3
+
+/** 窄卡里控制键的边长：均分可用宽度，但不小于 28 dp（手臂距离外的最小可点尺寸）。 */
+private fun narrowControlSize(available: Dp): Dp = ((available - 8.dp) / 3).coerceIn(28.dp, ControlSize)
+
+@Composable
+private fun TitleBlock(track: MediaTrack) {
+    Column {
+        Text(
+            text = track.title,
+            fontSize = 17.sp,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = subtitleOf(track),
+            fontSize = 11.sp,
+            color = Color.White.copy(alpha = 0.72f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun ProgressBlock(track: MediaTrack, nowMs: Long) {
+    if (track.hasDuration) {
+        // 注意：Material3 的 progress 参数**不是**可组合 lambda，
+        // 里面不能调 @Composable 函数。所以实时进度在外面算好再以普通值传进来。
+        val progress = progressOf(track, nowMs)
+        LinearProgressIndicator(
+            progress = { progress },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp)),
+            color = Color.White,
+            trackColor = Color.White.copy(alpha = 0.22f),
+        )
+    } else {
+        Spacer(modifier = Modifier.height(4.dp))
     }
 }
 
@@ -246,15 +305,20 @@ private fun Artwork(track: MediaTrack) {
 private fun Controls(
     track: MediaTrack,
     onCommand: (MediaCommand) -> Unit,
+    buttonSize: Dp,
 ) {
     // SpaceEvenly 而不是 spacedBy：三个按钮在基准机只有约 126 dp 可用宽，
     // 固定间距会顶出去，让它们自己均分才不会溢出。
+    // 图标随按钮一起缩，否则 28 dp 的圈里塞 26 dp 的图标会顶边。
+    val iconSize = minOf(ControlIcon, buttonSize * 0.65f)
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         ControlButton(
+            size = buttonSize,
             enabled = track.canSkipPrevious,
             onClick = { onCommand(MediaCommand.PREVIOUS) },
         ) {
@@ -262,10 +326,11 @@ private fun Controls(
                 imageVector = Icons.Default.SkipPrevious,
                 contentDescription = "上一首",
                 tint = Color.White,
-                modifier = Modifier.size(ControlIcon),
+                modifier = Modifier.size(iconSize),
             )
         }
         ControlButton(
+            size = buttonSize,
             enabled = track.canPlayPause,
             onClick = { onCommand(MediaCommand.PLAY_PAUSE) },
         ) {
@@ -273,10 +338,11 @@ private fun Controls(
                 imageVector = if (track.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                 contentDescription = if (track.isPlaying) "暂停" else "播放",
                 tint = Color.White,
-                modifier = Modifier.size(ControlIcon),
+                modifier = Modifier.size(iconSize),
             )
         }
         ControlButton(
+            size = buttonSize,
             enabled = track.canSkipNext,
             onClick = { onCommand(MediaCommand.NEXT) },
         ) {
@@ -284,7 +350,7 @@ private fun Controls(
                 imageVector = Icons.Default.SkipNext,
                 contentDescription = "下一首",
                 tint = Color.White,
-                modifier = Modifier.size(ControlIcon),
+                modifier = Modifier.size(iconSize),
             )
         }
     }
@@ -319,14 +385,15 @@ private fun subtitleOf(track: MediaTrack): String {
  */
 @Composable
 private fun ControlButton(
+    size: Dp,
     enabled: Boolean,
     onClick: () -> Unit,
     content: @Composable () -> Unit,
 ) {
     Box(
         modifier = Modifier
-            .size(ControlSize)
-            .clip(RoundedCornerShape(ControlSize / 2))
+            .size(size)
+            .clip(RoundedCornerShape(size / 2))
             .alpha(if (enabled) 1f else 0.3f)
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
