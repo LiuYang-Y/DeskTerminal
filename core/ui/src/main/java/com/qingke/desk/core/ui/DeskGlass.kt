@@ -1,7 +1,12 @@
 package com.qingke.desk.core.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
@@ -149,3 +154,100 @@ fun Modifier.deskGlassSurface(
  * 是本工程明确要避开的坑（见 [deskGlassSurface] 的类注释）。
  */
 val DeskGlass.indicatorAlpha: Float get() = 0.26f
+
+/**
+ * 浮在**独立图层**之上的控件用的"玻璃外观"（静态近似）。
+ *
+ * 为什么不能用 [deskGlassSurface]：真玻璃靠 Compose 的背景层（`layerBackdrop`）
+ * 把"玻璃背后是什么"录下来再重绘。而地图与导航画面走的是**独立 Surface/GL 图层**
+ * （`MapView`、`AMapNaviView` 都是），Compose 的背景层采不到它们的像素 ——
+ * 套上去只会得到一块"模糊了自家底色"的暗块，不是"模糊了地图"的玻璃。
+ * 这不是推测：`:map` 的 AMapCanvas 早就因为同一原因关掉了玻璃，
+ * DeskRoot 里也写着"MapView 走独立图层，Compose 的背景层采不到它的内容（会录成一片黑）"。
+ *
+ * ---------------------------------------------------------------------------
+ * "地图浮层能不能做真高斯模糊" 的完整核实（2026-10-12，用户提出要加模糊）
+ *
+ * 结论：**当前结构下做不到**，且换 View 类型也救不回来。三条证据互相独立：
+ *   1. `adb shell dumpsys SurfaceFlinger --list` 里有独立层
+ *      `SurfaceView - com.qingke.desk/com.qingke.desk.MainActivity#1` ——
+ *      地图是**打洞**的独立图层，它的像素不属于本窗口的合成内容，谁也采样不到；
+ *   2. `adb shell dumpsys activity com.qingke.desk/.MainActivity` 的 `View Hierarchy`
+ *      在 `com.amap.api.maps.MapView{0,0-2755,1440}` 这一级**终止**（没有更深子 View），
+ *      与第 1 条吻合。（顺带更正一条旧说法：MapViewHost 注释里"高德 MapView 内部是
+ *      TextureView"是当初未验证的推断，实测不成立。）
+ *   3. 高德确实提供 `TextureMapView`（jar 里有，`extends FrameLayout`），但换过去也没用：
+ *      `AndroidView` 的内容是在 `dispatchDraw` 阶段绘制的，而 Compose 的玻璃背景层
+ *      是在 `onDraw` 期间录制的 —— 录的是"这一刻已画上去的东西"，
+ *      **后画的子 View 录不进去**。这一条已被本项目实证过（第 168 行的"录成一片黑"）。
+ *
+ * 所以这块浮层的位置只有两种选择：静态近似（本函数），或者牺牲掉玻璃感换纯色实心板。
+ * 用户抱怨的"看不清"属于**对比度**问题，不是"缺模糊"问题 —— 解法是把底做深
+ * （[DeskGlass.overlayAlpha] 0.55 → 0.72）并补上磨砂的漫散射光感，而不是去伪造模糊。
+ * ---------------------------------------------------------------------------
+ *
+ * 所以地图上的控件用这一套：**同一族圆角、同一档半透明、同一方向的内高光**，
+ * 只是不做折射与模糊。观感上与侧栏那块真玻璃是同一个语言，
+ * 这也是这类图层上唯一诚实的做法 —— 假装有模糊只会看起来像脏了一块。
+ *
+ * 用法（顺序不能换：阴影要画在裁剪之外，描边要画在圆角之内）：
+ * ```
+ * Modifier
+ *     .shadow(6.dp, shape)
+ *     .deskGlassOverlay(shape)
+ * ```
+ *
+ * @param shape 圆角形状。与真玻璃一样由调用方给，保证同一屏里的圆角是同一套值。
+ * @param alpha 半透明底的强度。浮在地图上要**比侧栏高**（0.12）—— 地图明暗变化大，
+ *              太透会读不清字。
+ * @param surfaceColor 默认**深色**（`Color.Black`）：整机是暗色主题、文字是浅色，
+ *              用浅色玻璃的话浅字压在浅底上等于看不见。深色玻璃在白天浅色地图与
+ *              夜间深色地图上都读得清，是唯一两头都成立的选择。
+ */
+fun Modifier.deskGlassOverlay(
+    shape: Shape,
+    alpha: Float = DeskGlass.overlayAlpha,
+    surfaceColor: Color = Color.Black,
+): Modifier = this
+    .clip(shape)
+    .background(surfaceColor.copy(alpha = alpha))
+    // 磨砂的"光感"。真模糊做不到（原因见上），但"一块磨砂玻璃"和"一块纯色板"的
+    // 区别主要不在模糊，而在**漫散射光**：上边缘受光、下边缘掠射。
+    // 所以这里叠一层极淡的竖向白光（顶部 5%、底部 2%），代价是一次 drawRect，
+    // 比做任何采样都便宜，而且不会随地图变色而失效。
+    .drawBehind {
+        drawRect(
+            brush = Brush.verticalGradient(
+                0f to Color.White.copy(alpha = DeskGlass.frostSheenTop),
+                0.5f to Color.Transparent,
+                1f to Color.White.copy(alpha = DeskGlass.frostSheenBottom),
+            ),
+        )
+    }
+    .border(
+        width = 1.dp,
+        brush = Brush.verticalGradient(
+            listOf(
+                Color.White.copy(alpha = 0.42f),
+                Color.White.copy(alpha = 0.08f),
+            ),
+        ),
+        shape = shape,
+    )
+
+/**
+ * 地图浮层用的不透明度。
+ *
+ * 从 0.55 提到 **0.72**（2026-10-12，用户反馈"有点看不清"）。
+ * 旧注释里"0.72 会发白、读不清"这个结论**只在配白色蒙版时成立** ——
+ * 那版是 `Color.White.copy(alpha = 0.72)`，浅色蒙版 + 浅色文字当然糊成一团。
+ * 现在蒙版是深色（[Color.Black]），提高不透明度只会让底更沉、文字更跳出来，
+ * 不存在发白问题。**"看不清"要往深里走，不是往透里走。**
+ */
+val DeskGlass.overlayAlpha: Float get() = 0.72f
+
+/** 磨砂高光：上边缘受光。 */
+val DeskGlass.frostSheenTop: Float get() = 0.05f
+
+/** 磨砂高光：下边缘掠射。数值比上边缘小，光才是从上打下来的。 */
+val DeskGlass.frostSheenBottom: Float get() = 0.02f

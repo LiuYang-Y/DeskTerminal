@@ -95,9 +95,16 @@ class MapViewHost(
             return existing
         }
         // 重挂后黑屏的候选解法（2026-10-12）：
-        // 高德 MapView 内部是 TextureView，被 detach 时 SurfaceTexture 会被销毁，
-        // 高德给了两个开关来改变这个行为。先打开试试，看能不能让"重挂"之后自己恢复渲染。
-        // —— 若这两个开关没用，就说明 SDK 不支持跨容器重挂，只能退回"每屏各自一个实例"。
+        // 高德给了几个开关来改变"被 detach 时内部纹理被销毁"的行为，先打开试试，
+        // 看能不能让"重挂"之后自己恢复渲染。
+        //
+        // 更正一条旧说法：这里原先写着"高德 MapView 内部是 TextureView" —— 那是**推断**，
+        // 后来实测不成立：`dumpsys SurfaceFlinger --list` 里有独立层
+        // `SurfaceView - com.qingke.desk/...MainActivity#1`，`dumpsys activity` 的
+        // View Hierarchy 也在 `com.amap.api.maps.MapView{0,0-2755,1440}` 这一级终止。
+        // 本机走的是 **GL SurfaceView（打洞独立图层）**，这几个 `setTexture*` 开关
+        // 是给 SDK 内部的纹理路径准备的，对当前路径未必生效（保留无害，重挂恢复确实做到了）。
+        // 这个事实的另一个后果：地图浮层做不了真背景模糊，见 core/ui 的 DeskGlass.kt。
         runCatching { MapsInitializer.setTextureViewDestorySync(true) }
             .onFailure { MapLog.w("setTextureViewDestorySync failed: ${it.javaClass.simpleName}") }
         runCatching { MapsInitializer.setTextureDestroyedRender(true) }
