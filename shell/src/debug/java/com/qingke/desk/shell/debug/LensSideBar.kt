@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -106,17 +107,30 @@ private const val LENS_FADE_SPAN: Float = 0.30f
  * ---------------------------------------------------------------------------
  * 竖向布局的溢出：**不越界**
  *
- * 侧栏宽 76 = 项 64 + 内边距 6×2。镜片取 72（比项大 8），居中于项之后
- * 左右各占 2dp 余量 —— 仍在 76dp 的侧栏内，永远不会压到内容区。
- * 想要更大的鼓出（≥84dp）才需要讨论"朝外被窗口裁 / 朝内压内容"的取舍。
+ * 侧栏宽 76 = 项 64 + 内边距 6×2。镜片取 68 而不是"看起来更能装"的 72，是两条
+ * 硬约束挤出来的结果（详见 [LensSpec.lensSize] 的注释）：
+ *   1. 静止时居中于项，左右各占 2dp 余量 —— 仍在 76dp 的侧栏内；
+ *   2. **按下放大 1.12 倍之后也不能探出侧栏**：68 × 1.12 ≈ 76.2dp，取 72 就会在
+ *      施工按下的那一瞬多出 8px，压到内容区里去。
+ * 想要更大的鼓出，得先解决第 2 条（缩 press 倍率或加宽侧栏），不是改个数就行。
  */
 object LensSpec {
 
     /** 总开关。false = 回到改动前的样式（同一套代码，只是不放大、不染色、镜片回到 64dp）。 */
     const val ENABLED: Boolean = true
 
-    /** 镜片边长。项 64 + 每边 4 = 72 ≤ 侧栏 76（见文件头"竖向布局的溢出"）。 */
-    val lensSize = 72.dp
+    /**
+     * 镜片边长。**68dp = 项 64 + 每边 2**，取值由两条约束一起定下来：
+     *
+     *   1. 静止时不越出侧栏（76dp）自不必说；
+     *   2. **按下放大到 1.12 倍时也要留在侧栏里**：68 × 1.12 ≈ 76.2dp —— 正好贴住
+     *      [DeskDimens.sideBarWidth]，多 1dp 就会在施工按下的那一瞬露出侧栏外面去。
+     *
+     * 顺带解决一个容易被忽略的问题：一格的总高是 70dp（项 64 + 间距 6），
+     * 镜片取 68dp < 70dp，静止时它落在自己那一行里、不会压到相邻项。
+     * （第一版取 72dp，静止就比一格还高 2dp，相邻项被压掉 1dp。）
+     */
+    val lensSize = 68.dp
 
     /** 镜片圆角。取 26dp 而不是 lensSize/2：留一点直边，更像"镜片"而不是"圆点"。 */
     val lensCorner = 26.dp
@@ -239,7 +253,7 @@ fun LensSideBar(
     val active = lensEnabled && LensSpec.ENABLED
     val tier = remember { resolveLensTier() }
 
-    // 镜片尺寸：开启时 72dp（比项大 8），关闭时回到 64dp（= 改动前的指示块）。
+    // 镜片尺寸：开启时 68dp（比项大 4），关闭时回到 64dp（= 改动前的指示块）。
     val lensSize = if (active) LensSpec.lensSize else DeskDimens.sideBarItemSize
     val lensOverhangPx = with(density) {
         ((lensSize - DeskDimens.sideBarItemSize) / 2).toPx()
@@ -250,10 +264,6 @@ fun LensSideBar(
     val pressScale = 1f + (if (active) LensSpec.PRESS_SCALE_EXTRA * pressState.value else 0f)
     val glyphBoost = LensSpec.GLYPH_BOOST_IDLE +
         (LensSpec.GLYPH_BOOST_PRESSED - LensSpec.GLYPH_BOOST_IDLE) * pressState.value
-
-    // 镜片横向偏移。左右两栏的项都居中于侧栏内容区，所以偏移量相同 ——
-    // "镜像"体现在整条侧栏贴着屏幕的另一边，纵向行为（拖拽轴）与左右无关。
-    val lensDxPx = -lensOverhangPx
 
     Box(
         modifier = modifier
@@ -303,15 +313,25 @@ fun LensSideBar(
         //
         // 纵向要减掉 overhang：镜片比项高 8dp，不减会让它整体偏下 4dp，
         // 镜内副本就会与它"罩住"的那一项错开半个身位。
+        // 外层先占一个"跟条目一样大"的盒子，跟着 indicator 走；镜片再在这个盒子里
+        // 用 Alignment.Center 居中 —— **横向/纵向都不手算偏移量**。
+        //
+        // 手算的版本连错两次，记录在这里免得再回头写：
+        //   第一版 `size(68dp)` 被父级约束夹成 224px 宽（分不清它是"多大"），
+        //         配 (itemSize - lensSize)/2 的偏移就整体偏左 4dp；
+        //   第二版改成 requiredSize，宽度对了，但 `-overhang` 那个偏移在渲染时
+        //         实际落了一份两倍的位移（实测中心 262.5 vs 条目中心 269.5，偏左 2dp）。
+        // 交给 Alignment 居中，就不存在"两套算术对不上"的机会。
         Box(
             modifier = Modifier
-                .offset {
-                    IntOffset(
-                        x = lensDxPx.roundToInt(),
-                        y = (indicatorState.value * stepPx - lensOverhangPx).roundToInt(),
-                    )
-                }
-                .size(lensSize)
+                .offset { IntOffset(0, (indicatorState.value * stepPx).roundToInt()) }
+                .size(DeskDimens.sideBarItemSize),
+            contentAlignment = Alignment.Center,
+        ) {
+        Box(
+            modifier = Modifier
+                // requiredSize 而不是 size：这块要**故意比条目大**，不能被父约束夹回去。
+                .requiredSize(lensSize)
                 .graphicsLayer {
                     scaleX = pressScale
                     scaleY = pressScale
@@ -390,6 +410,7 @@ fun LensSideBar(
                     }
                 }
             }
+        }
         }
 
         Column(

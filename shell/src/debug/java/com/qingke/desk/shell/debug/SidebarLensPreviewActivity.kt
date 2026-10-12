@@ -1,7 +1,9 @@
 package com.qingke.desk.shell.debug
 
+import android.annotation.SuppressLint
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -10,12 +12,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -61,10 +66,36 @@ class SidebarLensPreviewActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // **必须与 MainActivity 一样的沉浸式**，否则这条预览页会在横屏左侧留出 137px 黑带
+        // （基准机的挖孔就在那一侧），整屏内容看着右偏 —— 这就是"显示比例异常"的来源。
+        // 做法照抄 MainActivity.enterDeskImmersiveMode()：窗口延伸到挖孔下面、底色把挖孔区
+        // 一起画掉，具体内容再用 displayCutout 插图挡开。
+        // 没有抽成公共函数，是因为这条路径只在 debug 变体里用，不想为了它动正式代码。
+        enterDeskImmersiveMode()
         setContent {
             DeskTheme(useDarkTheme = true) {
                 LensPreviewScreen()
             }
+        }
+    }
+
+    @SuppressLint("NewApi") // Build.VERSION.SDK_INT 的分支里才用到 P/Q 的常量
+    private fun enterDeskImmersiveMode() {
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+            window.isStatusBarContrastEnforced = false
+        }
+        androidx.core.view.WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat
+                .BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
     }
 }
@@ -88,7 +119,7 @@ private fun LensPreviewScreen() {
             PreviewBackdrop()
         }
 
-        Row(modifier = Modifier.fillMaxSize()) {
+        Row(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout)) {
             Box(
                 modifier = Modifier
                     .width(DeskDimens.sideBarWidth)
