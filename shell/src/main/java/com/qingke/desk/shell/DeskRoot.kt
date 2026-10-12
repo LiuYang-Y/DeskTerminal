@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -92,6 +93,23 @@ import kotlinx.coroutines.delay
 
 /** 壳层的生命周期日志 tag。排查"到底算不算从外部回来"时靠它（adb logcat -s DeskShell）。 */
 private const val SHELL_TAG = "DeskShell"
+
+/**
+ * 导航页那颗「结束」按钮相对内容区中心的水平偏移。
+ *
+ * SDK 底部那排「退出/暂停」**不在内容区正中** —— 它紧挨着左侧那块全高信息面板，
+ * 因此比内容区中心偏左。要把我们的按钮放到它们原来的位置，就得跟着偏。
+ *
+ * 3200×1440、1 dp = 3.5 px，取自同一张改动前的真机截图（.verify/reg/W1-current.png）：
+ * ```
+ *   NaviCanvas 内容区   x  445..3200            中心 1822
+ *   SDK 底栏两颗药丸    x 1129..1512            中心 1320
+ *   差值                1822 - 1320 = 502 px ÷ 3.5 = 143.4 dp
+ * ```
+ * 用"相对中心偏移"而不是"左对齐 + 左边距"：偏移对齐的是**中心**，
+ * 以后换标签（2 字 ↔ 4 字）位置不会跑。
+ */
+private val NAVI_EXIT_CHIP_X_OFFSET = (-143).dp
 
 enum class DeskScreen {
     HOME,
@@ -738,43 +756,46 @@ fun DeskRoot(
                                             modifier = Modifier.fillMaxSize(),
                                         )
 
-                                        // 退出按钮。SDK 自带的返回在它自己的 UI 里，
-                                        // 位置与样式我们控制不了；这一颗是我们自己的兜底出口。
+                                        // 退出按钮。**这是导航页唯一的出口**：SDK 自带底栏
+                                        // 那两颗（「退出」「暂停」）已被 [NaviViewHost] 按 id
+                                        // 藏掉（2026-10-13 用户口径），画面里只剩这一颗。
                                         //
-                                        // ---- 位置：左下角，但**实测过左下角有什么** ----
+                                        // ---- 位置：对齐 SDK 底栏原来的中心 ----
                                         //
-                                        // 2026-10-12 从右上挪到左下，当时的理由是"右上压鹰眼图、
-                                        // 左上被转向卡占、右下是全览，且导航页没有自带底栏、左下是空的"。
-                                        // **后面这个判断是错的**，真机截图逐像素量过（.verify/reg/
-                                        // geometry.txt，3200×1440，1 dp = 3.5 px）：
+                                        // 用户 2026-10-13 的原话：「图片中下方有三个按钮删除退出，
+                                        // 暂停，保留退出导航并且挪到退出暂停的位置」——
+                                        // 要的是**放到「退出/暂停」原来的地方**。
                                         //
-                                        //   · 左侧信息面板  x 169..767, y  70..1411   ← **全高，占满左列**
-                                        //   · 面板底部「中速」x 413..529, y 1222..1278
-                                        //   · SDK 自带底栏  x 821..1204, y 1259..1363  ← 存在，但在**中间**
-                                        //   · SDK「全览」   x 2682..2845, y 1259..1363
+                                        // 那就得先量出"原来的地方"在哪。3200×1440、1 dp = 3.5 px，
+                                        // 同一张截图（.verify/reg/W1-current.png，改动前、底栏可见）：
                                         //
-                                        // 也就是说：自带底栏确实有（原来那句"没有自带底栏"是看漏了），
-                                        // 但它在底部**居中**、不在角上，所以与左下角天然不冲突；
-                                        // 真正的问题反倒是——**左下角落在那块全高信息面板里**，
-                                        // 面板底部正好是「中速」。
+                                        //   NaviCanvas 内容区     x  445..3200   → 宽 2755 px = 786 dp
+                                        //   SDK「退出」药丸       x 1129..1302
+                                        //   SDK「暂停」药丸       x 1339..1512
+                                        //   两颗成对              x 1129..1512   → 中心 1320，y 1174..1348
                                         //
-                                        // 4 字标签时实测按钮 x 172..480，与「中速」(x 413..529)
-                                        // 相交 x 413..480、y 1262..1278 —— 4 倍放大能看清「中」字
-                                        // 左下被按钮的圆角切掉一块（.verify/reg/crop-zhongsu.png）。
+                                        // 内容区中心是 1822，SDK 底栏中心是 1320，**差 502 px = 143 dp**。
+                                        // 所以这里不是 `BottomCenter`，而是 `BottomCenter` 再往左偏
+                                        // [NAVI_EXIT_CHIP_X_OFFSET]。
                                         //
-                                        // 修法**不是**把按钮挪走（左列全被面板占着，挪哪儿都还在面板上），
-                                        // 而是把它压窄：标签改成 2 字「结束」，右边缘落在 x≈382，
-                                        // 与「中速」左边缘(413)留出 ≈9 dp。垂直方向允许与「中速」重叠
-                                        // （本来它们在同一带），只要**横向不相交**就不会碰到字。
+                                        // 纵向是量出来对上的，不是凑的：药丸底边 1348、屏底 1440，
+                                        // 留白 92 px ÷ 3.5 = 26 dp（下面那个 `padding(bottom = 26.dp)`）。
+                                        // 实测我们的按钮 y 1181..1349，与药丸的 1174..1348 落在同一条带里。
                                         //
-                                        // 为什么不干脆挪到右边那片空地（x 1204..1748 / 2133..2682 一带
-                                        // 确实空着）：那是底部中间，离"想结束导航"时的视线落点更远，
-                                        // 而且用户明确要的是左下角。这里选择守用户的位置要求、
-                                        // 用改标签的方式解决遮挡。
+                                        // 为什么用"偏移"而不是"左对齐 + 左边距"：偏移对齐的是**中心**，
+                                        // 标签宽度变了位置也不会跑；用左边距得先知道按钮多宽。
                                         //
-                                        // 标签用「结束」而不是「退出」：SDK 自己的按钮就叫「退出」，
-                                        // 两个同名按钮更容易搞混；而二次确认框的标题与确认键都是
-                                        // 「结束导航」，和这颗「结束」是同一套说法。
+                                        // 落位的历史（改回去之前先读这段）：
+                                        //   · 2026-10-12 从右上挪到左下，理由是"右上压鹰眼图、
+                                        //     左上被转向卡占、右下是全览，左下是空的"；
+                                        //   · 但**左下角落在那块全高信息面板里**，面板底部正好是「中速」，
+                                        //     4 字标签时按钮右边缘到 x=480 与「中速」相交，4 倍放大能看清
+                                        //     「中」字左下被切掉一块（.verify/reg/crop-zhongsu.png）；
+                                        //   · 当时用"把标签压成 2 字、右边缘收到 x≈382"绕过，是**在不动
+                                        //     位置的前提下**能想到的最好办法；
+                                        //   · 现在位置换到了底部中间偏左，面板最右到 x=1075 但那一带是
+                                        //     地面色，遮挡问题从根上没有了。标签保持 2 字「结束」，
+                                        //     理由换成了另一条：它与二次确认框的「结束导航？」同一套说法。
                                         //
                                         // 用 [deskGlassOverlay] 而不是侧栏那块真玻璃：导航画面是
                                         // 独立 GL 图层，Compose 的背景层采不到它，真玻璃在这里
@@ -782,12 +803,13 @@ fun DeskRoot(
                                         val exitShape = RoundedCornerShape(18.dp)
                                         Box(
                                             modifier = Modifier
-                                                .align(Alignment.BottomStart)
-                                                .padding(start = 12.dp, bottom = 12.dp)
+                                                .align(Alignment.BottomCenter)
+                                                .offset(x = NAVI_EXIT_CHIP_X_OFFSET)
+                                                .padding(bottom = 26.dp)
                                                 .shadow(6.dp, exitShape)
                                                 .deskGlassOverlay(exitShape)
                                                 .clickable(onClick = ::askExitNavi)
-                                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                                                .padding(horizontal = 20.dp, vertical = 12.dp),
                                         ) {
                                             // **颜色必须显式给**（2026-10-12 真机裁图发现的 bug）：
                                             // 不写 color 时 Text 取的是 `LocalContentColor`，而它的默认值

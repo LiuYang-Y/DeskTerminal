@@ -3,6 +3,8 @@ package com.qingke.desk.map.navi
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.hardware.display.DisplayManager
+import android.view.Display
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.runtime.Composable
@@ -66,6 +68,9 @@ class NaviViewHost(
 
     @Volatile
     private var destroyed = false
+
+    /** 底栏的布局监听只挂一次。 */
+    private var footerWatched = false
 
     /** 创建过几次。真机上它应该恒为 1；大于 1 说明有第二条创建路径漏出来了。 */
     @Volatile
@@ -149,6 +154,7 @@ class NaviViewHost(
         refCount++
         view = created
         observeLifecycle()
+        watchSdkFooter(created)
         MapLog.i(
             "navi host: AMapNaviView created (create=$createCount attach=$attachCount refs=$refCount)",
         )
@@ -200,6 +206,150 @@ class NaviViewHost(
         MapLog.i(
             "navi host: destroy (create=$createCount attach=$attachCount detach=$detachCount)",
         )
+    }
+
+    // ==== 导航地图的渲染帧率 ==================================================
+
+    /** 目标渲染帧率。只解析一次 —— 设备刷新率不会在运行中变。 */
+    private val renderFps: Int by lazy { resolveRenderFps(context) }
+
+    /**
+     * 导航地图的渲染帧率上限。
+     *
+     * 为什么必须显式设：`AMapNaviView` 内部的 `AMap` 我们**从来没设过**帧率，
+     * 它按 SDK 默认走（高德车机常量 `RenderFpsConstants`：NAVI=10 / NORMAL=15）。
+     * 真机 `SurfaceFlinger --latency` 实测拖动时只有 **127 帧 / 6.2 秒 ≈ 20 fps**，
+     * 同期 `gfxinfo` 是 **0 掉帧、GPU 50th 3 ms** —— 不是"画得慢"，是"画得少"，
+     * 用户感受到的就是滑屏不跟手。
+     *
+     * 取值：**设备实际支持的最高刷新率**（`supportedModes` 的最大 `refreshRate`，
+     * 本机 120 Hz），再按 `AMap.setRenderFps` 的取值域截到 `[30, 60]`。
+     * 也就是说这台机器会请求 60 —— 上限跟着设备走，不写死。
+     *
+     * @return 传给 `AMap.setRenderFps` 的值（`context.packageName` 解析失败时退回 60）。
+     */
+    private fun resolveRenderFps(ctx: Context): Int {
+        val manager = ctx.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+        val display = manager?.getDisplay(Display.DEFAULT_DISPLAY)
+        val maxRate = display?.supportedModes?.maxOfOrNull { it.refreshRate }
+            ?: display?.refreshRate
+            ?: 60f
+        val target = maxRate.toInt().coerceIn(30, 60)
+        MapLog.i("navi host: render fps -> device=${maxRate.toInt()}Hz target=$target")
+        return target
+    }
+
+    /** 把帧率贴到导航地图上。`getMap()` 可能还没就绪，失败只记日志不抛。 */
+    private fun applyRenderFps(target: AMapNaviView) {
+        val map = runCatching { target.map }.getOrNull()
+        if (map == null) {
+            MapLog.w("navi host: getMap() == null, render fps not applied")
+            return
+        }
+        runCatching { map.setRenderFps(renderFps) }
+            .onSuccess { MapLog.i("navi host: setRenderFps($renderFps) applied") }
+            .onFailure { MapLog.w("navi host: setRenderFps($renderFps) failed: ${it.javaClass.simpleName}") }
+    }
+
+    // ==== 藏掉 SDK 自带的底栏按钮 ============================================
+
+    /**
+     * SDK 底栏在 View 树里的 id（真机 `uiautomator` 拿不到 idle，是靠落地在
+     * `onNaviViewLoaded` 的探针打的树，见 `.verify/reg/W-tree.log`）：
+     *
+     * ```
+     * RelativeLayout       id=navigation_footer_land_view_container  438x217
+     *   LandscapeFooterView id=navigation_footer_land_container      438x210
+     *     NightModeTextView id=exit_navigation_land     210x210  "退出"
+     *     NightModeTextView id=navigation_settings_land 210x210  "暂停"
+     * ```
+     *
+     * `AMapNaviViewOptions` 里**没有**任何底栏开关（`setLayoutVisible` 是整块布局，
+     * `setSecondActionVisible` 是另一颗），所以只能按 id 从 View 树里压下去。
+     *
+     * 每个名字都试三个包：aar 资源合并进宿主包后，用**应用包名**解析最靠得住；
+     * 后面两个是高德自己的包名，属于兜底。全部解析不到就整条不生效 ——
+     * 日志里会明确写出 `missing=`，不允许"以为藏了其实没藏"。
+     */
+    private val footerIdNames = listOf(
+        "navigation_footer_land_view_container",
+        "navigation_footer_land_container",
+        "exit_navigation_land",
+        "navigation_settings_land",
+    )
+
+    /**
+     * 按 **id 的资源名**在 View 树里找 View。
+     *
+     * 为什么不用 `resources.getIdentifier(name, "id", packageName)`：真机上它四个名字
+     * **全返回 0**（日志 `missing=[...]`），试过应用包名与高德两个包名都不行 ——
+     * 合包的资源表到底挂在哪个包下，靠猜是猜不出来的。
+     *
+     * 但反过来一定是通的：上一轮探针拿到的 id 是用
+     * `v.resources.getResourceEntryName(v.id)` 打出来的，说明**同一个 Resources 里
+     * id→名字 这条路是活的**。所以这里改成遍历树、逐个反查名字来比对，
+     * 不再依赖包名。名字来自真机取证，不是猜的。
+     */
+    private fun findByIdName(root: View, name: String): View? {
+        if (root.id != View.NO_ID) {
+            val entry = runCatching { root.resources.getResourceEntryName(root.id) }.getOrNull()
+            if (entry == name) return root
+        }
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                findByIdName(root.getChildAt(i), name)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    /** 把底栏相关的那几个 View 一律设成 GONE。可重复调用（幂等）。 */
+    private fun hideSdkFooter(target: AMapNaviView, tag: String) {
+        val hidden = mutableListOf<String>()
+        val missing = mutableListOf<String>()
+        footerIdNames.forEach { name ->
+            val view = findByIdName(target, name)
+            if (view == null) {
+                missing += name
+                return@forEach
+            }
+            if (view.visibility != View.GONE) view.visibility = View.GONE
+            // 压完之后立刻回读：GONE 只是"我们设了它"，isShown 才是"画面上真的没有"
+            // （任一祖先不可见也会是 false，正好用来发现"藏错了层级"这种事）。
+            hidden += "$name(vis=${view.visibility} shown=${view.isShown} " +
+                "${view.width}x${view.height})"
+        }
+        MapLog.i(
+            "navi footer [$tag] hidden=[${hidden.joinToString(", ")}] " +
+                "missing=[${missing.joinToString(",")}]",
+        )
+    }
+
+    /**
+     * 底栏**会自己回来**，所以压一次不够。
+     *
+     * 真机取证：`loaded` 快照外层还是 `438x217`，`loaded+4s` 就变成宽 0 ——
+     * SDK 过几秒把它收起来，**点一下屏又放出来**（这是它自己的交互设计）。
+     * 我们既然要它彻底不出现，就得跟着它的显隐反复压：挂一个布局监听，
+     * 只要外层容器又被摆出来了（不是 GONE）就再压一次。
+     *
+     * 不会自锁：压成 GONE 之后容器不再参与布局，监听不会因为自己的动作再触发一次。
+     */
+    private fun watchSdkFooter(target: AMapNaviView) {
+        val footer = findByIdName(target, "navigation_footer_land_view_container")
+        if (footer == null) {
+            MapLog.w("navi footer: container not found, cannot watch")
+            return
+        }
+        if (footerWatched) return
+        footerWatched = true
+        footer.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+            if (v.visibility != View.GONE) {
+                v.visibility = View.GONE
+                MapLog.i("navi footer: re-hidden after SDK showed it again")
+            }
+        }
+        MapLog.i("navi footer: watcher attached")
     }
 
     private fun buildOptions(): AMapNaviViewOptions = AMapNaviViewOptions().apply {
@@ -299,6 +449,16 @@ class NaviViewHost(
 
         override fun onNaviViewLoaded() {
             MapLog.i("navi: view loaded")
+            // 画面loaded 之后 `getMap()` 才一定就绪 —— 帧率在这里贴一次。
+            view?.let {
+                applyRenderFps(it)
+                hideSdkFooter(it, "loaded")
+                // 树这时才是完整的；acquire 里那次挂监听可能太早，这里补一次（幂等）。
+                watchSdkFooter(it)
+                // SDK 大约 4 秒后自己把底栏收起来、点屏又放出来。再取一次快照，
+                // 验证"它自己回来之后我们有没有重新压下去"。
+                it.postDelayed({ hideSdkFooter(it, "loaded+5s") }, 5000)
+            }
         }
     }
 }
