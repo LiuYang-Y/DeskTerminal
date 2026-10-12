@@ -18,7 +18,13 @@ enum class SidebarSide {
 }
 
 /**
- * 壳层的持久设置。两项：侧栏在哪一侧、屏幕是否强制常亮。
+ * 一个经纬度点。放在 :core:data 而不是用高德的 `LatLng`：
+ * 存位置的模块不该知道地图 SDK 的存在，:map 拿到它自己转 `LatLng`。
+ */
+data class GeoPoint(val latitude: Double, val longitude: Double)
+
+/**
+ * 壳层的持久设置。三项：侧栏在哪一侧、屏幕是否强制常亮、上次定位到的位置。
  *
  * 用 SharedPreferences 而不是 DataStore：全工程只有这几个开关要存，
  * 为它引入一条协程 + Proto 的链路不划算（:hosting 的 ShizukuBootPrompt、
@@ -32,6 +38,8 @@ object ShellSettings {
     private const val PREFS_NAME = "desk_shell"
     private const val KEY_SIDEBAR_SIDE = "sidebar_side"
     private const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
+    private const val KEY_LAST_LAT = "last_lat"
+    private const val KEY_LAST_LON = "last_lon"
 
     /** 默认在左：基准机横屏时挖孔在左侧，侧栏贴左能把挖孔条一起吃掉。 */
     private val DEFAULT_SIDE = SidebarSide.LEFT
@@ -85,6 +93,28 @@ object ShellSettings {
     fun setKeepScreenOn(context: Context, enabled: Boolean): Boolean {
         prefs(context).edit().putBoolean(KEY_KEEP_SCREEN_ON, enabled).commit()
         return enabled
+    }
+
+    /**
+     * 上次定位到的位置；从没定位过返回 null。
+     *
+     * 用途是**给首页地图卡一个像样的初始视角**：拿到第一个定位点之前，
+     * 高德 MapView 的默认视角是全国，街道级的预览卡上先闪一下全国图很突兀。
+     * 它不是"当前位置"—— 设备固定在桌上，昨天的坐标今天照样能用。
+     */
+    fun lastLocation(context: Context): GeoPoint? {
+        val lat = prefs(context).getFloat(KEY_LAST_LAT, Float.NaN).toDouble()
+        val lon = prefs(context).getFloat(KEY_LAST_LON, Float.NaN).toDouble()
+        if (lat.isNaN() || lon.isNaN()) return null
+        return GeoPoint(lat, lon)
+    }
+
+    /** 记下最新一次定位。写的是 Float（约 1 m 精度），对"初始视角"足够。 */
+    fun setLastLocation(context: Context, point: GeoPoint) {
+        prefs(context).edit()
+            .putFloat(KEY_LAST_LAT, point.latitude.toFloat())
+            .putFloat(KEY_LAST_LON, point.longitude.toFloat())
+            .apply()
     }
 
     private fun prefs(context: Context) =

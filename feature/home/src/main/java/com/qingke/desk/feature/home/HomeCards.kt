@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
@@ -19,10 +21,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Work
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -33,6 +37,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -64,6 +69,10 @@ internal object HomeCardPalette {
  * 单张卡片。尺寸完全由外部栅格决定（fillMaxSize），自身不写死宽高。
  *
  * @param drift 防烧屏微位移，由 :shell 统一计算下发，卡片本身不感知时间。
+ * @param maxClockSp 时钟卡的字号**上限**。默认 [DeskDimens.clockTime]（56.sp，按
+ *                   88 dp 内容区定的）；第二页时钟卡是 409×313 的大卡，传
+ *                   [DeskDimens.clockTimeLarge]（96.sp）才不显得字小得莫名其妙。
+ *                   它只是上限，实际字号仍按可用高度/宽度反推。
  */
 @Composable
 fun HomeCardTile(
@@ -71,6 +80,7 @@ fun HomeCardTile(
     modifier: Modifier = Modifier,
     driftX: androidx.compose.ui.unit.Dp = 0.dp,
     driftY: androidx.compose.ui.unit.Dp = 0.dp,
+    maxClockSp: androidx.compose.ui.unit.TextUnit = DeskDimens.clockTime,
     /** 点击整张卡。不传则不可点（信息卡）。 */
     onClick: (() -> Unit)? = null,
 ) {
@@ -91,7 +101,7 @@ fun HomeCardTile(
                 .padding(DeskDimens.cardPadding),
         ) {
             when (card.kind) {
-                HomeCardKind.CLOCK -> ClockBody(card)
+                HomeCardKind.CLOCK -> ClockBody(card, maxClockSp)
                 HomeCardKind.MUSIC -> MusicBody(card)
                 HomeCardKind.WEATHER -> WeatherBody(card)
                 HomeCardKind.PROJECTION -> ProjectionBody(card)
@@ -170,20 +180,24 @@ private fun ProjectionBody(card: HomeCard) {
  * 据此反推一个宽度上限，取两者的小值。
  */
 @Composable
-private fun ClockBody(card: HomeCard) {
+private fun ClockBody(card: HomeCard, maxClockSp: androidx.compose.ui.unit.TextUnit) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val gapDp = 6f
         val captionBlock = DeskDimens.cardBody.value * DeskDimens.TEXT_LINE_HEIGHT_RATIO
         val maxTimeSize = (maxHeight.value - gapDp - captionBlock) /
             DeskDimens.TEXT_LINE_HEIGHT_RATIO
         val timeSize = minOf(maxTimeSize, fitByWidth(card.title, maxWidth.value))
-            .coerceAtMost(DeskDimens.clockTime.value)
+            .coerceAtMost(maxClockSp.value)
             .coerceAtLeast(24f)
             .sp
         // 副标题（"10月10日 星期六"）在窄卡里同样会溢出被裁，
         // 同一个道理：能缩就缩，缩到 11 sp 还不下才轮到省略号。
-        val subtitleSize = minOf(DeskDimens.cardBody.value, fitByWidth(card.subtitle, maxWidth.value))
-            .coerceAtLeast(11f)
+        // 副标题（"10月10日 星期六"）跟着时钟一起放大，但不跟着无限放大：
+        // 取时钟字号的 22%，夹在 11~22 sp 之间，再按宽度反推兜底。
+        val subtitleSize = minOf(
+            (maxClockSp.value * 0.22f).coerceIn(11f, 22f),
+            fitByWidth(card.subtitle, maxWidth.value),
+        ).coerceAtLeast(11f)
             .sp
 
         Column(
@@ -356,6 +370,87 @@ private fun WeatherDetailRow(line: CardLine) {
         }
     }
 }
+
+/**
+ * 「回家 / 去公司」快捷卡的**占位版本**（2026-10-12）。
+ *
+ * 用户口径：导航做完之前先占位，并且是**灰态的「设置地址」**、点击不触发任何功能。
+ * 所以这里连 `clickable` 都不加 —— 不是"点了弹个 toast 说还没做"，
+ * 而是它现在就不是一个可操作的东西，灰态是它的真实状态。
+ *
+ * 两个槽位（回家 / 去公司）都留着：等导航接进来，这里换成真实地址 + 一键算路，
+ * 布局不用动（卡片尺寸、两槽位等分都是定好的）。
+ */
+@Composable
+fun CommutePlaceholderCard(
+    modifier: Modifier = Modifier,
+    driftX: androidx.compose.ui.unit.Dp = 0.dp,
+    driftY: androidx.compose.ui.unit.Dp = 0.dp,
+) {
+    Card(
+        modifier = modifier
+            .fillMaxSize()
+            .offset(x = driftX, y = driftY),
+        shape = RoundedCornerShape(DeskDimens.cardCorner),
+        colors = CardDefaults.cardColors(containerColor = COMMUTE_PLACEHOLDER_COLOR),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(DeskDimens.cardPadding),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            CommuteSlot(label = "回家", icon = Icons.Default.Home)
+            CommuteSlot(label = "去公司", icon = Icons.Default.Work)
+        }
+    }
+}
+
+/** 单个槽位：图标 + 目的地名 + 灰态的「设置地址」。 */
+@Composable
+private fun RowScope.CommuteSlot(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+) {
+    Column(
+        modifier = Modifier
+            .weight(1f)
+            .fillMaxHeight(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = Color.White.copy(alpha = 0.28f),
+            modifier = Modifier.size(24.dp),
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = label,
+            fontSize = 14.sp,
+            color = Color.White.copy(alpha = 0.4f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = "设置地址",
+            fontSize = 12.sp,
+            color = Color.White.copy(alpha = 0.28f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
+ * 占位卡底色：比卡片色再灰一档。
+ *
+ * 刻意不用 `Color.Gray` 之类的纯灰：整屏是暗色，纯灰会显得像"加载失败的洞"。
+ * 这个值是在时钟卡蓝灰（#2E3350）基础上再降饱和度得到的，放在旁边不会跳出来。
+ */
+private val COMMUTE_PLACEHOLDER_COLOR = Color(0xFF33363D)
 
 @Composable
 private fun LinesBody(card: HomeCard) {

@@ -18,6 +18,11 @@ interface HomeRepository {
 
 /**
  * 假数据实现。时钟卡片每 30s 走一步，用来验证栅格里的动态内容不会引起重排抖动。
+ *
+ * 2026-10-12 起只有三张：时钟、天气、音乐。
+ * 手机投屏 / 日程 / 待办三张已删除 —— 投屏在侧栏有入口（那才是它的位置，
+ * 首页上它只是一张"点了去投屏"的重复入口），日程和待办没有真实数据源，
+ * 与其放三条写死的假条目，不如等真数据接进来再放回第二页。
  */
 class FakeHomeRepository : HomeRepository {
 
@@ -36,32 +41,6 @@ class FakeHomeRepository : HomeRepository {
             kind = HomeCardKind.CLOCK,
             title = clock,
             subtitle = "10月10日 星期六",
-        ),
-        HomeCard(
-            id = "projection",
-            kind = HomeCardKind.PROJECTION,
-            title = "手机投屏",
-            subtitle = "iPhone · CarPlay",
-        ),
-        HomeCard(
-            id = "agenda",
-            kind = HomeCardKind.AGENDA,
-            title = "今日日程",
-            lines = listOf(
-                CardLine("数据结构", "10:00"),
-                CardLine("实习日志评审", "14:30"),
-                CardLine("专升本英语", "19:00"),
-            ),
-        ),
-        HomeCard(
-            id = "todo",
-            kind = HomeCardKind.TODO,
-            title = "待办",
-            lines = listOf(
-                CardLine("整理投屏模块接口", checked = false),
-                CardLine("提交 tcamp 作品文案", checked = true),
-                CardLine("羽毛球打卡", checked = false),
-            ),
         ),
         HomeCard(
             id = "weather",

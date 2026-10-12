@@ -109,24 +109,27 @@ object DeskDimens {
     /** 浮层里各设置项之间的间距。 */
     val settingsItemGap: Dp = 10.dp
 
-    // ---------- 地图布局（方案 C：地图铺满，卡片浮层压在一侧）----------
+    // ---------- 首页分页（2026-10-12 改：CardGrid 单页 → 两页横滑）----------
 
     /**
-     * 卡片浮层宽度。地图本身铺满整屏，浮层压在**侧栏的对侧**，中间露出的才是
-     * 能看清的那块地图：794 - 挖孔 40 - 侧栏 76 - 浮层 240 ≈ 438 dp。
+     * 分页主卡（地图卡 / 时钟卡）与副列（205 dp 那一列）的权重比，2 : 1。
      *
-     * 240 是用户对三档草案（240 / 348 / 460）里选的最小档 —— 地图优先。
+     * 基准机每页可用 626 dp、gap 12 → 614 分三份：主卡 409、副列 205。
+     * 409/626 = 65.4%，就是用户要的"约三分之二"。
+     * 写成权重而不是写死宽度：换一台 914 dp 宽的机器自动按比例放大。
      */
-    val mapPaneWidth: Dp = 240.dp
+    const val HOME_PAGE_MAIN_WEIGHT: Float = 2f
+    const val HOME_PAGE_SIDE_WEIGHT: Float = 1f
 
-    /** 收起后剩下的手柄宽度。只够放一个箭头，点它再展开。 */
-    val mapPaneCollapsedWidth: Dp = 24.dp
+    /** 页码圆点行的总高度（含上下留白）。它独占这一条，不挤占卡片高度。 */
+    val pageIndicatorHeight: Dp = 24.dp
 
-    /** 收起/展开手柄的高度，同时也是它离屏幕上下的留白基准。 */
-    val mapPaneHandleHeight: Dp = 96.dp
+    /** 圆点直径：未选中 6、选中 8。差 2 dp 是为了让"当前页"看得出来又不过分跳。 */
+    val pageDotSize: Dp = 6.dp
+    val pageDotSelectedSize: Dp = 8.dp
 
-    /** 浮层内的卡片列数。240 dp 宽分 2 列，单卡约 98 dp 宽。 */
-    const val MAP_PANE_COLUMNS: Int = 2
+    /** 圆点间距。 */
+    val pageDotGap: Dp = 10.dp
 
     // ---------- 卡片栅格 ----------
 
@@ -232,6 +235,16 @@ object DeskDimens {
      * 所以 56.sp 只是上限，实际字号由 ClockBody 按可用高度反推，见下方比例常量。
      */
     val clockTime: TextUnit = 56.sp
+
+    /**
+     * **大卡**里的时钟字号上限（第二页时钟卡 409 × 313）。
+     *
+     * 56.sp 是按 88 dp 内容区定的；分页后时钟卡内容区约 381 × 285，
+     * 沿用 56 会显得小得莫名其妙（卡变大了四倍，字没变）。
+     * 96.sp 渲染行高约 112 dp，加日期副标题仍有余量。
+     * 它同样是**上限**：实际字号仍由 [TEXT_LINE_HEIGHT_RATIO] 按可用高度反推。
+     */
+    val clockTimeLarge: TextUnit = 96.sp
 
     /**
      * 文本实际行高与字号的比值。

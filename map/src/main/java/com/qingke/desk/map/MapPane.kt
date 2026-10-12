@@ -1,5 +1,6 @@
 package com.qingke.desk.map
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.clip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -46,15 +48,20 @@ import kotlinx.coroutines.delay
  * 拒绝的后果要说清楚：不同意也能继续用桌面终端的其它部分，只是这块位置没有地图。
  * 不写"不同意就退出" —— 那是在绑架用户，而且本项目也没有那个动机。
  *
+ * @param host 单实例宿主（首页卡与全屏页共用同一个 MapView）。见 [MapViewHost]。
  * @param style 地图样式。**null（默认）= 日出日落自动切换**：白天 NORMAL、夜里 NIGHT。
  *              传具体样式则不自动切换（给调试预览页用）。
+ * @param renderEnabled false = 停渲染（翻到别的页 / 别的屏时用）。
  * @param onConsentChanged 可选回调，让外层知道当前能不能显示地图（用于排布局）。
  */
 @Composable
 fun MapPane(
     modifier: Modifier = Modifier,
+    host: MapViewHost? = null,
     style: AMapStyle? = null,
     showMyLocation: Boolean = true,
+    renderEnabled: Boolean = true,
+    renderFps: Int = MAP_FULL_FPS,
     onConsentChanged: ((Boolean) -> Unit)? = null,
 ) {
     val context = LocalContext.current
@@ -79,8 +86,11 @@ fun MapPane(
     if (agreed) {
         AMapCanvas(
             modifier = modifier,
+            host = host,
             style = effectiveStyle,
             showMyLocation = showMyLocation,
+            renderEnabled = renderEnabled,
+            renderFps = renderFps,
         )
         return
     }
@@ -237,6 +247,106 @@ fun AMapPrivacyCard(
                         Text("同意并显示地图", fontSize = body)
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * **首页**的地图预览卡（2026-10-12 新增）。
+ *
+ * 与全屏页 [MapPane] 的三点区别：
+ *  1. 走 [AMapCanvas] 的预览模式：不响应拖动缩放、View 层吞掉触摸，
+ *     点整卡是"进全屏页"而不是"操作地图" —— 否则和横滑翻页抢手势；
+ *  2. 帧率锁在 [MAP_PREVIEW_FPS]（15），不可见时 [renderEnabled] 直接停渲染；
+ *  3. 未同意隐私时渲染的是**精简占位**（[AMapPrivacyPlaceholder]），不构造 MapView，
+ *     点它跳到全屏页看完整的隐私说明 —— 首页卡只有 409×313，塞不下整篇政策文本。
+ *
+ * @param onOpenFull 无论当前是地图还是占位，点击都走它：进全屏地图页。
+ */
+@Composable
+fun MapPreviewCard(
+    modifier: Modifier = Modifier,
+    host: MapViewHost? = null,
+    renderEnabled: Boolean = true,
+    onOpenFull: () -> Unit = {},
+) {
+    val context = LocalContext.current
+    val agreed by AMapPrivacy.agreed.collectAsState()
+    LaunchedEffect(Unit) { AMapPrivacy.syncState(context) }
+    val style = rememberAutoMapStyle()
+    // 20 dp 与首页卡片圆角（DeskDimens.cardCorner）一致；这里不引 :core:ui，
+    // 免得给 :map 多加一条依赖只为取一个常量。
+    val shape = RoundedCornerShape(20.dp)
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .clip(shape)
+            .clickable { onOpenFull() },
+    ) {
+        when {
+            BuildConfig.AMAP_API_KEY.isBlank() -> AMapPlaceholder(
+                modifier = Modifier.fillMaxSize(),
+                text = "地图未配置 Key：在 local.properties 里填 amap.api.key 后重新编译",
+            )
+
+            !agreed -> AMapPrivacyPlaceholder(modifier = Modifier.fillMaxSize())
+
+            else -> AMapCanvas(
+                modifier = Modifier.fillMaxSize(),
+                host = host,
+                style = style,
+                preview = true,
+                renderEnabled = renderEnabled,
+                renderFps = MAP_PREVIEW_FPS,
+            )
+        }
+    }
+}
+
+/**
+ * 未同意隐私政策时的**精简占位**。
+ *
+ * 完整版是 [AMapPrivacyCard]（带整篇政策文本与同意/拒绝两个按钮），它放在全屏地图页 ——
+ * 那里有 666×361 的位置。首页这张卡只有 409×313，塞进去会挤成一团小字。
+ *
+ * 合规上没有任何折扣：**不构造 MapView**（这才是关键，官方要求的是"构造前取得同意"），
+ * 并且占位上写明了"地图由高德提供"与一句"点击查看完整说明"，点它去全屏页看完整政策。
+ */
+@Composable
+fun AMapPrivacyPlaceholder(
+    modifier: Modifier = Modifier,
+    compact: Boolean = true,
+) {
+    Card(
+        modifier = modifier.fillMaxSize(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val narrow = maxWidth < 300.dp
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(if (narrow) 14.dp else 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text(
+                    text = "地图由高德开放平台提供",
+                    fontSize = if (compact) 15.sp else 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "尚未同意隐私政策，点击查看详情",
+                    fontSize = if (compact) 12.sp else 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                )
             }
         }
     }

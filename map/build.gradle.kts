@@ -93,6 +93,10 @@ dependencies {
     // 但留了"天气 API 的 sunrise/sunset 注入后优先"这条路。
     implementation(project(":core:platform"))
 
+    // ShellSettings：记住上次定位到的位置，给地图一个像样的**初始视角**
+    // （冷启动时还没有定位，直接上全国视角对街道级预览卡太突兀）。
+    implementation(project(":core:data"))
+
     // 高德 SDK —— **导航合包**（2026-10-12 由纯地图包整体替换而来）。
     //
     // 换包原因：要接导航，而导航 SDK 自带 3D 地图 SDK，与 3dmap-location-search

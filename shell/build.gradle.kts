@@ -18,6 +18,9 @@ android {
 
     buildFeatures {
         compose = true
+        // 只为一件事：ValidationDriver 要靠 BuildConfig.DEBUG 门控
+        // （release 包里那个广播接收器根本不注册）。
+        buildConfig = true
     }
 }
 

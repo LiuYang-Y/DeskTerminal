@@ -71,6 +71,13 @@ androidx-compose-material-icons-extended = { group = "androidx.compose.material"
 
 kyant-backdrop = { group = "io.github.kyant0", name = "backdrop", version.ref = "backdrop" }
 
+# 仪器化测试（androidTest）。版本取的是 2024 年就存在的稳定版 ——
+# 这台机器的场景只需要"能跑 Compose UI 测试"，不需要最新特性。
+androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version = "1.2.1" }
+androidx-test-runner = { group = "androidx.test", name = "runner", version = "1.6.2" }
+androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
+androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
+
 rikka-shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
 rikka-shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
 

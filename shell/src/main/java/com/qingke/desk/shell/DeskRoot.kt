@@ -36,6 +36,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import com.kyant.backdrop.backdrops.LayerBackdrop
@@ -46,7 +47,6 @@ import com.qingke.desk.core.data.HomeRepository
 import com.qingke.desk.core.data.ShellSettings
 import com.qingke.desk.core.data.SidebarSide
 import com.qingke.desk.core.model.DisplayInfo
-import com.qingke.desk.core.model.HomeCardKind
 import com.qingke.desk.core.platform.BurnInGuard
 import com.qingke.desk.core.platform.RemedyIntents
 import com.qingke.desk.core.ui.DeskDimens
@@ -64,6 +64,7 @@ import com.qingke.desk.hosting.ui.ShizukuStatusChip
 import com.qingke.desk.map.AMapPrivacy
 import com.qingke.desk.map.AMapPrivacyCard
 import com.qingke.desk.map.MapPane
+import com.qingke.desk.map.MapViewHost
 import com.qingke.desk.projection.api.AvailabilityAction
 import com.qingke.desk.projection.api.AvailabilityResult
 import com.qingke.desk.projection.api.ProjectionKind
@@ -156,6 +157,33 @@ fun DeskRoot(
     val lifecycleOwner = LocalLifecycleOwner.current
     val appContext = LocalContext.current.applicationContext
     val context = LocalContext.current
+
+    // ---- 地图单实例宿主 ----------------------------------------------------
+    //
+    // 首页第一页的地图卡与全屏地图页**共用同一个 MapView**。
+    // 它在这里创建（Activity 作用域），而不是在使用点 remember ——
+    // 使用点 remember 的话，翻页离屏、切屏都会把它 dispose 掉，下次再 onCreate 一次。
+    //
+    // 它自己是惰性的：真正的 `new MapView` 发生在第一次 acquire()，
+    // 而 acquire 只在隐私合规通过之后才会被调到（见 MapPreviewCard / MapPane），
+    // 所以"先同意、后构造"这条硬约束没有被绕过。
+    val mapViewHost = remember(context, lifecycleOwner) {
+        MapViewHost(context.applicationContext, lifecycleOwner)
+    }
+    // 只在整棵树消失（= Activity 销毁）时销毁一次。翻页/切屏走的是 release（解挂）。
+    DisposableEffect(mapViewHost) {
+        onDispose { mapViewHost.destroy() }
+    }
+
+    // ---- 验证驱动（仅 debug；release 里接收器不注册）--------------------------
+    //
+    // 这台基准机是 production 构建，adb 注入触摸/按键会被系统拒绝
+    // （INJECT_EVENTS permission），所以状态类的验证靠广播驱动。
+    // 详见 [ValidationDriver] 的说明。
+    DisposableEffect(context) {
+        ValidationDriver.register(context)
+        onDispose { }
+    }
 
     // ---- Shizuku 状态 -------------------------------------------------------
     //
@@ -302,7 +330,6 @@ fun DeskRoot(
         // 初值读持久化设置，长按侧栏改它并**立刻落盘**（commit 而不是 apply：
         // 用户切完就熄屏的话，apply 的异步写盘可能还没发生，这次选择就丢了）。
         var sidebarSide by remember { mutableStateOf(ShellSettings.sidebarSide(context)) }
-        var mapPaneCollapsed by remember { mutableStateOf(false) }
 
         // ---- 屏幕常亮 -------------------------------------------------------
         //
@@ -321,6 +348,44 @@ fun DeskRoot(
         // 换屏（比如从设置面板点进 Shizuku 引导页）时自动收起，
         // 否则回来会看到一个浮在引导页上的设置面板。
         LaunchedEffect(screen) { settingsOpen = false }
+
+        // ---- 验证驱动接进来（仅 debug 有事件）----------------------------------
+        //
+        // 处理动作与真实点击**走同一批回调**（screen 赋值、Pager 滚页、
+        // AMapPrivacy.revoke/agree、ShellSettings.setSidebarSide），
+        // 所以它验证的是真实状态机，不是一条只在验证时才存在的旁路。
+        var pageRequest by remember { mutableStateOf<PageRequest?>(null) }
+        LaunchedEffect(Unit) {
+            ValidationDriver.commands.collect { cmd ->
+                when {
+                    cmd.startsWith("page:") -> {
+                        val page = cmd.removePrefix("page:").toIntOrNull()
+                        if (page == null) {
+                            Log.w(SHELL_TAG, "bad page cmd=$cmd")
+                        } else {
+                            pageRequest = PageRequest(page, (pageRequest?.seq ?: 0) + 1)
+                        }
+                    }
+
+                    cmd == "screen:home" -> screen = DeskScreen.HOME
+                    cmd == "screen:map" -> screen = DeskScreen.MAP
+                    cmd == "agree" -> AMapPrivacy.agree(context)
+                    cmd == "revoke" -> AMapPrivacy.revoke(context)
+                    cmd == "settings:open" -> settingsOpen = true
+                    cmd == "settings:close" -> settingsOpen = false
+                    cmd.startsWith("side:") -> {
+                        val side = if (cmd.endsWith("right")) {
+                            SidebarSide.RIGHT
+                        } else {
+                            SidebarSide.LEFT
+                        }
+                        sidebarSide = ShellSettings.setSidebarSide(context, side)
+                    }
+
+                    else -> Log.w(SHELL_TAG, "unknown validation cmd=$cmd")
+                }
+            }
+        }
 
         // ---- 挖孔在哪一侧：一律问系统，不猜 ----------------------------------
         //
@@ -349,17 +414,15 @@ fun DeskRoot(
                 .background(MaterialTheme.colorScheme.background),
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                // A. 地图：铺满**整屏**，含挖孔区。它是这一屏的底。
-                //    玻璃在这里是关掉的：MapView 走独立图层，Compose 的背景层
-                //    采不到它的内容（会录成一片黑）。
+                // A. 地图**不再铺满整屏**（2026-10-12 改）。
                 //
-                //    **只在已同意隐私政策时才挂**：未同意时这里什么都不画，
-                //    隐私说明卡改由下面的内容区分支渲染 —— 铺在这里的话，
-                //    侧栏那块**半透明玻璃**会压在卡片上，两边文字叠在一起没法读
-                //    （真机截图 .verify/settings/23-map-blocked.png）。
-                if (screen == DeskScreen.MAP && amapAgreed) {
-                    MapPane(modifier = Modifier.fillMaxSize())
-                }
+                //    原先地图在挖孔区底下也铺过去（"整屏地图"）。用户定的口径是：
+                //    地图铺到**内容区** 666×361 为止，不进挖孔、也不进侧栏底下 ——
+                //    高德的 logo 画在地图左下角，压在内容区里才一定完整可见。
+                //    现在地图由下面的内容区分支渲染（screen == MAP 那一支）。
+                //
+                //    玻璃在这里依然是关掉的：MapView 走独立图层，Compose 的背景层
+                //    采不到它的内容（会录成一片黑）。
 
                 // B. 挖孔区：**什么都不画**。
                 //
@@ -427,17 +490,9 @@ fun DeskRoot(
                                 cards = cards,
                                 driftX = drift.first.dp,
                                 driftY = drift.second.dp,
-                                onShellSelect = { item ->
-                                    screen = handleShellSelect(item, orchestrator, onMessage, screen)
-                                },
-                                onCardSelect = { card ->
-                                    if (card.kind == HomeCardKind.PROJECTION) {
-                                        orchestrator.connect(ProjectionKind.CARPLAY)
-                                        screen = DeskScreen.PROJECTION
-                                    } else {
-                                        onMessage?.invoke("${card.title} 尚未支持点击")
-                                    }
-                                },
+                                onOpenMap = { screen = DeskScreen.MAP },
+                                mapHost = mapViewHost,
+                                pageRequest = pageRequest,
                                 mediaState = mediaState,
                                 onMediaCommand = mediaMonitor::command,
                                 onMediaRequestPermission = {
@@ -448,46 +503,39 @@ fun DeskRoot(
                                 glassBackdrop = glassBackdrop,
                             )
 
-                            // 地图布局有两条路：
-                            //  · 已同意 → 地图在底层铺满，这里放卡片浮层（在侧栏对侧，
-                            //    可收成一条手柄让地图全露）；
-                            //  · 未同意 → 这里放隐私说明卡。放在内容区而不是铺满整屏，
-                            //    是为了自动避开侧栏那一条 —— 侧栏是半透明玻璃，
-                            //    压在文字上两边都读不清。代价是卡片窄一点，但可读。
-                            DeskScreen.MAP -> if (amapAgreed) {
-                                MapCardPane(
-                                    cards = cards,
-                                    sidebarSide = sidebarSide,
-                                    collapsed = mapPaneCollapsed,
-                                    onToggleCollapsed = { mapPaneCollapsed = !mapPaneCollapsed },
-                                    driftX = drift.first.dp,
-                                    driftY = drift.second.dp,
-                                    mediaState = mediaState,
-                                    onMediaCommand = mediaMonitor::command,
-                                    onMediaRequestPermission = {
-                                        MediaPermission.openSettings(context, onFailure = { reason ->
-                                            onMessage?.invoke(reason)
-                                        })
-                                    },
-                                    modifier = Modifier.align(
-                                        if (sidebarSide == SidebarSide.LEFT) {
-                                            Alignment.CenterEnd
-                                        } else {
-                                            Alignment.CenterStart
+                            // 全屏地图页（2026-10-12 改）：**地图铺满内容区**，没有
+                            // 浮在上面的卡片面板，也没有展开/收起手柄 —— 那套浮层
+                            // 是"一屏既要地图又要卡片"的妥协，现在卡片在首页第一页，
+                            // 这一屏就专心做地图，以后搜索目的地和导航也从这里进。
+                            //
+                            // 未同意隐私时这里渲染完整的隐私说明卡（首页那张是精简占位，
+                            // 点它正是跳到这里）。放在内容区而不是铺满整屏，
+                            // 是为了自动避开侧栏 —— 侧栏是半透明玻璃，压在文字上
+                            // 两边都读不清（真机截图 .verify/settings/23-map-blocked.png）。
+                            DeskScreen.MAP -> Box(
+                                // testTag 供 androidTest 断言"已经进到全屏地图页"。
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .testTag(FULLSCREEN_MAP_TAG),
+                            ) {
+                                if (amapAgreed) {
+                                    MapPane(
+                                        modifier = Modifier.fillMaxSize(),
+                                        host = mapViewHost,
+                                        renderEnabled = true,
+                                    )
+                                } else {
+                                    AMapPrivacyCard(
+                                        modifier = Modifier.fillMaxSize(),
+                                        onAgree = {
+                                            AMapPrivacy.agree(context)
+                                            onMessage?.invoke("已同意，地图将开始显示")
                                         },
-                                    ),
-                                )
-                            } else {
-                                AMapPrivacyCard(
-                                    modifier = Modifier.fillMaxSize(),
-                                    onAgree = {
-                                        AMapPrivacy.agree(context)
-                                        onMessage?.invoke("已同意，地图将开始显示")
-                                    },
-                                    onDecline = {
-                                        onMessage?.invoke("地图保持关闭。可随时在设置里重新同意")
-                                    },
-                                )
+                                        onDecline = {
+                                            onMessage?.invoke("地图保持关闭。可随时在设置里重新同意")
+                                        },
+                                    )
+                                }
                             }
 
                             DeskScreen.SHIZUKU_GUIDE -> ShizukuGuideScreen(
