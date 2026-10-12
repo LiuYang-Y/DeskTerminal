@@ -1,6 +1,7 @@
 package com.qingke.desk.feature.home
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -36,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
@@ -392,27 +394,46 @@ private fun WeatherDetailRow(line: CardLine) {
 }
 
 /**
- * 「回家 / 去公司」快捷卡的**占位版本**（2026-10-12）。
+ * 「回家 / 去公司」快捷卡。
  *
- * 用户口径：导航做完之前先占位，并且是**灰态的「设置地址」**、点击不触发任何功能。
- * 所以这里连 `clickable` 都不加 —— 不是"点了弹个 toast 说还没做"，
- * 而是它现在就不是一个可操作的东西，灰态是它的真实状态。
+ * 2026-10-12 从**占位**变成**可用**：导航接进来之后，两个槽位各自显示已保存的地址名，
+ * 点一下直接算路并进导航页。
  *
- * 两个槽位（回家 / 去公司）都留着：等导航接进来，这里换成真实地址 + 一键算路，
- * 布局不用动（卡片尺寸、两槽位等分都是定好的）。
+ * 三个状态各自有明确的样子，不做含糊：
+ *   · 两个都没设 → 整卡灰态（与占位版一致的观感），点了去全屏地图页搜一个地址；
+ *   · 设了一个 → 那个槽位亮起来可点，另一个保持灰态；
+ *   · 两个都设了 → 两个槽位都可点。
+ *
+ * 只收**标题字符串**而不是完整的地点对象：:feature:home 不依赖 :core:data
+ * （见它的 build.gradle.kts），把坐标类型传进来会让卡片模块被迫知道存储层的存在。
+ * 点击之后的动作由 :shell 处理。
  */
 @Composable
-fun CommutePlaceholderCard(
+fun CommuteCard(
     modifier: Modifier = Modifier,
+    homeTitle: String? = null,
+    workTitle: String? = null,
+    onHomeClick: () -> Unit = {},
+    onWorkClick: () -> Unit = {},
+    onSetupClick: () -> Unit = {},
     driftX: androidx.compose.ui.unit.Dp = 0.dp,
     driftY: androidx.compose.ui.unit.Dp = 0.dp,
 ) {
+    // 两个都没设时整卡是"待设置"的样子（与旧的占位版同一档灰）。
+    val anySet = homeTitle != null || workTitle != null
     Card(
         modifier = modifier
             .fillMaxSize()
-            .offset(x = driftX, y = driftY),
+            .offset(x = driftX, y = driftY)
+            .clickable(enabled = !anySet) { onSetupClick() },
         shape = RoundedCornerShape(DeskDimens.cardCorner),
-        colors = CardDefaults.cardColors(containerColor = COMMUTE_PLACEHOLDER_COLOR),
+        colors = CardDefaults.cardColors(
+            containerColor = if (anySet) {
+                MaterialTheme.colorScheme.surfaceVariant
+            } else {
+                COMMUTE_PLACEHOLDER_COLOR
+            },
+        ),
     ) {
         Row(
             modifier = Modifier
@@ -420,44 +441,73 @@ fun CommutePlaceholderCard(
                 .padding(DeskDimens.cardPadding),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            CommuteSlot(label = "回家", icon = Icons.Default.Home)
-            CommuteSlot(label = "去公司", icon = Icons.Default.Work)
+            CommuteSlot(
+                label = "回家",
+                title = homeTitle,
+                icon = Icons.Default.Home,
+                onClick = onHomeClick,
+            )
+            CommuteSlot(
+                label = "去公司",
+                title = workTitle,
+                icon = Icons.Default.Work,
+                onClick = onWorkClick,
+            )
         }
     }
 }
 
-/** 单个槽位：图标 + 目的地名 + 灰态的「设置地址」。 */
+/** 单个槽位：图标 + 地点名（未设时是灰态「设置地址」）。 */
 @Composable
 private fun RowScope.CommuteSlot(
     label: String,
+    title: String?,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
 ) {
+    val set = title != null
     Column(
         modifier = Modifier
             .weight(1f)
-            .fillMaxHeight(),
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = set, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = Color.White.copy(alpha = 0.28f),
+            tint = if (set) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                Color.White.copy(alpha = 0.28f)
+            },
             modifier = Modifier.size(24.dp),
         )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
             text = label,
             fontSize = 14.sp,
-            color = Color.White.copy(alpha = 0.4f),
+            color = if (set) {
+                MaterialTheme.colorScheme.onSurface
+            } else {
+                Color.White.copy(alpha = 0.4f)
+            },
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
-            text = "设置地址",
+            // 已设置时第二行显示**地点名**（"回家 · 楼观新镇"这种口径太挤，
+            // 卡片只有 205×150，宁可让第一行是动作、第二行是地名）。
+            text = title ?: "设置地址",
             fontSize = 12.sp,
-            color = Color.White.copy(alpha = 0.28f),
+            color = if (set) {
+                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            } else {
+                Color.White.copy(alpha = 0.28f)
+            },
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )

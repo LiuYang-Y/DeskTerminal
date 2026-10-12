@@ -37,7 +37,7 @@ import com.qingke.desk.core.model.HomeCard
 import com.qingke.desk.core.model.HomeCardKind
 import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.deskGlassSource
-import com.qingke.desk.feature.home.CommutePlaceholderCard
+import com.qingke.desk.feature.home.CommuteCard
 import com.qingke.desk.feature.home.HomeCardTile
 import com.qingke.desk.feature.media.MediaCardTile
 import com.qingke.desk.feature.media.MediaCommand
@@ -97,6 +97,15 @@ fun HomeScreen(
      */
     mapHost: MapViewHost? = null,
     /**
+     * 「回家 / 去公司」两个槽位当前存的地点名。null = 没设置过（卡片显示灰态"设置地址"）。
+     * 只传名字而不是完整地点：卡片模块不需要知道坐标类型（见 [CommuteCard]）。
+     */
+    homeTitle: String? = null,
+    workTitle: String? = null,
+    /** 点"回家" / "去公司"：由 :shell 负责算路并进导航页。 */
+    onHomeClick: () -> Unit = {},
+    onWorkClick: () -> Unit = {},
+    /**
      * 外部翻页请求（只有 debug 验证驱动会发，见 [ValidationDriver]）。
      * 带序号，所以"连续两次请求同一页"也是两个事件。
      */
@@ -141,6 +150,10 @@ fun HomeScreen(
                     mediaState = mediaState,
                     onMediaCommand = onMediaCommand,
                     onMediaRequestPermission = onMediaRequestPermission,
+                    homeTitle = homeTitle,
+                    workTitle = workTitle,
+                    onHomeClick = onHomeClick,
+                    onWorkClick = onWorkClick,
                     driftX = driftX,
                     driftY = driftY,
                 )
@@ -183,6 +196,10 @@ private fun MapPage(
     mediaState: MediaUiState,
     onMediaCommand: (MediaCommand) -> Unit,
     onMediaRequestPermission: () -> Unit,
+    homeTitle: String?,
+    workTitle: String?,
+    onHomeClick: () -> Unit,
+    onWorkClick: () -> Unit,
     driftX: Dp,
     driftY: Dp,
 ) {
@@ -213,9 +230,17 @@ private fun MapPage(
                 .fillMaxHeight(),
             verticalArrangement = Arrangement.spacedBy(DeskDimens.gridGap),
         ) {
-            // 「回家 / 去公司」：导航做完之前的灰态占位，点了什么都不发生。
+            // 「回家 / 去公司」：已设地址则可点直达（见 :shell 的 onCommute*）。
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                CommutePlaceholderCard(driftX = driftX, driftY = driftY)
+                CommuteCard(
+                    driftX = driftX,
+                    driftY = driftY,
+                    homeTitle = homeTitle,
+                    workTitle = workTitle,
+                    onHomeClick = onHomeClick,
+                    onWorkClick = onWorkClick,
+                    onSetupClick = onOpenMap,
+                )
             }
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 MediaCardTile(

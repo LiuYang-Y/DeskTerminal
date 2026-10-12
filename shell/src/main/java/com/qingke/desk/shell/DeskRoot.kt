@@ -9,6 +9,7 @@ import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,7 +18,9 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -29,8 +32,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -38,12 +45,14 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import com.kyant.backdrop.backdrops.LayerBackdrop
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.qingke.desk.connection.ConnectionOrchestrator
 import com.qingke.desk.core.data.HomeRepository
+import com.qingke.desk.core.data.NaviPlace
 import com.qingke.desk.core.data.ShellSettings
 import com.qingke.desk.core.data.SidebarSide
 import com.qingke.desk.core.model.DisplayInfo
@@ -52,6 +61,7 @@ import com.qingke.desk.core.platform.Daylight
 import com.qingke.desk.core.platform.RemedyIntents
 import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.DeskTheme
+import com.qingke.desk.core.ui.deskGlassOverlay
 import com.qingke.desk.core.ui.rememberDeskGlassBackdrop
 import com.qingke.desk.feature.media.MediaPermission
 import com.qingke.desk.feature.media.MediaSessionMonitor
@@ -65,6 +75,9 @@ import com.qingke.desk.map.AMapPrivacy
 import com.qingke.desk.map.AMapPrivacyCard
 import com.qingke.desk.map.MapPane
 import com.qingke.desk.map.MapViewHost
+import com.qingke.desk.map.navi.NaviEngine
+import com.qingke.desk.map.navi.NaviViewHost
+import com.qingke.desk.map.navi.PlaceSuggestion
 import com.qingke.desk.projection.api.AvailabilityAction
 import com.qingke.desk.projection.api.AvailabilityResult
 import com.qingke.desk.projection.api.ProjectionKind
@@ -87,6 +100,18 @@ enum class DeskScreen {
      * :hosting 模块保留不删 —— 虚拟屏能力本身还在，只是这条链路上暂时不用它。
      */
     MAP,
+    /**
+     * 导航中（2026-10-12 加）。
+     *
+     * 导航界面**内嵌**在这一屏里（[com.qingke.desk.map.navi.NaviViewHost]），
+     * 不是另起一个 Activity —— 那样侧栏、上滑逃生、常亮、防烧屏、挖孔避让会全部失效，
+     * 要为它重做一遍壳（方案对比见 docs/2026-10-12-navigation-plan.md）。
+     *
+     * 这一屏**保留侧栏**（2026-10-12 用户口径）：侧栏是这台终端的唯一稳定入口，
+     * 导航中也不该被拿走。它还**不带齿轮与设置浮层**（那两样仍由 chromeScreen 管），
+     * 因为导航时弹设置面板会压住路线。
+     */
+    NAVI,
     /** Shizuku 的引导页。从右上角的悬浮状态角标进来。 */
     SHIZUKU_GUIDE,
 }
@@ -342,6 +367,46 @@ fun DeskRoot(
         // 设置面板的开合。它是**浮层**，不占壳层骨架的位置，关掉就什么都不剩。
         var settingsOpen by remember { mutableStateOf(false) }
 
+        // ---- 导航：交互状态 + 家/公司两个本地地址 ------------------------------
+        //
+        // 状态提到这一层而不是放在地图屏里：导航屏与地图屏要读同一份 destination
+        // （进导航、退出导航来回切，状态不能各说各话）。
+        val navi = remember { NaviUiState() }
+        var homePlace by remember { mutableStateOf(ShellSettings.naviHome(context)) }
+        var workPlace by remember { mutableStateOf(ShellSettings.naviWork(context)) }
+
+        /**
+         * 拿着一个**已带坐标**的目的地 → 算路 → 切到地图屏看预览。
+         *
+         * 起点用 [ShellSettings.lastLocation]：这台设备固定在桌上，它就是当前位置。
+         * 一个定位都没有时**明确拒绝并说清楚** —— 拿一个默认坐标算路只会把人导去别处。
+         */
+        fun planRoute(destination: PlaceSuggestion) {
+            val start = ShellSettings.lastLocation(context)
+            if (start == null) {
+                navi.notice = "还没有定位，稍后再试或先打开地图定位"
+                return
+            }
+            navi.destination = destination
+            navi.expanded = false
+            navi.notice = null
+            screen = DeskScreen.MAP
+            NaviEngine.calculate(context, start, destination)
+        }
+
+        /**
+         * 退出导航。四件事按顺序做完才算退出干净：
+         *   stopNavi（停播报、停算路轮询）→ **destroy 引擎**（`AMapNavi.destroy()` 是静态方法）
+         *   → 复位界面状态 → 回地图屏。
+         * 少一件的典型症状：第二次进导航时算路不回调（引擎是"半死"状态），
+         * 或者退出后导航语音还在说话。
+         */
+        fun exitNavi() {
+            NaviEngine.stopNavi()
+            navi.reset()
+            screen = DeskScreen.MAP
+        }
+
         // 高德隐私的同意状态。与 :map 的 MapPane 读的是同一条流，
         // 所以在这里撤回，地图屏那边会立刻换成隐私说明卡。
         val amapAgreed by AMapPrivacy.agreed.collectAsState()
@@ -426,8 +491,14 @@ fun DeskRoot(
         // （先试过让侧栏延伸过去吃掉挖孔那一条，真机上看像贴歪了 —— 见 SideBar 的类注释。）
         // 挖孔区本身也不再铺色，交给外层底色透出来（删 CutoutBand 的理由见其说明）。
 
-        // 哪几屏带"壳"（侧栏）。投屏页全屏、引导页自带返回，两者都不带。
+        // 哪几屏带"壳"（侧栏）。投屏页全屏、引导页自带返回，两者都不带；
+        // **导航页也不带**（理由见 DeskScreen.NAVI 的注释）。
         val chromeScreen = screen == DeskScreen.HOME || screen == DeskScreen.MAP
+
+        // 侧栏**常驻不隐藏**（用户口径，2026-10-12）：导航时也保留。
+        // 我一开始按"导航要整屏看路"把它在导航页关掉了，用户看过后要求恢复 ——
+        // 理由成立：侧栏是这台终端的**唯一稳定入口**，导航中途想切去音乐/投屏
+        // 不该被拿走；而导航画面自己会让出这一条（内容区本来就是收缩过的）。
 
         // 外层 Box 负责"铺满全屏并上色"：窗口已经延伸到挖孔下面
         // （见 MainActivity 的 shortEdges 设置），底色把挖孔区一起画掉，避免黑带。
@@ -524,6 +595,37 @@ fun DeskRoot(
                                     })
                                 },
                                 glassBackdrop = glassBackdrop,
+                                // 「回家 / 去公司」：只传名字，点击动作在这里收口。
+                                homeTitle = homePlace?.title,
+                                workTitle = workPlace?.title,
+                                onHomeClick = {
+                                    val place = homePlace
+                                    if (place == null) {
+                                        onMessage?.invoke("还没有设置家的地址")
+                                    } else {
+                                        planRoute(
+                                            PlaceSuggestion(
+                                                name = place.title,
+                                                address = place.address,
+                                                point = place.point,
+                                            ),
+                                        )
+                                    }
+                                },
+                                onWorkClick = {
+                                    val place = workPlace
+                                    if (place == null) {
+                                        onMessage?.invoke("还没有设置公司的地址")
+                                    } else {
+                                        planRoute(
+                                            PlaceSuggestion(
+                                                name = place.title,
+                                                address = place.address,
+                                                point = place.point,
+                                            ),
+                                        )
+                                    }
+                                },
                             )
 
                             // 全屏地图页（2026-10-12 改）：**地图铺满内容区**，没有
@@ -552,6 +654,47 @@ fun DeskRoot(
                                         renderEnabled = true,
                                         topInset = overlayInset,
                                     )
+                                    // 搜索层叠在地图上（同日导航接入）。
+                                    // 只在**同意隐私之后**才出现：不同意时这一屏是一张政策卡，
+                                    // 底下一个搜索条既没意义、又会让人以为地图能用。
+                                    NaviSearchLayer(
+                                        state = navi,
+                                        city = NAVI_CITY,
+                                        homePlace = homePlace,
+                                        workPlace = workPlace,
+                                        onPicked = { picked -> planRoute(picked) },
+                                        onSaveHome = { picked ->
+                                            val point = picked.point
+                                            if (point == null) {
+                                                navi.notice = "这个地点没有坐标，不能保存"
+                                            } else {
+                                                val place = NaviPlace(
+                                                    title = picked.name,
+                                                    point = point,
+                                                    address = picked.subtitle,
+                                                )
+                                                ShellSettings.setNaviHome(context, place)
+                                                homePlace = place
+                                                onMessage?.invoke("已设为家的地址：${place.title}")
+                                            }
+                                        },
+                                        onSaveWork = { picked ->
+                                            val point = picked.point
+                                            if (point == null) {
+                                                navi.notice = "这个地点没有坐标，不能保存"
+                                            } else {
+                                                val place = NaviPlace(
+                                                    title = picked.name,
+                                                    point = point,
+                                                    address = picked.subtitle,
+                                                )
+                                                ShellSettings.setNaviWork(context, place)
+                                                workPlace = place
+                                                onMessage?.invoke("已设为公司的地址：${place.title}")
+                                            }
+                                        },
+                                        onStartNavi = { screen = DeskScreen.NAVI },
+                                    )
                                 } else {
                                     AMapPrivacyCard(
                                         modifier = Modifier.fillMaxSize(),
@@ -563,6 +706,67 @@ fun DeskRoot(
                                         onDecline = {
                                             onMessage?.invoke("地图保持关闭。可随时在设置里重新同意")
                                         },
+                                    )
+                                }
+                            }
+
+                            // 导航中。地图由 AMapNaviView 自己画（内嵌），
+                            // 我们只负责"怎么退出"与"退出后把状态清干净"。
+                            DeskScreen.NAVI -> Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    // 上滑逃生：与投屏页同一个理由 —— HOME 应用一旦卡在
+                                    // 别人的画面里，除了 adb 卸载就没有别的出口。
+                                    // 这里的画面在我们的进程里，所以这个手势**收得到触摸**。
+                                    .edgeSwipeUp(enabled = true, onSwipeUp = ::exitNavi),
+                            ) {
+                                NaviViewHost(
+                                    modifier = Modifier.fillMaxSize(),
+                                    // 夜间样式用我们自己的昼夜判断（天气 API 的日出日落
+                                    // 已经喂给 Daylight），不用 SDK 的自动模式。
+                                    night = !Daylight.isDaylight(),
+                                    onExitRequest = ::exitNavi,
+                                    // 画面建好之后才 startNavi（顺序由 NaviViewHost 保证）。
+                                    // 起不来就明确说一句并退回去，不留一个"看着像在导航、
+                                    // 其实车不会动"的画面。
+                                    onViewReady = {
+                                        if (!NaviEngine.startNavi(context)) {
+                                            onMessage?.invoke("导航启动失败，请重试")
+                                            exitNavi()
+                                        }
+                                    },
+                                )
+
+                                // 退出按钮钉在左上：SDK 自带的返回在它自己的 UI 里，
+                                // 位置与样式我们控制不了；这一颗是我们自己的兜底出口。
+                                // 放在**右上**并做成玻璃块：SDK 自己的转向卡占着左上，
+                                // 一开始把按钮放左上，真机上直接被转向卡压掉一半
+                                // （截图 .verify/nav/S4-navi.png）。
+                                //
+                                // 用 [deskGlassOverlay] 而不是侧栏那块真玻璃：导航画面是
+                                // 独立 GL 图层，Compose 的背景层采不到它，真玻璃在这里
+                                // 只会糊出一块自家底色（原因写在 core:ui 的注释里）。
+                                val exitShape = RoundedCornerShape(18.dp)
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(end = 12.dp, top = 12.dp)
+                                        .shadow(6.dp, exitShape)
+                                        .deskGlassOverlay(exitShape)
+                                        .clickable(onClick = ::exitNavi)
+                                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                                ) {
+                                    // **颜色必须显式给**（2026-10-12 真机裁图发现的 bug）：
+                                    // 不写 color 时 Text 取的是 `LocalContentColor`，而它的默认值
+                                    // 是**黑色**（只有 Surface/Card/Button 这些容器才会把它设成
+                                    // onSurface）。早先玻璃蒙版是白色时黑字还看得见，改成深色蒙版
+                                    // 之后就成了"黑字压黑玻璃"，整颗按钮的文字彻底消失 ——
+                                    // 而这颗按钮是导航页唯一的官方出口。
+                                    // 证据：`.verify/nav/G7-exit-zoom.png`。
+                                    Text(
+                                        text = "退出导航",
+                                        fontSize = 14.sp,
+                                        color = MaterialTheme.colorScheme.onSurface,
                                     )
                                 }
                             }
@@ -820,6 +1024,9 @@ private fun handleShellSelect(
 private fun selectedShellId(screen: DeskScreen): String = when (screen) {
     DeskScreen.HOME, DeskScreen.SHIZUKU_GUIDE -> ShellIds.HOME
     DeskScreen.MAP -> ShellIds.MAP
+    // 导航页不给侧栏（见 DeskScreen.NAVI），所以"高亮哪一项"在这里没有意义 ——
+    // 归到地图，至少退出导航后侧栏不会跳一下。
+    DeskScreen.NAVI -> ShellIds.MAP
     DeskScreen.PROJECTION -> ShellIds.PROJECTION
 }
 
