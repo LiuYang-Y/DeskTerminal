@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -44,6 +45,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -75,7 +77,9 @@ import com.qingke.desk.map.AMapPrivacy
 import com.qingke.desk.map.AMapPrivacyCard
 import com.qingke.desk.map.MapPane
 import com.qingke.desk.map.MapViewHost
-import com.qingke.desk.map.navi.NaviEngine
+import com.qingke.desk.map.navi.NaviCanvas
+import com.qingke.desk.map.navi.NaviPhase
+import com.qingke.desk.map.navi.NaviSession
 import com.qingke.desk.map.navi.NaviViewHost
 import com.qingke.desk.map.navi.PlaceSuggestion
 import com.qingke.desk.projection.api.AvailabilityAction
@@ -98,20 +102,15 @@ enum class DeskScreen {
      * 2026-10-12 之前这一屏叫 HOSTING，走的是 :hosting 的虚拟屏把高德 App 整个
      * 搬过来；现在改用高德 SDK（MapView 直接挂进 Compose），虚拟屏不再参与。
      * :hosting 模块保留不删 —— 虚拟屏能力本身还在，只是这条链路上暂时不用它。
+     *
+     * **导航画面也长在这一屏里**（2026-10-12 重构）：原来有一个独立的
+     * `DeskScreen.NAVI`，结果是"切到首页再回来"时这一支从组合里消失、
+     * 导航 View 被销毁，而引擎还在导航 —— 两边分家，导航看起来"消失"了。
+     * 现在改为**由会话阶段决定这一屏画什么**：`phase` 是
+     * [NaviPhase.STARTING] / [NaviPhase.NAVIGATING] 时画导航，否则画地图 + 搜索层。
+     * 于是"点侧栏地图 = 回到导航"这件事自然成立，不需要额外的状态搬运。
      */
     MAP,
-    /**
-     * 导航中（2026-10-12 加）。
-     *
-     * 导航界面**内嵌**在这一屏里（[com.qingke.desk.map.navi.NaviViewHost]），
-     * 不是另起一个 Activity —— 那样侧栏、上滑逃生、常亮、防烧屏、挖孔避让会全部失效，
-     * 要为它重做一遍壳（方案对比见 docs/2026-10-12-navigation-plan.md）。
-     *
-     * 这一屏**保留侧栏**（2026-10-12 用户口径）：侧栏是这台终端的唯一稳定入口，
-     * 导航中也不该被拿走。它还**不带齿轮与设置浮层**（那两样仍由 chromeScreen 管），
-     * 因为导航时弹设置面板会压住路线。
-     */
-    NAVI,
     /** Shizuku 的引导页。从右上角的悬浮状态角标进来。 */
     SHIZUKU_GUIDE,
 }
@@ -198,6 +197,19 @@ fun DeskRoot(
     // 只在整棵树消失（= Activity 销毁）时销毁一次。翻页/切屏走的是 release（解挂）。
     DisposableEffect(mapViewHost) {
         onDispose { mapViewHost.destroy() }
+    }
+
+    // ---- 导航单实例宿主（2026-10-12 加）--------------------------------------
+    //
+    // 导航画面（AMapNaviView）也必须跨屏保活：用户切去首页看一眼、切去投屏，
+    // 回来时导航要还在。它和 MapViewHost 是同一套规则（切屏只解挂、不销毁），
+    // 差别只在它没有"多使用点"——但 refCount 的坑同样存在（切屏那一帧
+    // 新的先 acquire、旧的后 release），所以规则照搬，理由见 NaviViewHost 的类注释。
+    val naviViewHost = remember(context, lifecycleOwner) {
+        NaviViewHost(context.applicationContext, lifecycleOwner)
+    }
+    DisposableEffect(naviViewHost) {
+        onDispose { naviViewHost.destroy() }
     }
 
     // ---- 验证驱动（仅 debug；release 里接收器不注册）--------------------------
@@ -369,11 +381,21 @@ fun DeskRoot(
 
         // ---- 导航：交互状态 + 家/公司两个本地地址 ------------------------------
         //
-        // 状态提到这一层而不是放在地图屏里：导航屏与地图屏要读同一份 destination
-        // （进导航、退出导航来回切，状态不能各说各话）。
+        // 这里只放**界面**状态（输入框、联想列表）。目的地与"在不在导航"都在
+        // [NaviSession] 里 —— 它们是会话的事，不是这一屏的事。上一版把
+        // "在不在导航"存在界面枚举上，切一次屏就与引擎分家了（见 DeskScreen.MAP 注释）。
         val navi = remember { NaviUiState() }
         var homePlace by remember { mutableStateOf(ShellSettings.naviHome(context)) }
         var workPlace by remember { mutableStateOf(ShellSettings.naviWork(context)) }
+
+        // 会话阶段：界面唯一可信的"导航还在不在"。
+        val naviPhase by NaviSession.phase.collectAsState()
+        val naviActive = naviPhase == NaviPhase.STARTING || naviPhase == NaviPhase.NAVIGATING
+        val naviDestination by NaviSession.destination.collectAsState()
+
+        // 退出确认对话框是否在屏。**退出导航是唯一的结束入口，所以它必须被确认一次**——
+        // 这颗按钮就压在导航画面右上角，误触一次就是"导航没了"。
+        var exitConfirm by remember { mutableStateOf(false) }
 
         /**
          * 拿着一个**已带坐标**的目的地 → 算路 → 切到地图屏看预览。
@@ -387,24 +409,29 @@ fun DeskRoot(
                 navi.notice = "还没有定位，稍后再试或先打开地图定位"
                 return
             }
-            navi.destination = destination
             navi.expanded = false
             navi.notice = null
             screen = DeskScreen.MAP
-            NaviEngine.calculate(context, start, destination)
+            // 导航中换目的地由会话自己处理（先停旧的、等回调、再算新的并自动开始），
+            // 界面不需要知道这条链 —— 这正是"界面只订阅"的意思。
+            NaviSession.calculate(context, start, destination)
+        }
+
+        /** 请求退出：先弹确认，不直接停。 */
+        fun askExitNavi() {
+            if (naviPhase == NaviPhase.IDLE) return
+            exitConfirm = true
         }
 
         /**
-         * 退出导航。四件事按顺序做完才算退出干净：
-         *   stopNavi（停播报、停算路轮询）→ **destroy 引擎**（`AMapNavi.destroy()` 是静态方法）
-         *   → 复位界面状态 → 回地图屏。
-         * 少一件的典型症状：第二次进导航时算路不回调（引擎是"半死"状态），
-         * 或者退出后导航语音还在说话。
+         * 确认退出。**只有走到这里才会真正结束导航**（[NaviSession.requestExit]）。
+         * 会话内部按 stopNavi → 等 `onStopNavi` → `destroy()` 的顺序收尾，
+         * 所以退出后立刻重新开始导航也不会再撞上 `startNavi ok=false`。
          */
-        fun exitNavi() {
-            NaviEngine.stopNavi()
+        fun confirmExitNavi() {
+            exitConfirm = false
+            NaviSession.requestExit()
             navi.reset()
-            screen = DeskScreen.MAP
         }
 
         // 高德隐私的同意状态。与 :map 的 MapPane 读的是同一条流，
@@ -470,6 +497,17 @@ fun DeskRoot(
                         sidebarSide = ShellSettings.setSidebarSide(context, side)
                     }
 
+                    // 模拟导航开关（2026-10-12 加，仅 debug 有实现）。
+                    //
+                    // 设备在桌上不动，GPS 导航**一帧引导数据都不会来**（没有位移就没有
+                    // 引导事件），于是"切到首页后引擎还在不在导航""语音有没有断"
+                    // "首页卡有没有实时引导"这些全都没法在屋里验。切到 EMULATOR 之后
+                    // SDK 沿着算好的路线自己开，整条链路就能在桌上跑完。
+                    //   navi:emulator —— 之后启动的导航走模拟
+                    //   navi:gps      —— 回到真实 GPS
+                    cmd == "navi:emulator" -> ValidationDriver.setEmulatorOverride(true)
+                    cmd == "navi:gps" -> ValidationDriver.setEmulatorOverride(false)
+
                     else -> Log.w(SHELL_TAG, "unknown validation cmd=$cmd")
                 }
             }
@@ -491,9 +529,13 @@ fun DeskRoot(
         // （先试过让侧栏延伸过去吃掉挖孔那一条，真机上看像贴歪了 —— 见 SideBar 的类注释。）
         // 挖孔区本身也不再铺色，交给外层底色透出来（删 CutoutBand 的理由见其说明）。
 
-        // 哪几屏带"壳"（侧栏）。投屏页全屏、引导页自带返回，两者都不带；
-        // **导航页也不带**（理由见 DeskScreen.NAVI 的注释）。
-        val chromeScreen = screen == DeskScreen.HOME || screen == DeskScreen.MAP
+        // 哪几屏带"壳"（侧栏 + 齿轮浮层）。投屏页全屏、引导页自带返回，两者都不带。
+        //
+        // **导航中也把齿轮收起来**（2026-10-12，与重构前一致）：齿轮和"退出导航"
+        // 都在右上角，同时出现会叠在一起；而导航时真正要紧的那颗按钮是退出。
+        // 侧栏本身照旧常驻（用户口径），所以入口并没有被拿走。
+        val chromeScreen = screen == DeskScreen.HOME ||
+            (screen == DeskScreen.MAP && !naviActive)
 
         // 侧栏**常驻不隐藏**（用户口径，2026-10-12）：导航时也保留。
         // 我一开始按"导航要整屏看路"把它在导航页关掉了，用户看过后要求恢复 ——
@@ -631,7 +673,12 @@ fun DeskRoot(
                             // 全屏地图页（2026-10-12 改）：**地图铺满内容区**，没有
                             // 浮在上面的卡片面板，也没有展开/收起手柄 —— 那套浮层
                             // 是"一屏既要地图又要卡片"的妥协，现在卡片在首页第一页，
-                            // 这一屏就专心做地图，以后搜索目的地和导航也从这里进。
+                            // 这一屏就专心做地图，搜索目的地和导航都从这里进。
+                            //
+                            // **导航画面也长在这一支里**（同日重构）：`naviActive` 为真时
+                            // 画导航，否则画地图 + 搜索层。上一版把导航单列成一个
+                            // `DeskScreen.NAVI`，切去首页时那一支从组合里消失、导航 View
+                            // 被销毁而引擎还在导航，于是"导航没了、再点开始导航被打断"。
                             //
                             // 未同意隐私时这里渲染完整的隐私说明卡（首页那张是精简占位，
                             // 点它正是跳到这里）。放在内容区而不是铺满整屏，
@@ -647,7 +694,75 @@ fun DeskRoot(
                                 // （跟着侧栏镜像），隐私卡的标题是横向铺满的，
                                 // 不让位就会被压住（真机截图 v11-revoke-fullscreen.png）。
                                 val overlayInset = DeskDimens.overlayChipBandHeight
-                                if (amapAgreed) {
+                                if (naviActive) {
+                                    // ---- 导航中 ----
+                                    //
+                                    // 上滑逃生：与投屏页同一个理由 —— HOME 应用一旦卡在
+                                    // 别人的画面里，除了 adb 卸载就没有别的出口。
+                                    // 这里的画面在我们的进程里，所以这个手势**收得到触摸**。
+                                    // 它走**同一颗确认框**：退出导航是唯一会结束导航的动作，
+                                    // 值得多问一句。
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .edgeSwipeUp(enabled = true, onSwipeUp = ::askExitNavi),
+                                    ) {
+                                        NaviCanvas(
+                                            host = naviViewHost,
+                                            // 夜间样式用我们自己的昼夜判断（天气 API 的
+                                            // 日出日落已经喂给 Daylight），不用 SDK 的自动模式。
+                                            night = !Daylight.isDaylight(),
+                                            onExitRequest = ::askExitNavi,
+                                            // 画面建好之后才 startNavi（顺序由 NaviCanvas 保证）。
+                                            // 起不来就明确说一句 —— 不留一个"看着像在导航、
+                                            // 其实车不会动"的画面。会话自己会退回预览态，
+                                            // 于是这一支下一帧就切回搜索层，不需要我们手动切屏。
+                                            onReady = {
+                                                val emulator = ValidationDriver.emulatorOverride
+                                                if (!NaviSession.onViewReady(context)) {
+                                                    onMessage?.invoke("导航启动失败（引擎未开始），请重试")
+                                                } else {
+                                                    // 起得来就补一句：验证时能一眼看出走的是哪条通道。
+                                                    if (emulator) Log.i(SHELL_TAG, "navi started in EMULATOR mode")
+                                                }
+                                            },
+                                            modifier = Modifier.fillMaxSize(),
+                                        )
+
+                                        // 退出按钮。SDK 自带的返回在它自己的 UI 里，
+                                        // 位置与样式我们控制不了；这一颗是我们自己的兜底出口。
+                                        // 放在**右上**并做成玻璃块：SDK 自己的转向卡占着左上，
+                                        // 一开始把按钮放左上，真机上直接被转向卡压掉一半
+                                        // （截图 .verify/nav/S4-navi.png）。
+                                        //
+                                        // 用 [deskGlassOverlay] 而不是侧栏那块真玻璃：导航画面是
+                                        // 独立 GL 图层，Compose 的背景层采不到它，真玻璃在这里
+                                        // 只会糊出一块自家底色（原因写在 core:ui 的注释里）。
+                                        val exitShape = RoundedCornerShape(18.dp)
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .padding(end = 12.dp, top = 12.dp)
+                                                .shadow(6.dp, exitShape)
+                                                .deskGlassOverlay(exitShape)
+                                                .clickable(onClick = ::askExitNavi)
+                                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                                        ) {
+                                            // **颜色必须显式给**（2026-10-12 真机裁图发现的 bug）：
+                                            // 不写 color 时 Text 取的是 `LocalContentColor`，而它的默认值
+                                            // 是**黑色**（只有 Surface/Card/Button 这些容器才会把它设成
+                                            // onSurface）。早先玻璃蒙版是白色时黑字还看得见，改成深色蒙版
+                                            // 之后就成了"黑字压黑玻璃"，整颗按钮的文字彻底消失 ——
+                                            // 而这颗按钮是导航页唯一的官方出口。
+                                            // 证据：`.verify/nav/G7-exit-zoom.png`。
+                                            Text(
+                                                text = "退出导航",
+                                                fontSize = 14.sp,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                            )
+                                        }
+                                    }
+                                } else if (amapAgreed) {
                                     MapPane(
                                         modifier = Modifier.fillMaxSize(),
                                         host = mapViewHost,
@@ -659,6 +774,7 @@ fun DeskRoot(
                                     // 底下一个搜索条既没意义、又会让人以为地图能用。
                                     NaviSearchLayer(
                                         state = navi,
+                                        destination = naviDestination,
                                         city = NAVI_CITY,
                                         homePlace = homePlace,
                                         workPlace = workPlace,
@@ -693,7 +809,15 @@ fun DeskRoot(
                                                 onMessage?.invoke("已设为公司的地址：${place.title}")
                                             }
                                         },
-                                        onStartNavi = { screen = DeskScreen.NAVI },
+                                        // "开始导航"不切屏：它只把会话推到 STARTING，
+                                        // 而这一屏**看到阶段变了就自己改画导航**（见上面的 naviActive）。
+                                        // 切屏与导航状态从此解耦 —— 上一版这里写的是
+                                        // `screen = DeskScreen.NAVI`，那正是"切走再回来就分家"的入口。
+                                        onStartNavi = {
+                                            // 模拟导航只在 debug 变体里可能为 true（release 恒 false）。
+                                            NaviSession.requestStart(context, ValidationDriver.emulatorOverride)
+                                        },
+                                        onClearDestination = { NaviSession.clearRoute() },
                                     )
                                 } else {
                                     AMapPrivacyCard(
@@ -706,67 +830,6 @@ fun DeskRoot(
                                         onDecline = {
                                             onMessage?.invoke("地图保持关闭。可随时在设置里重新同意")
                                         },
-                                    )
-                                }
-                            }
-
-                            // 导航中。地图由 AMapNaviView 自己画（内嵌），
-                            // 我们只负责"怎么退出"与"退出后把状态清干净"。
-                            DeskScreen.NAVI -> Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    // 上滑逃生：与投屏页同一个理由 —— HOME 应用一旦卡在
-                                    // 别人的画面里，除了 adb 卸载就没有别的出口。
-                                    // 这里的画面在我们的进程里，所以这个手势**收得到触摸**。
-                                    .edgeSwipeUp(enabled = true, onSwipeUp = ::exitNavi),
-                            ) {
-                                NaviViewHost(
-                                    modifier = Modifier.fillMaxSize(),
-                                    // 夜间样式用我们自己的昼夜判断（天气 API 的日出日落
-                                    // 已经喂给 Daylight），不用 SDK 的自动模式。
-                                    night = !Daylight.isDaylight(),
-                                    onExitRequest = ::exitNavi,
-                                    // 画面建好之后才 startNavi（顺序由 NaviViewHost 保证）。
-                                    // 起不来就明确说一句并退回去，不留一个"看着像在导航、
-                                    // 其实车不会动"的画面。
-                                    onViewReady = {
-                                        if (!NaviEngine.startNavi(context)) {
-                                            onMessage?.invoke("导航启动失败，请重试")
-                                            exitNavi()
-                                        }
-                                    },
-                                )
-
-                                // 退出按钮钉在左上：SDK 自带的返回在它自己的 UI 里，
-                                // 位置与样式我们控制不了；这一颗是我们自己的兜底出口。
-                                // 放在**右上**并做成玻璃块：SDK 自己的转向卡占着左上，
-                                // 一开始把按钮放左上，真机上直接被转向卡压掉一半
-                                // （截图 .verify/nav/S4-navi.png）。
-                                //
-                                // 用 [deskGlassOverlay] 而不是侧栏那块真玻璃：导航画面是
-                                // 独立 GL 图层，Compose 的背景层采不到它，真玻璃在这里
-                                // 只会糊出一块自家底色（原因写在 core:ui 的注释里）。
-                                val exitShape = RoundedCornerShape(18.dp)
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(end = 12.dp, top = 12.dp)
-                                        .shadow(6.dp, exitShape)
-                                        .deskGlassOverlay(exitShape)
-                                        .clickable(onClick = ::exitNavi)
-                                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                                ) {
-                                    // **颜色必须显式给**（2026-10-12 真机裁图发现的 bug）：
-                                    // 不写 color 时 Text 取的是 `LocalContentColor`，而它的默认值
-                                    // 是**黑色**（只有 Surface/Card/Button 这些容器才会把它设成
-                                    // onSurface）。早先玻璃蒙版是白色时黑字还看得见，改成深色蒙版
-                                    // 之后就成了"黑字压黑玻璃"，整颗按钮的文字彻底消失 ——
-                                    // 而这颗按钮是导航页唯一的官方出口。
-                                    // 证据：`.verify/nav/G7-exit-zoom.png`。
-                                    Text(
-                                        text = "退出导航",
-                                        fontSize = 14.sp,
-                                        color = MaterialTheme.colorScheme.onSurface,
                                     )
                                 }
                             }
@@ -825,6 +888,49 @@ fun DeskRoot(
                             screen = DeskScreen.SHIZUKU_GUIDE
                         },
                         onDismiss = { bootPromptStatus = null },
+                    )
+                }
+
+                // ---- 退出导航的二次确认 --------------------------------------
+                //
+                // 为什么非要问一句：「退出导航」是**唯一**会结束导航的动作，而它就压在
+                // 导航画面右上角、离鹰眼图和路况条都不远。误触一次 = 正在跑的导航没了，
+                // 而且（重构前）还会连带把下一次导航也搞坏。
+                // 另一颗入口（边缘上滑手势）走的是同一颗确认框：它是"逃生"而不是"快捷退出"，
+                // 多一次点击不影响它能不能用 —— 卡住的时候对话框照样出得来。
+                if (exitConfirm) {
+                    AlertDialog(
+                        onDismissRequest = { exitConfirm = false },
+                        title = {
+                            Text(
+                                text = "结束导航？",
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        },
+                        text = {
+                            val name = naviDestination?.name
+                            Text(
+                                text = if (name != null) {
+                                    "将结束前往「$name」的导航，之后可以重新选目的地。"
+                                } else {
+                                    "将结束当前导航，之后可以重新选目的地。"
+                                },
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = ::confirmExitNavi) {
+                                Text("结束导航", fontSize = 14.sp, color = MaterialTheme.colorScheme.error)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { exitConfirm = false }) {
+                                Text("继续导航", fontSize = 14.sp, color = MaterialTheme.colorScheme.primary)
+                            }
+                        },
                     )
                 }
 
@@ -1023,10 +1129,8 @@ private fun handleShellSelect(
 /** 当前屏幕对应侧栏里的哪一项（决定玻璃指示块停在哪儿）。 */
 private fun selectedShellId(screen: DeskScreen): String = when (screen) {
     DeskScreen.HOME, DeskScreen.SHIZUKU_GUIDE -> ShellIds.HOME
+    // 导航画面也长在地图屏里（见 DeskScreen.MAP 的注释），所以这里天然就是它。
     DeskScreen.MAP -> ShellIds.MAP
-    // 导航页不给侧栏（见 DeskScreen.NAVI），所以"高亮哪一项"在这里没有意义 ——
-    // 归到地图，至少退出导航后侧栏不会跳一下。
-    DeskScreen.NAVI -> ShellIds.MAP
     DeskScreen.PROJECTION -> ShellIds.PROJECTION
 }
 

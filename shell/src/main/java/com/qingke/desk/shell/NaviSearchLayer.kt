@@ -60,7 +60,7 @@ import com.qingke.desk.core.ui.deskGlassOverlay
 // 挂在它上面的 `val DeskGlass.xxx` 仍在 core:ui 包里（SideBar.kt 同样是显式导入的）。
 import com.qingke.desk.core.ui.mapScrimAlpha
 import com.qingke.desk.core.ui.overlayCardAlpha
-import com.qingke.desk.map.navi.NaviEngine
+import com.qingke.desk.map.navi.NaviSession
 import com.qingke.desk.map.navi.PlaceSearch
 import com.qingke.desk.map.navi.PlaceSuggestion
 import com.qingke.desk.map.navi.RouteOption
@@ -74,6 +74,10 @@ import kotlinx.coroutines.delay
  * 它要被**两个屏**读到 —— 地图屏（搜索 + 预览）和导航屏（显示目的地、退出后回到同一份状态）。
  * 屏之间传值用参数或 rememberSaveable 都可以，但真正的需求是"一整块状态共享"，
  * 抽出来最省事，也避免出现两份 destination 各说各话。
+ *
+ * 注意**这里不含 destination**：目的地属于导航会话（[NaviSession]），
+ * 而不是"这个搜索框现在长什么样"。两者混在一起的话，切一次屏就得把目的地
+ * 从界面状态搬到持有它的那一层，搬漏一处就成了"界面说有、会话说没有"。
  */
 class NaviUiState {
 
@@ -92,9 +96,6 @@ class NaviUiState {
     /** 给人看的一行提示（失败原因、"这个结果暂无坐标"等）。null = 不显示。 */
     var notice by mutableStateOf<String?>(null)
 
-    /** 已经**带坐标**的目的地。null = 还没选。 */
-    var destination by mutableStateOf<PlaceSuggestion?>(null)
-
     /** 选中的目的地在列表里的位置，用于高亮。 */
     var highlightIndex by mutableStateOf(-1)
 
@@ -104,7 +105,6 @@ class NaviUiState {
         suggestions = emptyList()
         busy = false
         notice = null
-        destination = null
         highlightIndex = -1
     }
 }
@@ -123,6 +123,10 @@ class NaviUiState {
 @Composable
 fun NaviSearchLayer(
     state: NaviUiState,
+    /**
+     * 当前目的地（已带坐标），来自 [NaviSession]。null = 还没选，预览卡不显示。
+     */
+    destination: PlaceSuggestion?,
     city: String,
     homePlace: NaviPlace?,
     workPlace: NaviPlace?,
@@ -136,12 +140,17 @@ fun NaviSearchLayer(
     onSaveHome: (PlaceSuggestion) -> Unit,
     onSaveWork: (PlaceSuggestion) -> Unit,
     onStartNavi: () -> Unit,
+    /**
+     * 用户点了"算了"：把这次的目的地连同算路结果一起丢掉。
+     * 由调用方落到 [NaviSession.clearRoute]（界面不直接改会话状态）。
+     */
+    onClearDestination: () -> Unit,
 ) {
     val context = LocalContext.current
     val searcher = remember { PlaceSearch(context) }
-    val routeState by NaviEngine.route.collectAsState()
-    // 策略是引擎的状态而不是界面的：换策略会触发重算，界面只负责"点哪个"。
-    val strategy by NaviEngine.strategy.collectAsState()
+    val routeState by NaviSession.route.collectAsState()
+    // 策略是**会话**的状态而不是界面的：换策略会触发重算，界面只负责"点哪个"。
+    val strategy by NaviSession.strategy.collectAsState()
 
     // ---- 输入防抖 → 联想 ----
     LaunchedEffect(state.query, state.expanded) {
@@ -183,7 +192,7 @@ fun NaviSearchLayer(
         //
         // **故意不挂 clickable**：遮罩只是视觉层，不能吃掉触摸。否则点着地图想拖开看看
         // 旁边那条路，会变成点不动 —— 遮罩把地图手势也一起遮掉了。
-        if (state.expanded || (state.destination != null && routeState !is RouteState.Idle)) {
+        if (state.expanded || (destination != null && routeState !is RouteState.Idle)) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -300,7 +309,6 @@ fun NaviSearchLayer(
         // 只在「没展开联想面板」时显示：面板从顶部往下最多 250 dp，卡片从底部往上
         // 也有三百出头，两者同时出现会在屏幕中段撞在一起（内容区只有 411 dp 高）。
         // 用户点开搜索条的那一刻，他要的是重新选目的地，卡片留着也没用。
-        val destination = state.destination
         if (destination != null && !state.expanded && routeState !is RouteState.Idle) {
             RoutePreviewCard(
                 modifier = Modifier
@@ -314,17 +322,16 @@ fun NaviSearchLayer(
                 strategy = strategy,
                 homePlace = homePlace,
                 workPlace = workPlace,
-                onStrategyChange = { NaviEngine.switchStrategy(context, it) },
-                onSelectRoute = { NaviEngine.select(it) },
+                onStrategyChange = { NaviSession.switchStrategy(context, it) },
+                onSelectRoute = { NaviSession.select(it) },
                 onSaveHome = { onSaveHome(destination) },
                 onSaveWork = { onSaveWork(destination) },
                 onStartNavi = onStartNavi,
                 onDismiss = {
-                    state.destination = null
                     // "算了"就是"当我没说"：关键词一起清掉，下次打开是干净的输入框，
                     // 而不是又看到刚放弃的那次搜索（同 [onPicked] 那条的理由）。
                     state.query = ""
-                    NaviEngine.clearRoute()
+                    onClearDestination()
                 },
             )
         }
@@ -598,10 +605,10 @@ private fun RoutePreviewCard(
     modifier: Modifier = Modifier,
     destination: PlaceSuggestion,
     routeState: RouteState,
-    strategy: NaviEngine.Strategy,
+    strategy: NaviSession.Strategy,
     homePlace: NaviPlace?,
     workPlace: NaviPlace?,
-    onStrategyChange: (NaviEngine.Strategy) -> Unit,
+    onStrategyChange: (NaviSession.Strategy) -> Unit,
     onSelectRoute: (Int) -> Unit,
     onSaveHome: () -> Unit,
     onSaveWork: () -> Unit,
@@ -724,19 +731,19 @@ private fun RoutePreviewCard(
 /**
  * 策略切换行：推荐 / 高速优先 / 不走高速 / 躲避拥堵。
  *
- * 四项**全部来自 [NaviEngine.Strategy]**，不在界面里另写一份文案 ——
+ * 四项**全部来自 [NaviSession.Strategy]**，不在界面里另写一份文案 ——
  * 否则改引擎忘了改界面，按钮写着"高速优先"实际传的是别的常量，这种错最难查。
  */
 @Composable
 private fun StrategyRow(
-    current: NaviEngine.Strategy,
-    onSelect: (NaviEngine.Strategy) -> Unit,
+    current: NaviSession.Strategy,
+    onSelect: (NaviSession.Strategy) -> Unit,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        NaviEngine.Strategy.entries.forEach { s ->
+        NaviSession.Strategy.entries.forEach { s ->
             StrategyChip(
                 modifier = Modifier.weight(1f),
                 label = s.label,
@@ -784,7 +791,7 @@ private fun StrategyChip(
 }
 
 /**
- * 多条路线的列表。选中项高亮，点任意一条即切换当前路线（[NaviEngine.select]）。
+ * 多条路线的列表。选中项高亮，点任意一条即切换当前路线（[NaviSession.select]）。
  *
  * 为什么不做"卡片式三选一"：路线之间的差异主要在**数字**上（多远、多久、几个灯），
  * 纵向列表能让同一列的数字对齐、一眼比出来；横向卡片反而要来回扫视。

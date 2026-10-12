@@ -1,0 +1,802 @@
+package com.qingke.desk.map.navi
+
+import android.content.Context
+import android.graphics.Bitmap
+import com.amap.api.maps.model.LatLng
+import com.amap.api.navi.AMapNavi
+import com.amap.api.navi.SimpleNaviListener
+import com.amap.api.navi.enums.NaviType
+import com.amap.api.navi.enums.PathPlanningStrategy
+import com.amap.api.navi.model.AMapCalcRouteResult
+import com.amap.api.navi.model.NaviInfo
+import com.amap.api.navi.model.NaviPoi
+import com.qingke.desk.core.data.GeoPoint
+import com.qingke.desk.map.AMapPrivacy
+import com.qingke.desk.map.MapLog
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+/** 一条算好的路线的摘要。只取界面要显示、且**能从 SDK 直接读到**的三个数。 */
+data class RouteSummary(
+    val distanceMeters: Int,
+    val durationSeconds: Int,
+    val trafficLights: Int,
+) {
+    /** "38.5 公里" —— 不到 1 公里时给米，避免显示"0.4 公里"这种别扭的读数。 */
+    val distanceText: String
+        get() = if (distanceMeters < 1000) "$distanceMeters 米" else "%.1f 公里".format(distanceMeters / 1000.0)
+
+    /** "45 分钟" —— 超过 1 小时给"1 小时 12 分"。 */
+    val durationText: String
+        get() {
+            val minutes = durationSeconds / 60
+            return if (minutes < 60) "$minutes 分钟" else "${minutes / 60} 小时 ${minutes % 60} 分"
+        }
+
+    val trafficLightText: String get() = "$trafficLights 个红绿灯"
+}
+
+/**
+ * 一条**可选**的路线（多路径策略下会返回若干条，界面并列出来让人挑）。
+ *
+ * @param id 路线 id。[NaviSession.select] 用它让 SDK 真的走这一条。
+ * @param labels 高德给这条路线的标签串（`AMapNaviPath.getLabels()`），
+ *               诸如"红绿灯少""收费"之类。**原样展示**，不自己编标签。
+ */
+data class RouteOption(
+    val id: Int,
+    val summary: RouteSummary,
+    val labels: String = "",
+)
+
+/** 算路状态机。界面只认这四个态，不存在"半算好"这种中间态。 */
+sealed interface RouteState {
+    /** 还没有目的地。 */
+    data object Idle : RouteState
+
+    /** 正在算（有 20 秒兜底超时，见 [NaviSession.CALC_TIMEOUT_MILLIS]）。 */
+    data object Calculating : RouteState
+
+    /**
+     * 算好了。[options] 通常有多条（用多路径策略时），[selectedIndex] 是当前选中的下标 ——
+     * 界面因此能画一张"几条路线 + 选中态"的列表，而不是只显示一条。
+     */
+    data class Ready(
+        val options: List<RouteOption>,
+        val selectedIndex: Int = 0,
+    ) : RouteState {
+        val selected: RouteOption? get() = options.getOrNull(selectedIndex)
+    }
+
+    data class Failed(val message: String) : RouteState
+}
+
+/**
+ * 导航会话的真实阶段。**这是"导航还在不在"的唯一权威**。
+ *
+ * 为什么要有它（2026-10-12 的严重缺陷）：原先判断"是不是在导航"用的是界面自己的
+ * 一个 `_navigating` 布尔，而"导航中"这件事实际上由**用户切到了哪一屏**决定 ——
+ * 切到首页那一帧，导航 View 被 dispose（`onDestroy`），引擎却还在导航。
+ * 两个状态从此各说各话，用户看到的现象是"导航没了、再点开始导航被打断"。
+ *
+ * 现在阶段由**引擎回调**驱动（`onStartNavi` / `onStopNavi`），界面只读它。
+ *
+ * 六个阶段，其中 [STARTING] 是原方案里没有、但实现上必须有的一个：
+ * `AMapNavi.startNavi()` 必须在 `AMapNaviView.onCreate()` **之后**调用
+ * （否则 SDK 拿不到 View，把导航状态丢在地上）。所以"请求开始"和"真正开始"
+ * 之间必然存在一段等待期，它就是 [STARTING]。把它显式化之后
+ * 界面能正确地在"还没开始"时就挂上导航 View，而不是先挂 View 再撞运气。
+ */
+enum class NaviPhase {
+    /** 空闲：没有目的地，也没在导航。 */
+    IDLE,
+
+    /** 算路中。 */
+    CALCULATING,
+
+    /** 路线预览：算好了几条，等用户挑一条并点"开始导航"。 */
+    PREVIEW,
+
+    /** 已请求开始：导航 View 正在创建 / 等待 `startNavi()` 生效。 */
+    STARTING,
+
+    /** 导航中。**只有它意味着"导航还在"**。 */
+    NAVIGATING,
+
+    /** 停止中：已经下发 `stopNavi()`，等 `onStopNavi` 回调把状态收干净。 */
+    STOPPING,
+}
+
+/**
+ * 实时引导数据。界面（全屏导航页、首页地图卡）只读这一份。
+ *
+ * 每一条都对应 `NaviInfo` 上的一个 getter（javap 核实过），**没有一条是推算的**：
+ * 推算出来的"距离/时间"会和导航语音说的数字对不上，那比没有还糟。
+ *
+ * @param iconType `IconType` 常量（左转=2、右转=3、直行=9……），界面自己画图标时用。
+ * @param icon SDK 直接给的转向图标位图（`NaviInfo.getIconBitmap()`）。
+ *             有它就优先用它 —— SDK 的图标和它自己的语音是一套的，不会打架。
+ * @param turnDistanceMeters 到**下一个转向口**还有多远（`getCurStepRetainDistance`）。
+ * @param currentRoad 当前路名。
+ * @param nextRoad 下一段路名（"进入 XX 路"里的那个 XX）。
+ * @param remainDistanceMeters 剩余总里程（`getPathRetainDistance`）。
+ * @param remainSeconds 剩余总时间（`getPathRetainTime`）。
+ * @param remainLights 剩余红绿灯数。
+ * @param speedKph 当前车速。
+ */
+data class NaviGuidance(
+    val iconType: Int,
+    val icon: Bitmap?,
+    val turnDistanceMeters: Int,
+    val currentRoad: String,
+    val nextRoad: String,
+    val remainDistanceMeters: Int,
+    val remainSeconds: Int,
+    val remainLights: Int,
+    val speedKph: Int,
+) {
+    /** "300 米" / "1.2 公里" —— 转向距离的通行写法。 */
+    val turnDistanceText: String
+        get() = if (turnDistanceMeters < 1000) {
+            "$turnDistanceMeters 米"
+        } else {
+            "%.1f 公里".format(turnDistanceMeters / 1000.0)
+        }
+
+    val remainDistanceText: String
+        get() = if (remainDistanceMeters < 1000) {
+            "$remainDistanceMeters 米"
+        } else {
+            "%.1f 公里".format(remainDistanceMeters / 1000.0)
+        }
+
+    val remainTimeText: String
+        get() {
+            val minutes = remainSeconds / 60
+            return if (minutes < 60) "$minutes 分钟" else "${minutes / 60} 小时 ${minutes % 60} 分"
+        }
+}
+
+/**
+ * 导航会话管理器 —— **进程级、与界面无关**。
+ *
+ * ## 它要解决的缺陷（2026-10-12 真机复现，日志见 .verify/nav/）
+ *
+ * 老结构里"导航中"这件事同时被三处各记了一份：界面枚举 [DeskScreen.NAVI]、
+ * `NaviEngine._navigating`、SDK 引擎自己的内部状态。切一次屏就能让它们分家：
+ *
+ * ```
+ * 19:58:56.730 I navi: view disposing          ← 切首页，只销毁了 View
+ *                 （没有 stopNavi、没有 onStopNavi —— 引擎仍在导航）
+ * 20:00:06.290 I navi: startNavi ok=false      ← 回来再点开始导航 → SDK 拒绝
+ * 20:00:06.296 I navi: stopped & destroyed     ← 兜底退出，于是播"退出导航，导航结束"
+ * 20:00:06.499 I navi: navi stopped
+ * ```
+ *
+ * 修法只有一条：**把"在不在导航"的唯一权威交给引擎回调**，界面只订阅。
+ * 于是切屏、翻页、息屏、切投屏再回来，都不会改这个状态；只有两条路径会改它 ——
+ * 用户点"退出导航"（[requestExit]），或者到了终点（`onArriveDestination`）。
+ *
+ * ## 三条硬约束（都是 SDK 层面的事实，不是风格选择）
+ *   1. **合规闸门必须在 `getInstance` 之前**：[AMapPrivacy.applyIfAgreed] 会读用户
+ *      真实同意状态并同步给地图与导航两套闸门（缺导航那套时，实例拿得到但回调永远不来）；
+ *   2. **`destroy()` 是静态方法**（`public static synchronized void destroy()`），
+ *      退出导航必须调它，否则下次进来会拿到"半死"的引擎 —— 现象是算路不回调；
+ *   3. **`startNavi` 在已导航时会返回 false**：真机上 4 次 `ok=false` 全部对应
+ *      "上一次导航没停"。所以"导航中再次发起导航"必须先停、等 `onStopNavi` 回来再启，
+ *      不允许新旧并存（[requestStart] / [calculate] 的停-等-启链路就是干这个的）。
+ */
+object NaviSession {
+
+    private const val TAG_LOG = "navi"
+
+    /** 算路兜底超时。真机实测正常情况下 5 秒内出结果，20 秒还没来就是真出问题了。 */
+    private const val CALC_TIMEOUT_MILLIS = 20_000L
+
+    /**
+     * 等 `onStopNavi` 回调的兜底。回调不来也必须把状态推进 ——
+     * 否则界面会永久卡在"停止中"，那比慢一点更糟。
+     */
+    private const val STOP_TIMEOUT_MILLIS = 4_000L
+
+    /**
+     * 界面上可选的策略。**这是给用户的四档偏好，不是 SDK 常量的全集**：
+     * 全量有 30 多个（javap 数过），摆出来没人看得懂。每项都注明对应的常量值，
+     * 真机排查时可以直接跟日志里的 `strategy=数字` 对上。
+     */
+    enum class Strategy(val label: String, val value: Int) {
+        /** 推荐：多路径默认（速度优先，同时给备选）。 */
+        RECOMMENDED("推荐", PathPlanningStrategy.DRIVING_MULTIPLE_ROUTES_DEFAULT),
+
+        /** 高速优先：多路径 + 优先高速。 */
+        HIGHWAY_FIRST("高速优先", PathPlanningStrategy.DRIVING_MULTIPLE_ROUTES_PRIORITY_HIGHSPEED),
+
+        /** 不走高速：多路径 + 避开高速。 */
+        NO_HIGHWAY("不走高速", PathPlanningStrategy.DRIVING_MULTIPLE_ROUTES_AVOID_HIGHSPEED),
+
+        /** 躲避拥堵：多路径 + 避堵。 */
+        AVOID_CONGESTION("躲避拥堵", PathPlanningStrategy.DRIVING_MULTIPLE_ROUTES_AVOID_CONGESTION),
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    private val _phase = MutableStateFlow(NaviPhase.IDLE)
+
+    /** 当前阶段。**界面判断"在不在导航"只准读它**。 */
+    val phase: StateFlow<NaviPhase> = _phase.asStateFlow()
+
+    private val _route = MutableStateFlow<RouteState>(RouteState.Idle)
+    val route: StateFlow<RouteState> = _route.asStateFlow()
+
+    /** 当前策略。换策略会自动重算（见 [switchStrategy]）。 */
+    private val _strategy = MutableStateFlow(Strategy.RECOMMENDED)
+    val strategy: StateFlow<Strategy> = _strategy.asStateFlow()
+
+    /** 实时引导。没在导航时是 null。 */
+    private val _guidance = MutableStateFlow<NaviGuidance?>(null)
+    val guidance: StateFlow<NaviGuidance?> = _guidance.asStateFlow()
+
+    /** 当前目的地（带坐标）。退出导航后清空。 */
+    private val _destination = MutableStateFlow<PlaceSuggestion?>(null)
+    val destination: StateFlow<PlaceSuggestion?> = _destination.asStateFlow()
+
+    private var navi: AMapNavi? = null
+
+    /** 给 `applicationContext`：停/启链路里要用，而那时可能已经没有界面的 Context 了。 */
+    private var appContext: Context? = null
+
+    private var calcJob: Job? = null
+    private var stopJob: Job? = null
+
+    /** 上一次算路的起终点：换策略时要拿它重算，不然就得让界面再传一遍。 */
+    private var lastStart: GeoPoint? = null
+    private var lastEnd: PlaceSuggestion? = null
+
+    /** 等停止回调期间攒下来的活：先算新的（换目的地），或直接重启。 */
+    private var pendingCalc: Pair<GeoPoint, PlaceSuggestion>? = null
+    private var restartAfterStop = false
+
+    /** 算完就自动开始。只有"导航中换目的地"这条链会置它。 */
+    private var autoStartAfterCalc = false
+
+    /** 引导数据的日志节流（真机 1 Hz 左右，不节流会把日志撑爆）。 */
+    private var lastGuidanceLogAt = 0L
+
+    /**
+     * 监听器只注册一次，挂在进程级引擎上。
+     *
+     * 为什么不做 add/remove 配对：引擎的生命周期就是进程的生命周期，
+     * 界面来去不影响它；反过来"每进一次导航屏 add 一次"会积累监听器，
+     * 同一次回调被调用多次（真机上表现为日志重复、首页卡重复刷新）。
+     */
+    private val listener = object : SimpleNaviListener() {
+
+        override fun onInitNaviSuccess() {
+            MapLog.i("$TAG_LOG: engine init ok")
+        }
+
+        override fun onInitNaviFailure() {
+            MapLog.i("$TAG_LOG: engine init FAILED")
+        }
+
+        override fun onCalculateRouteSuccess(result: AMapCalcRouteResult) {
+            calcJob?.cancel()
+            calcJob = null
+            val ids = result.routeid?.toList().orEmpty()
+            MapLog.i("$TAG_LOG: calc ok code=${result.errorCode} routeIds=$ids")
+            val options = collectOptions(ids)
+            if (options.isEmpty()) {
+                MapLog.i("$TAG_LOG: calc ok but no usable path")
+                _route.value = RouteState.Failed("没有可用路线")
+                _phase.value = NaviPhase.IDLE
+                autoStartAfterCalc = false
+                return
+            }
+            // 默认选中第一条，并把"选中"这件事**同步给 SDK**：
+            // 否则 startNavi 走的可能是 SDK 自己的主路线，出现"界面高亮第二条、
+            // 实际按第一条导航"这种最坏情况（界面在撒谎，而且没人能一眼看出来）。
+            selectInternal(options.first().id)
+            _route.value = RouteState.Ready(options, 0)
+
+            if (autoStartAfterCalc) {
+                // "导航中换目的地"：旧导航已经停干净了，直接接上新的一条。
+                autoStartAfterCalc = false
+                MapLog.i("$TAG_LOG: auto start after recalc (destination changed while navigating)")
+                _phase.value = NaviPhase.STARTING
+            } else {
+                _phase.value = NaviPhase.PREVIEW
+            }
+        }
+
+        override fun onCalculateRouteFailure(result: AMapCalcRouteResult) {
+            calcJob?.cancel()
+            calcJob = null
+            autoStartAfterCalc = false
+            // 错误原文照抄进日志：真机排查时它就是去控制台对账的唯一线索。
+            MapLog.i(
+                "$TAG_LOG: calc FAILED code=${result.errorCode} " +
+                    "desc=${result.errorDescription} detail=${result.errorDetail}",
+            )
+            _route.value = RouteState.Failed("算路失败（${result.errorCode}）")
+            _phase.value = NaviPhase.IDLE
+        }
+
+        override fun onStartNavi(type: Int) {
+            MapLog.i("$TAG_LOG: onStartNavi type=$type")
+            _phase.value = NaviPhase.NAVIGATING
+        }
+
+        override fun onArriveDestination() {
+            MapLog.i("$TAG_LOG: arrive destination")
+            // 到终点也要走"停止"这条路，不能直接置 IDLE ——
+            // 那样引擎还在导航态，用户马上再点开始导航就会撞上 `startNavi ok=false`。
+            beginStop()
+        }
+
+        override fun onStopNavi() {
+            MapLog.i("$TAG_LOG: onStopNavi callback")
+            handleStopped()
+        }
+
+        override fun onNaviInfoUpdate(naviInfo: NaviInfo?) {
+            publishGuidance(naviInfo)
+        }
+
+        @Suppress("DEPRECATION")
+        override fun onGetNavigationText(text: String?) {
+            // 内置语音自己会播；这一条只用来在真机上确认"播报确实发生了"。
+            // 设备静止时它不会有输出（GPS 导航没有位移就没有引导事件）——
+            // 要验证语音得用模拟导航（NaviType.EMULATOR）。
+            MapLog.i("$TAG_LOG: speak ${text?.take(30)}")
+        }
+    }
+
+    // ---- 外部 API ----------------------------------------------------------
+
+    /**
+     * 算一条自驾路线。**不抛异常**：所有失败都落到 [RouteState.Failed]，
+     * 界面不需要 try/catch。
+     *
+     * 如果此刻**正在导航**，会先停掉旧的、等 `onStopNavi` 回来再算新的并自动开始 ——
+     * 不允许新旧两条导航并存（见类注释的硬约束 3）。
+     */
+    fun calculate(context: Context, start: GeoPoint, end: PlaceSuggestion) {
+        when (_phase.value) {
+            NaviPhase.NAVIGATING, NaviPhase.STARTING, NaviPhase.STOPPING -> {
+                MapLog.i("$TAG_LOG: calculate while phase=${_phase.value} -> stop old first")
+                pendingCalc = start to end
+                autoStartAfterCalc = true
+                restartAfterStop = false
+                if (_phase.value != NaviPhase.STOPPING) beginStop()
+            }
+
+            else -> doCalculate(context, start, end)
+        }
+    }
+
+    /**
+     * 换策略并**立刻重算**。界面点"高速优先 / 不走高速"走这条。
+     *
+     * 不做"只记住策略、等用户再点一次算路"：那样用户点了按钮却什么都没发生，
+     * 还得再去找一次目的地。
+     */
+    fun switchStrategy(context: Context, strategy: Strategy) {
+        if (_strategy.value == strategy) return
+        _strategy.value = strategy
+        val start = lastStart
+        val end = lastEnd
+        if (start == null || end == null) {
+            MapLog.i("$TAG_LOG: strategy=${strategy.name} but nothing to recalc")
+            return
+        }
+        MapLog.i("$TAG_LOG: strategy -> ${strategy.name}(${strategy.value}), recalculating")
+        // 预览阶段的换策略是"重算候选"，不该触发自动开始；把那个标志压掉。
+        autoStartAfterCalc = false
+        calculate(context, start, end)
+    }
+
+    /** 选中第几条路线。同时把选择同步给 SDK（见 [selectInternal] 的说明）。 */
+    fun select(index: Int) {
+        val current = _route.value as? RouteState.Ready ?: return
+        val option = current.options.getOrNull(index) ?: return
+        if (!selectInternal(option.id)) {
+            MapLog.i("$TAG_LOG: selectRouteId(${option.id}) FAILED")
+            return
+        }
+        MapLog.i("$TAG_LOG: selected route id=${option.id} (index=$index)")
+        _route.value = current.copy(selectedIndex = index)
+    }
+
+    /**
+     * 请求开始导航。**这是唯一会把阶段推往 [NaviPhase.STARTING] 的入口**。
+     *
+     * 导航 View 建好之后由 [onViewReady] 真正下发 `startNavi()`。
+     * 若此刻已经在导航：先停旧的，等 `onStopNavi` 回来再重新走一遍（不允许并存）。
+     *
+     * @param emulator 用 `NaviType.EMULATOR` 而不是 GPS。模拟导航会沿着算好的路线
+     *                 自己"开"，所以在屋里就能把整条导航链路（引导数据、语音、
+     *                 剩余里程/时间）跑完，不必真的把车开出去。只有 debug 验证驱动会传 true。
+     *                 参数用 Boolean 而不是 NaviType 常量：`NaviType` 来自高德 aar，
+     *                 :shell 未必能在编译期看到它（:map 的依赖不一定是 api 传递的）。
+     */
+    fun requestStart(context: Context, emulator: Boolean = false) {
+        appContext = context.applicationContext
+        val naviType = if (emulator) NaviType.EMULATOR else NaviType.GPS
+        when (_phase.value) {
+            NaviPhase.NAVIGATING, NaviPhase.STARTING -> {
+                MapLog.i("$TAG_LOG: start requested while phase=${_phase.value} -> stop old first")
+                restartAfterStop = true
+                pendingCalc = null
+                requestedNaviType = naviType
+                beginStop()
+            }
+
+            NaviPhase.PREVIEW -> {
+                requestedNaviType = naviType
+                _phase.value = NaviPhase.STARTING
+                MapLog.i("$TAG_LOG: request start type=$naviType phase=STARTING")
+            }
+
+            NaviPhase.STOPPING -> {
+                // 已经在停的途中被点了第二次：把"停完就重启"记下来即可。
+                restartAfterStop = true
+                requestedNaviType = naviType
+                MapLog.i("$TAG_LOG: start requested while STOPPING -> queue restart")
+            }
+
+            else -> MapLog.i("$TAG_LOG: start ignored in phase=${_phase.value}")
+        }
+    }
+
+    /**
+     * 导航 View 已经建好，可以下发 `startNavi()` 了。
+     *
+     * @return false = 引擎没能开始（界面应该说一句"启动失败"）。
+     */
+    fun onViewReady(context: Context): Boolean {
+        appContext = context.applicationContext
+        if (_phase.value != NaviPhase.STARTING) {
+            // 常见于"切走又切回"：View 重建但导航早就在跑，这里什么都不该做。
+            MapLog.i("$TAG_LOG: view ready but phase=${_phase.value} -> no start")
+            return true
+        }
+        val engine = obtain(context) ?: run {
+            MapLog.i("$TAG_LOG: start aborted, engine unavailable")
+            _phase.value = NaviPhase.PREVIEW
+            return false
+        }
+
+        // 先 selectRouteId 再 startNavi：`startNavi(int)` 的参数是 NaviType（GPS/EMULATOR），
+        // 不是路线 id（javap 核实过签名），所以"走哪条"只能靠 selectRouteId 事先指定。
+        (_route.value as? RouteState.Ready)?.selected?.let { selectInternal(it.id) }
+
+        val ok = runCatching { engine.startNavi(requestedNaviType) }.getOrDefault(false)
+
+        // 核验"界面高亮的那条 == 引擎真正在走的那条"。
+        //
+        // 这是本功能**唯一会撒谎的地方**，而且撒起谎来没人能一眼看出来：界面把第 3 条描边高亮，
+        // 引擎却按第 1 条算距离/播报/转弯。所以这里**量引擎自己的 `naviPath`**，
+        // 而不是问界面。真机核对方式：选第 3 条（90.5 公里）后 startNavi，
+        // 日志里的 naviPath 必须 ≈ 90500 米。
+        val actual = runCatching { engine.naviPath }.getOrNull()
+        MapLog.i(
+            "$TAG_LOG: startNavi ok=$ok type=$requestedNaviType actualPath=" +
+                "${actual?.allLength}m ${actual?.allTime}s lights=${actual?.trafficLightCount} " +
+                "labels=${actual?.labels}",
+        )
+        if (ok) {
+            _phase.value = NaviPhase.NAVIGATING
+        } else {
+            // SDK 拒绝。已知唯一原因：引擎里还有一条没停干净的导航。
+            // 这里不急着 destroy（那会把 log 里"到底为什么失败"的线索一起抹掉），
+            // 只把阶段退回预览让用户能再点一次。
+            MapLog.i("$TAG_LOG: startNavi refused -> back to PREVIEW")
+            _phase.value = NaviPhase.PREVIEW
+        }
+        return ok
+    }
+
+    /**
+     * 用户明确点"退出导航"（界面需二次确认）。停播报 → 等回调 → 释放引擎。
+     *
+     * **这是唯一允许结束导航的用户动作**。切屏、翻页、息屏、切到投屏再回来都不走这里。
+     */
+    fun requestExit() {
+        if (_phase.value == NaviPhase.IDLE) return
+        MapLog.i("$TAG_LOG: user exit requested in phase=${_phase.value}")
+        pendingCalc = null
+        restartAfterStop = false
+        autoStartAfterCalc = false
+        beginStop()
+    }
+
+    /** 只清算路结果（用户把目的地删了 / 换了），不动引擎，也不影响正在跑的导航。 */
+    fun clearRoute() {
+        if (_phase.value == NaviPhase.NAVIGATING || _phase.value == NaviPhase.STARTING) {
+            // 导航中清预览没有意义，直接拒绝 —— 免得把 destination 清掉之后
+            // 退出确认框连"要去哪儿"都说不出来。
+            MapLog.i("$TAG_LOG: clearRoute ignored while phase=${_phase.value}")
+            return
+        }
+        calcJob?.cancel()
+        calcJob = null
+        _route.value = RouteState.Idle
+        _destination.value = null
+        lastStart = null
+        lastEnd = null
+        if (_phase.value != NaviPhase.STOPPING) _phase.value = NaviPhase.IDLE
+    }
+
+    // ---- 内部：停止链路 ----------------------------------------------------
+
+    /**
+     * 下发 `stopNavi()` 并把阶段推到 [NaviPhase.STOPPING]，等 `onStopNavi` 回来。
+     * 回调不来也有 [STOP_TIMEOUT_MILLIS] 兜底，界面不会卡死。
+     */
+    private fun beginStop() {
+        val engine = navi
+        _phase.value = NaviPhase.STOPPING
+        _guidance.value = null
+        stopJob?.cancel()
+        if (engine == null) {
+            // 引擎都没了（进程刚起、或已经释放过），没有回调可等。
+            handleStopped()
+            return
+        }
+        runCatching { engine.stopNavi() }
+            .onFailure { MapLog.i("$TAG_LOG: stopNavi threw ${it.javaClass.simpleName}") }
+        stopJob = scope.launch {
+            delay(STOP_TIMEOUT_MILLIS)
+            if (_phase.value == NaviPhase.STOPPING) {
+                MapLog.i("$TAG_LOG: stop callback timeout after ${STOP_TIMEOUT_MILLIS}ms -> force finish")
+                handleStopped()
+            }
+        }
+    }
+
+    /**
+     * 停止流程的收口。三条出路：
+     *   · 攒着一次算路（导航中换了目的地）→ 算新的，算完自动开始；
+     *   · 攒着一次重启（导航中又点了开始导航）→ 直接重新走 STARTING；
+     *   · 都没有 → 真退出：释放引擎、回到 [NaviPhase.IDLE]。
+     */
+    private fun handleStopped() {
+        stopJob?.cancel()
+        stopJob = null
+
+        val calc = pendingCalc
+        val restart = restartAfterStop
+        pendingCalc = null
+        restartAfterStop = false
+
+        when {
+            calc != null -> {
+                MapLog.i("$TAG_LOG: stopped -> recalc new destination then auto start")
+                autoStartAfterCalc = true
+                val ctx = appContext
+                if (ctx == null) {
+                    MapLog.i("$TAG_LOG: no context to recalc -> abort")
+                    finishExit()
+                } else {
+                    _phase.value = NaviPhase.PREVIEW
+                    doCalculate(ctx, calc.first, calc.second)
+                }
+            }
+
+            restart -> {
+                MapLog.i("$TAG_LOG: stopped -> restart requested, phase=STARTING")
+                _phase.value = NaviPhase.STARTING
+            }
+
+            else -> finishExit()
+        }
+    }
+
+    /**
+     * 真正的退出。`destroy()` 必须调（静态方法）—— 不调的话下次进来会拿到
+     * "半死"的引擎，现象是算路不回调，很难往"上次没释放"上想。
+     */
+    private fun finishExit() {
+        calcJob?.cancel()
+        calcJob = null
+        stopJob?.cancel()
+        stopJob = null
+        runCatching { AMapNavi.destroy() }
+        navi = null
+        _phase.value = NaviPhase.IDLE
+        _route.value = RouteState.Idle
+        _strategy.value = Strategy.RECOMMENDED
+        _destination.value = null
+        _guidance.value = null
+        lastStart = null
+        lastEnd = null
+        autoStartAfterCalc = false
+        MapLog.i("$TAG_LOG: exit done, engine destroyed, phase=IDLE")
+    }
+
+    // ---- 内部：算路 --------------------------------------------------------
+
+    private fun doCalculate(context: Context, start: GeoPoint, end: PlaceSuggestion) {
+        val destination = end.point
+        if (destination == null) {
+            // 走到这里说明界面漏了一次 resolve。宁可在这里明确拒绝，也不要拿 (0,0) 去算路。
+            _route.value = RouteState.Failed("这个地点没有坐标")
+            _phase.value = NaviPhase.IDLE
+            return
+        }
+
+        val engine = obtain(context)
+        if (engine == null) {
+            _route.value = RouteState.Failed("导航引擎不可用")
+            _phase.value = NaviPhase.IDLE
+            return
+        }
+
+        lastStart = start
+        lastEnd = end
+        _destination.value = end
+
+        _route.value = RouteState.Calculating
+        _phase.value = NaviPhase.CALCULATING
+        calcJob?.cancel()
+        calcJob = scope.launch {
+            delay(CALC_TIMEOUT_MILLIS)
+            if (_route.value is RouteState.Calculating) {
+                MapLog.i("$TAG_LOG: calc timeout after ${CALC_TIMEOUT_MILLIS / 1000}s")
+                _route.value = RouteState.Failed("算路超时")
+                _phase.value = NaviPhase.IDLE
+                autoStartAfterCalc = false
+            }
+        }
+
+        val startPoi = NaviPoi("起点", LatLng(start.latitude, start.longitude), null)
+        val endPoi = NaviPoi(end.name, LatLng(destination.latitude, destination.longitude), end.poiId)
+
+        val accepted = runCatching {
+            engine.calculateDriveRoute(startPoi, endPoi, ArrayList<NaviPoi>(), _strategy.value.value)
+        }.getOrElse { t ->
+            MapLog.i("$TAG_LOG: calc threw ${t.javaClass.simpleName}")
+            false
+        }
+
+        MapLog.i(
+            "$TAG_LOG: calc start=${start.latitude},${start.longitude} " +
+                "end=${destination.latitude},${destination.longitude} " +
+                "strategy=${_strategy.value.value} accepted=$accepted",
+        )
+        if (!accepted) {
+            calcJob?.cancel()
+            calcJob = null
+            autoStartAfterCalc = false
+            _route.value = RouteState.Failed("算路请求被拒绝")
+            _phase.value = NaviPhase.IDLE
+        }
+    }
+
+    // ---- 内部：引擎 --------------------------------------------------------
+
+    /**
+     * 拿引擎（懒创建）。返回 null = 拿不到（合规没过、so 没加载、Key 无效都会走这里）。
+     *
+     * `getInstance` 在 Java 层是 `throws AMapException`，Kotlin 不强制 catch，
+     * 但**必须**接住 —— 探针页当初就是靠它拿到"取不到实例"这个结论的。
+     */
+    private fun obtain(context: Context): AMapNavi? {
+        appContext = context.applicationContext
+        navi?.let { return it }
+
+        // 闸门先过：它读的是用户真实同意状态，不是无条件写 true。
+        AMapPrivacy.applyIfAgreed(context)
+
+        val engine = runCatching { AMapNavi.getInstance(context.applicationContext) }
+            .onFailure { MapLog.i("$TAG_LOG: getInstance threw ${it.javaClass.simpleName}: ${it.message}") }
+            .getOrNull()
+            ?: return null
+
+        // 两处都设：`AMapNavi` 侧管运行期，`VoiceAssistSettings` 侧管 View 初始化时的默认值。
+        // 漏一处就可能整段沉默（哪一处生效在不同版本里不一样）。
+        runCatching { engine.setUseInnerVoice(true) }
+        runCatching { engine.setControlMusicVolumeMode(MUSIC_VOLUME_MODE_DEPRESS) }
+        engine.addAMapNaviListener(listener)
+        navi = engine
+        MapLog.i("$TAG_LOG: engine obtained, innerVoice=true, musicVolume=DEPRESS")
+        return engine
+    }
+
+    private var requestedNaviType: Int = NaviType.GPS
+
+    /**
+     * 把 SDK 的多条路径转成界面用的 [RouteOption]，并把每条的数值打进日志 ——
+     * "到底算出来几条、每条多远多久"是真机上最容易说不清、也最需要证据的一件事。
+     */
+    private fun collectOptions(ids: List<Int>): List<RouteOption> {
+        val engine = navi ?: return emptyList()
+        val paths = runCatching { engine.naviPaths }.getOrNull()
+
+        val fromMap = ids.mapNotNull { id ->
+            val path = paths?.get(id) ?: return@mapNotNull null
+            RouteOption(
+                id = id,
+                summary = RouteSummary(path.allLength, path.allTime, path.trafficLightCount),
+                labels = path.labels.orEmpty(),
+            )
+        }
+        val result = fromMap.ifEmpty {
+            // 某些版本在单路径策略下 routeid 为空，退回"主路径"这一条。
+            runCatching { engine.naviPath }.getOrNull()?.let { path ->
+                listOf(
+                    RouteOption(
+                        id = 0,
+                        summary = RouteSummary(path.allLength, path.allTime, path.trafficLightCount),
+                        labels = path.labels.orEmpty(),
+                    ),
+                )
+            }.orEmpty()
+        }
+        result.forEach {
+            MapLog.i(
+                "$TAG_LOG: option id=${it.id} ${it.summary.distanceText} " +
+                    "${it.summary.durationText} ${it.summary.trafficLightText} labels=${it.labels}",
+            )
+        }
+        return result
+    }
+
+    /** 把"选中的是哪条"告诉 SDK。失败返回 false，由调用方决定要不要说话。 */
+    private fun selectInternal(routeId: Int): Boolean =
+        runCatching { navi?.selectRouteId(routeId) ?: false }.getOrDefault(false)
+
+    /**
+     * 把 `NaviInfo` 翻成界面要的那几个数。
+     *
+     * **必须逐字段拷贝**，不能把 `NaviInfo` 对象本身存下来：
+     * SDK 在每帧回调里复用同一个对象，存引用等于所有历史快照都会跟着变
+     * （现象是"首页卡上的数字自己跳回上一次的值"）。
+     */
+    private fun publishGuidance(info: NaviInfo?) {
+        val src = info ?: return
+        val value = NaviGuidance(
+            iconType = src.iconType,
+            icon = src.iconBitmap,
+            turnDistanceMeters = src.curStepRetainDistance,
+            currentRoad = src.currentRoadName.orEmpty(),
+            nextRoad = src.nextRoadName.orEmpty(),
+            remainDistanceMeters = src.pathRetainDistance,
+            remainSeconds = src.pathRetainTime,
+            remainLights = src.routeRemainLightCount,
+            speedKph = src.currentSpeed,
+        )
+        if (_guidance.value == value) return
+        _guidance.value = value
+
+        // 节流落盘：这条日志是"引导数据真的在流"的唯一现场证据，
+        // 但 1 Hz 全记会把 log 撑爆（导航一小时 3600 行）。
+        val now = System.currentTimeMillis()
+        if (now - lastGuidanceLogAt >= GUIDANCE_LOG_INTERVAL_MILLIS) {
+            lastGuidanceLogAt = now
+            MapLog.i(
+                "$TAG_LOG: guide icon=${value.iconType} turn=${value.turnDistanceText} " +
+                    "road=${value.currentRoad}->${value.nextRoad} " +
+                    "remain=${value.remainDistanceText}/${value.remainTimeText} " +
+                    "lights=${value.remainLights} speed=${value.speedKph}",
+            )
+        }
+    }
+
+    private const val GUIDANCE_LOG_INTERVAL_MILLIS = 3_000L
+
+    /**
+     * `AMapNaviControlMusicVolumeMode.MUSIC_VOLUME_MODE_DEPRESS` 的常量值。
+     *
+     * 保留一层别名只是为了在调用点能一眼看出"这是压低音量那一档"。
+     */
+    private val MUSIC_VOLUME_MODE_DEPRESS: Int =
+        com.amap.api.navi.enums.AMapNaviControlMusicVolumeMode.MUSIC_VOLUME_MODE_DEPRESS
+}

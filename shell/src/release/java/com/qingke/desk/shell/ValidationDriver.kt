@@ -28,6 +28,18 @@ object ValidationDriver {
     /** 永远不发射任何命令。类型与 debug 版一致，所以 [DeskRoot] 的收集代码两边通用。 */
     val commands: SharedFlow<String> = MutableSharedFlow<String>().asSharedFlow()
 
+    /**
+     * 正式构建里**没有**模拟导航这回事：导航永远是 GPS。
+     *
+     * 这里必须留一个同名同签名的成员，[DeskRoot] 才能在两个变体下都编译通过；
+     * 它是 `val` 且恒为 false，所以编译器会把受它控制的分支直接消掉 ——
+     * release 包里不存在"能切到模拟导航"的路径（同 [commands] 的理由）。
+     */
+    val emulatorOverride: Boolean get() = false
+
+    @Suppress("UNUSED_PARAMETER")
+    fun setEmulatorOverride(on: Boolean) = Unit
+
     @Suppress("UNUSED_PARAMETER")
     fun register(context: Context) = Unit
 }

@@ -53,6 +53,8 @@ import kotlinx.coroutines.flow.asSharedFlow
  * adb shell am broadcast -a com.qingke.desk.VALIDATION --es cmd daylight:night
  * adb shell am broadcast -a com.qingke.desk.VALIDATION --es cmd daylight:day
  * adb shell am broadcast -a com.qingke.desk.VALIDATION --es cmd daylight:auto
+ * adb shell am broadcast -a com.qingke.desk.VALIDATION --es cmd navi:emulator
+ * adb shell am broadcast -a com.qingke.desk.VALIDATION --es cmd navi:gps
  * ```
  *
  * `daylight:*` 是**昼夜样式的探针注入**：改的是 `Daylight` 的日出日落，不是系统时间 ——
@@ -75,6 +77,27 @@ object ValidationDriver {
 
     @Volatile
     private var receiver: BroadcastReceiver? = null
+
+    /**
+     * 是否用**模拟导航**（`NaviType.EMULATOR`）启动。
+     *
+     * 为什么要造它：真机是在桌面上固定着的，GPS 导航下设备不动 = 没有引导事件 =
+     * `onNaviInfoUpdate` 一帧都不来、语音一句都不播。于是"首页卡有没有实时引导"
+     * "语音有没有断"这类问题**在屋里根本验不了**，唯一的办法是把车开出去。
+     * 模拟导航让 SDK 沿着算好的路线自己"开"，整条链路（引导数据、语音、
+     * 剩余里程/时间）就能在桌上跑完。
+     *
+     * 开关本体只在 debug 源码集里存在（release 的同名文件里 `emulatorOverride`
+     * 恒为 false），所以正式构建的导航永远是 GPS。
+     */
+    @Volatile
+    var emulatorOverride: Boolean = false
+        private set
+
+    fun setEmulatorOverride(on: Boolean) {
+        emulatorOverride = on
+        Log.i(TAG, "navi emulator override -> $on")
+    }
 
     fun register(context: Context) {
         if (receiver != null) return
