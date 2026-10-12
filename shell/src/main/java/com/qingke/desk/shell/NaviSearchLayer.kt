@@ -44,6 +44,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -53,7 +54,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qingke.desk.core.data.NaviPlace
 import com.qingke.desk.core.data.ShellSettings
+import com.qingke.desk.core.ui.DeskGlass
 import com.qingke.desk.core.ui.deskGlassOverlay
+// 扩展属性要单独 import：`import DeskGlass` 只把那个 object 带进来，
+// 挂在它上面的 `val DeskGlass.xxx` 仍在 core:ui 包里（SideBar.kt 同样是显式导入的）。
+import com.qingke.desk.core.ui.mapScrimAlpha
+import com.qingke.desk.core.ui.overlayCardAlpha
 import com.qingke.desk.map.navi.NaviEngine
 import com.qingke.desk.map.navi.PlaceSearch
 import com.qingke.desk.map.navi.PlaceSuggestion
@@ -165,6 +171,26 @@ fun NaviSearchLayer(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        // ---- 0. 地图压暗遮罩 ----
+        //
+        // 只在"需要读小字号数字"的时刻压暗：展开搜索面板、或者路线卡在屏上。
+        // 两个条件互斥（卡片在展开态下不显示），所以不会叠出双倍遮罩。
+        //
+        // 为什么非要有它：卡片的透出量可以靠提高不透明度压掉（见
+        // [DeskGlass.overlayCardAlpha]），但卡片**周围**那张高对比地图还在抢注意力 ——
+        // 亮底 + 带白描边的 POI 字与卡片里的小字号数字同处一个视野，眼睛会一直往亮处跑，
+        // 数字就"看不进去"。地图产品在选路线时都会压暗底图，是同一个道理。
+        //
+        // **故意不挂 clickable**：遮罩只是视觉层，不能吃掉触摸。否则点着地图想拖开看看
+        // 旁边那条路，会变成点不动 —— 遮罩把地图手势也一起遮掉了。
+        if (state.expanded || (state.destination != null && routeState !is RouteState.Idle)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = DeskGlass.mapScrimAlpha)),
+            )
+        }
+
         // ---- 1. 展开态：贴顶部一整块「输入框 + 结果」面板 ----
         //
         // **输入框必须待在这一块的顶行**，不能留在底部的搜索条里。原因只有一条，
@@ -184,7 +210,9 @@ fun NaviSearchLayer(
                     .widthIn(max = PANEL_MAX_WIDTH)
                     .heightIn(max = LIST_MAX_HEIGHT)
                     .shadow(6.dp, panelShape)
-                    .deskGlassOverlay(panelShape),
+                    // 用**文字面板**那一档不透明度（0.90）而不是搜索条那档（0.72）：
+                    // 这面板里全是地点名与地址，底下地图的 POI 标注穿进来就成了"两张字叠一起"。
+                    .deskGlassOverlay(panelShape, alpha = DeskGlass.overlayCardAlpha),
             ) {
                 Column(modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)) {
                     SearchFieldRow(
@@ -233,6 +261,14 @@ fun NaviSearchLayer(
                                             } else {
                                                 state.expanded = false
                                                 state.highlightIndex = -1
+                                                // 选完就把关键词清掉。
+                                                //
+                                                // 不清的后果是真机拍下来的：上次搜的 "xianyangjichang"
+                                                // 一直留在框里，下次展开再输 "zhonglou"，框里变成
+                                                // **"zhonglouxianyangjichang"** —— 拼在一起当然搜不到任何东西，
+                                                // 而用户以为是自己打错了。地图应用里"选完即清空"也是通行做法：
+                                                // 你再打开搜索框，是要找**下一个**地方。
+                                                state.query = ""
                                                 // 选完即算路。**这一步以前漏了** ——
                                                 // 真机上表现为"点了结果，面板关了、什么也没发生"
                                                 // （destination 存下了，但没人去算路）。
@@ -285,6 +321,9 @@ fun NaviSearchLayer(
                 onStartNavi = onStartNavi,
                 onDismiss = {
                     state.destination = null
+                    // "算了"就是"当我没说"：关键词一起清掉，下次打开是干净的输入框，
+                    // 而不是又看到刚放弃的那次搜索（同 [onPicked] 那条的理由）。
+                    state.query = ""
                     NaviEngine.clearRoute()
                 },
             )
@@ -425,7 +464,7 @@ private fun SuggestionRow(suggestion: PlaceSuggestion, onClick: () -> Unit) {
                 Text(
                     text = suggestion.subtitle,
                     fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
                     maxLines = 1,
                 )
             }
@@ -575,7 +614,10 @@ private fun RoutePreviewCard(
             .widthIn(max = PREVIEW_MAX_WIDTH)
             .heightIn(max = PREVIEW_MAX_HEIGHT)
             .shadow(6.dp, cardShape)
-            .deskGlassOverlay(cardShape),
+            // 文字面板那一档（0.90）。这张卡是全屏地图上**唯一**要求逐位读数的地方：
+            // 3 行 × 3 个数字要横向比较，任何一块透出来的白色 POI 标注都会毁掉其中一行。
+            // 实测证据见 [DeskGlass.overlayCardAlpha] 的注释（0.72 时用户二次反馈看不清）。
+            .deskGlassOverlay(cardShape, alpha = DeskGlass.overlayCardAlpha),
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             Text(
@@ -589,7 +631,7 @@ private fun RoutePreviewCard(
                 Text(
                     text = destination.subtitle,
                     fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                     maxLines = 1,
                 )
             }
@@ -637,7 +679,7 @@ private fun RoutePreviewCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(1.dp)
-                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)),
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f)),
             )
             Spacer(modifier = Modifier.height(4.dp))
             Row(
@@ -719,9 +761,9 @@ private fun StrategyChip(
             .clip(chipShape)
             .background(
                 if (selected) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)
                 } else {
-                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f)
                 },
             )
             .clickable(onClick = onClick),
@@ -791,9 +833,11 @@ private fun RouteOptionRow(
             .clip(rowShape)
             .background(
                 if (selected) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
                 } else {
-                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)
+                    // 0.06 → 0.09：底色变实之后，太淡的行底衬等于没有，
+                    // 三行会糊成一整块，反而不好"一行一行比"。
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.09f)
                 },
             )
             .clickable(onClick = onClick)
@@ -852,7 +896,9 @@ private fun RouteOptionRow(
             Text(
                 text = tail,
                 fontSize = 11.sp,
-                color = onSurface.copy(alpha = 0.6f),
+                // 0.6 → 0.75：这条是"26 个红绿灯 · 推荐"，是选路的主要依据之一，
+                // 不能当附注糊过去。卡片底已经接近实心，提高文字不透明度就是纯收益。
+                color = onSurface.copy(alpha = 0.75f),
                 maxLines = 1,
             )
         }
