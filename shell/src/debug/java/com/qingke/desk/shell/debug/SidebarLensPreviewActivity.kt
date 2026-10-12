@@ -36,13 +36,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.qingke.desk.core.data.SidebarSide
 import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.DeskTheme
 import com.qingke.desk.core.ui.deskGlassSource
 import com.qingke.desk.core.ui.rememberDeskGlassBackdrop
+import com.qingke.desk.shell.LensSideBar
+import com.qingke.desk.shell.LensSpec
 import com.qingke.desk.shell.ShellIds
 import com.qingke.desk.shell.defaultShellItems
+import com.qingke.desk.shell.resolveLensTier
 
 /**
  * 玻璃透镜侧栏的**原型预览页**（仅 debug 变体，正式构建里不存在）。
@@ -130,7 +132,6 @@ private fun LensPreviewScreen() {
                     items = items,
                     selectedId = selectedId,
                     onSelect = { selectedId = it.id },
-                    side = SidebarSide.LEFT,
                     backdrop = backdrop,
                     lensEnabled = lensEnabled,
                 )
@@ -184,7 +185,6 @@ private fun LensPreviewScreen() {
                     items = items,
                     selectedId = selectedId,
                     onSelect = { selectedId = it.id },
-                    side = SidebarSide.RIGHT,
                     backdrop = backdrop,
                     lensEnabled = lensEnabled,
                 )

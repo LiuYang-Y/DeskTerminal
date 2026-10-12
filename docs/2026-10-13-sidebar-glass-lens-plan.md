@@ -206,12 +206,42 @@ fun Modifier.drawBackdrop(
 
 ## 六、降级矩阵
 
+> 2026-10-13 修订：最低档（< 31）**不再给镜片单独开一层 backdrop**，理由见本节末尾
+> 「真机崩了一次」——那层在低版本上本来就没效果，却要多一块 SurfaceControl。
+
 | 运行时能力 | 判定 | 镜片表现 |
 |---|---|---|
 | API 33+（RuntimeShader） | `isRuntimeShaderSupported()` | 真折射 + **彩色边缘（色散）** + 深度效果；镜内放大由真折射给出 |
 | API 31~32（RenderEffect） | `isRenderEffectSupported()` | 无折射；镜内放大用自绘副本 + `blur` 柔化；彩色边缘用**双色渐变描边**近似 |
-| < 31（本机就在这一档） | 都不支持 | 无折射、无模糊；镜内放大用自绘副本；彩色边缘同上（渐变描边，不模糊） |
-| 开关关闭 | `SidebarLens.ENABLED = false` | **完全回到现在的样式**：一块 64dp 的玻璃指示块，无镜片、无放大、无染色 |
+| < 31（本机就在这一档） | 都不支持 | 无折射、无模糊、且**不申请第二块 backdrop**；镜内放大用自绘副本；彩色边缘用渐变描边 |
+| 开关关闭 | `LensSpec.ENABLED = false` | **完全回到现在的样式**：一块 64dp 的玻璃指示块，无镜片、无放大、无染色，连胶囊描边也不加 |
+
+### 真机崩了一次：每帧重组 = hwui SIGSEGV（务必记住）
+
+第一版接入正式侧栏后，手指一拖就闪退。`/data/tombstones` 里连着三份，全部：
+
+```
+signal 11 (SIGSEGV)  tid: hwuiTask1  >>> com.qingke.desk <<<
+libgui.so  SurfaceComposerClient::Transaction::setFlags / ::apply
+framework  android.view.SurfaceControl$Transaction.show / apply
+framework  android.graphics.RenderNode$CompositePositionUpdateListener.positionChanged
+libhwui.so PositionListenerTrampoline::doUpdatePositionAsync
+```
+
+根因：**在组合期读了动画状态**。镜内内容原本按"当前位置 ± 1.2 格"取窗口、列内淡出量也按
+当前位置算 —— 两者都在组合期读 `indicatorState.value`，于是拖动时每帧重组整棵玻璃子树、
+图形层每帧重建，`SurfaceControl` 事务被压爆。
+`SideBar.kt` 的文件头从第一版就写着"位移要走 placement 阶段、别让玻璃每帧重建"，
+加镜片时把这条忘了。
+
+两条修法**一起上**：
+
+1. 随动画变化的量只许在 `offset {}` / `graphicsLayer {}` 这类布局或绘制阶段的 lambda 里读；
+   镜内因此改成"全部项都画、靠 offset 定位"——组合结果与位置无关；
+2. 低版本不给镜片单独开 backdrop 层。
+
+判据（可证伪）：拖 10 个来回 + 切屏 6 轮 + 右栏再拖 8 个来回，
+`/data/tombstones` 数量不涨、`pidof` 全程不变。修后实测：32 → 32，pid 28114/28116 未重启。
 
 总开关与能力探测二选一，**两个都要有**：
 - 能力探测保证低版本不炸、不出现"点了没反应"；

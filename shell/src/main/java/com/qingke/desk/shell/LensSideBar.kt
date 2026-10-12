@@ -1,4 +1,4 @@
-package com.qingke.desk.shell.debug
+package com.qingke.desk.shell
 
 import android.os.Build
 import androidx.compose.animation.core.Animatable
@@ -53,7 +53,6 @@ import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.highlight.Highlight
-import com.qingke.desk.core.data.SidebarSide
 import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.DeskGlass
 import com.qingke.desk.core.ui.deskGlassSurface
@@ -69,7 +68,7 @@ import kotlin.math.roundToInt
 private const val LENS_FADE_SPAN: Float = 0.30f
 
 /**
- * 玻璃透镜侧栏 —— **原型，只在 debug 变体**（正式侧栏 [com.qingke.desk.shell.SideBar] 不动）。
+ * 玻璃透镜侧栏 —— 侧栏 [SideBar] 的实现本体。
  *
  * 需求（用户口径）：镜片比单个图标略大、镜内图标被放大且染成强调色、带折射与彩色边缘、
  * 按下/拖动时镜片再放大一点、拖动连续跟手、抬手回弹吸附最近一项；
@@ -113,6 +112,29 @@ private const val LENS_FADE_SPAN: Float = 0.30f
  *   2. **按下放大 1.12 倍之后也不能探出侧栏**：68 × 1.12 ≈ 76.2dp，取 72 就会在
  *      施工按下的那一瞬多出 8px，压到内容区里去。
  * 想要更大的鼓出，得先解决第 2 条（缩 press 倍率或加宽侧栏），不是改个数就行。
+ *
+ * ---------------------------------------------------------------------------
+ * 每帧重组会崩（2026-10-13，真机 SIGSEGV）
+ *
+ * 现象：手指一拖侧栏就闪退。tombstone 里三次崩溃都在 `hwuiTask` 线程、
+ * 崩在 `SurfaceComposerClient::Transaction`（`setFlags` / `apply`），
+ * 调用链是 `RenderNode$CompositePositionUpdateListener.positionChanged
+ *   -> SurfaceControl$Transaction.show/apply`。
+ *
+ * 根因：**在组合期读了动画状态**。镜内内容原本按"当前位置 ± 1.2 格"取一个窗口，
+ * 列内淡出量也按当前位置算 —— 两个都在组合期读 `indicatorState.value`，
+ * 于是拖动时每一帧整棵玻璃子树重组一次、图形层每帧重建一次。
+ * 旧侧栏的文件头早就写了这条（"位移要在 placement 阶段，别让玻璃每帧重建"），
+ * 我加镜片时把这条忘了。
+ *
+ * 修法（两条都用上，缺一条都不放心）：
+ *   1. 所有随动画变化的量只许在 `offset {}` / `graphicsLayer {}` 这类**布局或绘制
+ *      阶段**的 lambda 里读，组合期一律不读。镜内因此改成"全部项都画"，
+ *      窗口不再由位置决定 —— 组合结果与位置无关。
+ *   2. 低版本（LOWEST）不再给镜片单独开一层 backdrop：那层在上面本来就没效果，
+ *      却要多一块 SurfaceControl。
+ *
+ * 判据：拖 10 个来回 + 反复切屏，`/data/tombstones` 数量不变、进程 pid 不变。
  */
 object LensSpec {
 
@@ -157,9 +179,6 @@ object LensSpec {
     /** 折射的"高度"与强度（HIGHEST 档才真的生效）。 */
     val refractionHeight = 14.dp
     val refractionAmount = 26.dp
-
-    /** 镜内额外渲染的邻近项范围（单位：格）。1.2 足够覆盖镜片视野加一点余量。 */
-    const val NEIGHBOR_SPAN: Float = 1.2f
 }
 
 /**
@@ -183,8 +202,11 @@ fun resolveLensTier(): LensTier = when {
 /**
  * 透镜侧栏原型。
  *
- * @param side 侧栏在屏幕哪一侧。只影响镜片的横向偏移符号（左右镜像的唯一差异）。
- * @param backdrop 内容区那块 LayerBackdrop（与正式侧栏共用同一个源）。
+ * 左右镜像**不经过这里**：整条侧栏由外层 Row 摆到屏幕另一侧，项本来就居中于侧栏
+ * 内容区，所以镜片的横向位置与左右无关（第一版留过一个 `side` 参数，实测没有任何
+ * 一处用到它，删掉 —— 留着只会让人以为这里藏着镜像逻辑）。
+ *
+ * @param backdrop 内容区那块 LayerBackdrop（与侧栏本体共用同一个源）。
  * @param lensEnabled 透镜效果开关。false 时视觉回到改动前。
  */
 @OptIn(ExperimentalFoundationApi::class)
@@ -193,7 +215,6 @@ fun LensSideBar(
     items: List<ShellItem>,
     selectedId: String?,
     onSelect: (ShellItem) -> Unit,
-    side: SidebarSide,
     backdrop: LayerBackdrop?,
     lensEnabled: Boolean,
     modifier: Modifier = Modifier,
@@ -261,9 +282,19 @@ fun LensSideBar(
     val lensSizePx = with(density) { lensSize.toPx() }
     val lensCorner = if (active) LensSpec.lensCorner else DeskDimens.sideBarIndicatorCorner
 
-    val pressScale = 1f + (if (active) LensSpec.PRESS_SCALE_EXTRA * pressState.value else 0f)
-    val glyphBoost = LensSpec.GLYPH_BOOST_IDLE +
-        (LensSpec.GLYPH_BOOST_PRESSED - LensSpec.GLYPH_BOOST_IDLE) * pressState.value
+    // **动画的量一律不许在组合期读**（2026-10-13 崩溃复盘，见文件头"每帧重组会崩"）：
+    // 下面两个只是"取值函数"，必须放进 offset{} / graphicsLayer{} 这类**布局或绘制阶段**
+    // 的 lambda 里调用。写在组合期 = 拖动时每帧重组整棵玻璃子树 = 每帧重建图形层，
+    // 真机上 hwui 的 SurfaceComposerClient 事务会直接 SIGSEGV。
+    val pressAmount: () -> Float = { if (active) pressState.value else 0f }
+    // 被镜片罩住的程度：0 = 完全在镜外（列内原样画），1 = 完全在镜内（列内隐藏）。
+    // 只由 index 与当前位置决定，读状态这件事发生在调用它的 graphicsLayer lambda 里。
+    val halfSpan = (lensSizePx / 2f) / stepPx
+    val covered: (Int) -> Float = { index ->
+        if (!active) 0f
+        else ((halfSpan + 0.05f - abs(indicatorState.value - index)) / LENS_FADE_SPAN)
+            .coerceIn(0f, 1f)
+    }
 
     Box(
         modifier = modifier
@@ -273,7 +304,10 @@ fun LensSideBar(
                 shape = { RoundedCornerShape(DeskDimens.sideBarCorner) },
             )
             .border(
-                width = 1.dp,
+                // 这条描边是"深色半透明胶囊 + 细描边"里的一分子，属于新样式，
+                // 所以跟着 active 一起开关：总开关关掉后要回到**改动前**的侧栏，
+                // 连描边也不该多出来。
+                width = if (active) 1.dp else 0.dp,
                 brush = railStrokeBrush,
                 shape = RoundedCornerShape(DeskDimens.sideBarCorner),
             )
@@ -333,8 +367,9 @@ fun LensSideBar(
                 // requiredSize 而不是 size：这块要**故意比条目大**，不能被父约束夹回去。
                 .requiredSize(lensSize)
                 .graphicsLayer {
-                    scaleX = pressScale
-                    scaleY = pressScale
+                    val s = 1f + LensSpec.PRESS_SCALE_EXTRA * pressAmount()
+                    scaleX = s
+                    scaleY = s
                     transformOrigin = TransformOrigin.Center
                 }
                 .lensGlass(
@@ -380,15 +415,24 @@ fun LensSideBar(
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer {
-                            scaleX = glyphBoost
-                            scaleY = glyphBoost
+                            val b = LensSpec.GLYPH_BOOST_IDLE +
+                                (LensSpec.GLYPH_BOOST_PRESSED - LensSpec.GLYPH_BOOST_IDLE) *
+                                pressAmount()
+                            scaleX = b
+                            scaleY = b
                             transformOrigin = TransformOrigin.Center
                         },
                 ) {
-                    val center = indicatorState.value
-                    val from = ceil(center - LensSpec.NEIGHBOR_SPAN).toInt().coerceAtLeast(0)
-                    val to = floor(center + LensSpec.NEIGHBOR_SPAN).toInt().coerceAtMost(lastIndex)
-                    for (i in from..to) {
+                    // **全部项都画，不按当前位置裁窗口**。
+                    //
+                    // 第一版按 `ceil(pos - 1.2) .. floor(pos + 1.2)` 取一个窗口，看着省事，
+                    // 但那个范围是在**组合期**由 pos 算出来的 —— pos 每帧变，这个循环
+                    // 就每帧重组，正是崩机的根因（见文件头）。现在窗口恒为 0..lastIndex，
+                    // 组合结果与位置无关；某一项画在哪，交给下面 offset 的 lambda 去算。
+                    //
+                    // 远处的项会被镜片的 clip 裁掉，只是白布局一下（5 个小图标，
+                    // 比每帧重建玻璃子树便宜得多）。
+                    for (i in 0..lastIndex) {
                         key(i) {
                             Box(
                                 modifier = Modifier
@@ -398,7 +442,7 @@ fun LensSideBar(
                                             x = 0,
                                             y = (
                                                 lensSizePx / 2f +
-                                                    (i - center) * stepPx -
+                                                    (i - indicatorState.value) * stepPx -
                                                     itemSizePx / 2f
                                                 ).roundToInt(),
                                         )
@@ -429,19 +473,18 @@ fun LensSideBar(
                 // 镜片里已经有它们的放大副本，列内原样画就会叠成"双影"。
                 // 范围取镜片半高折成的格数 + 半个淡出带宽，且是**连续**的 ——
                 // 拖动时是渐变而不是整格突变。
-                val halfSpan = (lensSizePx / 2f) / stepPx
-                val covered = if (active) {
-                    ((halfSpan + 0.05f - abs(indicatorState.value - index)) / LENS_FADE_SPAN)
-                        .coerceIn(0f, 1f)
-                } else {
-                    0f
+                //
+                // 淡出量同样只在 graphicsLayer 的 lambda 里算（[covered] 内部读
+                // indicatorState），否则又变成每帧重组。
+                Box(
+                    modifier = Modifier.graphicsLayer { alpha = 1f - covered(index) },
+                ) {
+                    LensRailItem(
+                        item = item,
+                        tint = tint,
+                        onClick = { onSelect(item) },
+                    )
                 }
-                LensRailItem(
-                    item = item,
-                    tint = tint,
-                    alpha = 1f - covered,
-                    onClick = { onSelect(item) },
-                )
             }
         }
     }
@@ -454,8 +497,11 @@ fun LensSideBar(
  *   两个开关打开 —— `core:ui` 的 [deskGlassSurface] 是统一封装，没开这两个开关，
  *   而"彩色边缘"正是靠色散给的。注意这两个 boolean **只能按位置传**：
  *   jar 里没有形参名（LocalVariableTable 为空），具名参数编译不过。
- * - 其余档位：退回 [deskGlassSurface]，低版本上库内部会静默跳过 blur/lens，
- *   剩下的半透明底 + 高光就是"最低档"的玻璃。
+ * - [LensTier.MEDIUM]：退回 [deskGlassSurface]（真模糊生效、无折射）。
+ * - [LensTier.LOWEST]：**不再多开一层 backdrop**，用普通 Compose 画同款观感
+ *   （半透明底 + 下面那层径向柔光）。低版本上 blur()/lens() 会静默 return，
+ *   这层玻璃画出来**本来就没有折射也没有模糊**，却要多申请一块 SurfaceControl；
+ *   真机实测每帧多这一块就把 hwui 的事务压崩了（见文件头"每帧重组会崩"）。
  *
  * `active=false`（总开关关掉）时只画与改动前一致的指示块玻璃。
  */
@@ -466,12 +512,19 @@ private fun Modifier.lensGlass(
     tier: LensTier,
     active: Boolean,
 ): Modifier {
-    if (backdrop == null) return this
     if (!active) {
         return this.deskGlassSurface(
             backdrop = backdrop,
             shape = { shape },
             alpha = DeskGlass.indicatorAlpha,
+        )
+    }
+    // 低版本：**不申请第二块 backdrop**。理由见本函数文档 —— 这一层在低版本上
+    // 没有任何效果（blur/lens 静默 return），只有成本（多一块 SurfaceControl）。
+    if (backdrop == null || tier == LensTier.LOWEST) {
+        return this.background(
+            color = Color.White.copy(alpha = LensSpec.LENS_SURFACE_ALPHA),
+            shape = shape,
         )
     }
     if (tier != LensTier.HIGHEST) {
@@ -531,18 +584,21 @@ private fun LensGlyph(
     }
 }
 
-/** 列内条目：与正式侧栏的 [com.qingke.desk.shell] 版本同款（无涟漪、单击即切屏）。 */
+/**
+ * 列内条目：无涟漪、单击即切屏。
+ *
+ * 淡出**不在这里做**（曾经是这里接一个 alpha 参数）：那样每帧要把新值传进组合，
+ * 等于每帧重组。改由调用方在 `graphicsLayer { alpha = ... }` 里读位置算。
+ */
 @Composable
 private fun LensRailItem(
     item: ShellItem,
     tint: Color,
-    alpha: Float,
     onClick: () -> Unit,
 ) {
     Box(
         modifier = Modifier
             .size(DeskDimens.sideBarItemSize)
-            .graphicsLayer { this.alpha = alpha }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
