@@ -109,11 +109,13 @@ fun AMapCanvas(
      * 传 null 会**清掉**已有叠加层 —— 这一点很关键，退出导航之后必须有谁调一次
      * 带 null 的渲染，否则那条不作数的路线会一直挂在地图上（见 [NaviMapOverlay]）。
      *
-     * @param naviShape 整条路线的几何。含包围盒，镜头按它框一次。
-     * @param naviCar 车当前的位置，沿路线移动的那颗点。
+     * @param naviShape 整条路线的几何。含包围盒，车点还没到时镜头按它框一次。
+     * @param naviCar 车当前的位置。有它镜头就**跟着车走**。
+     * @param naviCarBearing 车的行进方向。跟车时地图按它转，让前方朝屏幕上方。
      */
     naviShape: NaviShape? = null,
     naviCar: GeoPoint? = null,
+    naviCarBearing: Float? = null,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -336,7 +338,12 @@ fun AMapCanvas(
     // 折线宽度按密度换算：SDK 的 `PolylineOptions.width()` 是**屏幕像素**，
     // 写死像素值换台机器要么细成头发丝、要么粗成色块。
     val overviewLineWidthPx = NAVI_OVERVIEW_LINE_WIDTH_DP * LocalDensity.current.density
-    LaunchedEffect(aMap, naviShape, naviCar, renderEnabled, overviewLineWidthPx, mapViewport) {
+    // 和上面同一个道理，给车点尺寸换算用。必须在 LaunchedEffect 外面取 ——
+    // 那个 lambda 是协程上下文，里面不能出现 @Composable 调用。
+    val densityPxPerDp = LocalDensity.current.density
+    LaunchedEffect(
+        aMap, naviShape, naviCar, naviCarBearing, renderEnabled, overviewLineWidthPx, mapViewport,
+    ) {
         // 停渲染时不铺（翻到第 2 页）：一帧都不画的页面上没必要维护覆盖物。
         if (!renderEnabled) return@LaunchedEffect
         NaviMapOverlay.render(
@@ -346,6 +353,8 @@ fun AMapCanvas(
             lineWidthPx = overviewLineWidthPx,
             viewportWidth = mapViewport.width,
             viewportHeight = mapViewport.height,
+            carBearing = naviCarBearing,
+            densityPxPerDp = densityPxPerDp,
             // 退出导航后视角回到"我"这里。拿不到上次定位就传 null，
             // 那时叠加层会**不动相机** —— 猜个坐标把人扔到别处比停在原地更糟。
             selfPoint = fallbackCenter?.let { GeoPoint(it.latitude, it.longitude) },

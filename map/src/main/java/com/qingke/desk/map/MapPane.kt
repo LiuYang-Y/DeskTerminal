@@ -285,8 +285,9 @@ fun AMapPrivacyCard(
  * @param onOpenFull 无论当前是地图还是占位，点击都走它：进全屏地图页。
  *                   **导航中它指向的就是导航画面**（地图屏在导航中画的是导航），
  *                   所以"点卡片回到全屏导航页"不需要额外的分支。
- * @param naviShape 导航总览的整条路线几何。非 null 时卡片变成"路线总览 + 车点"。
- * @param naviCar 车当前的位置。
+ * @param naviShape 导航中的整条路线几何。非 null 时卡片变成"跟着车走的导航预览"。
+ * @param naviCar 车当前的位置。相机跟着它走。
+ * @param naviCarBearing 车的行进方向，地图按它转。
  */
 @Composable
 fun MapPreviewCard(
@@ -296,6 +297,7 @@ fun MapPreviewCard(
     onOpenFull: () -> Unit = {},
     naviShape: NaviShape? = null,
     naviCar: GeoPoint? = null,
+    naviCarBearing: Float? = null,
 ) {
     val context = LocalContext.current
     val agreed by AMapPrivacy.agreed.collectAsState()
@@ -325,7 +327,14 @@ fun MapPreviewCard(
                 style = style,
                 preview = true,
                 renderEnabled = renderEnabled,
-                renderFps = MAP_PREVIEW_FPS,
+                // 跟车时把帧率提到 30。15 fps 下相机每秒挪一次、中间只有十几帧，
+                // 车是"一跳一跳"地往前蹦，看着比不动还难受。
+                //
+                // 代价写在前面：卡片会持续加载瓦片，比 15 fps 的静态预览费电。
+                // 这笔账该怎么算由"卡片是不是真的在动"决定 —— 不在导航中（naviCar
+                // 为 null）就回到 [MAP_PREVIEW_FPS]；翻页 / 息屏时 [renderEnabled]
+                // 仍会把整块渲染停掉，不是一直烧。
+                renderFps = if (naviCar != null) MAP_FULL_FPS else MAP_PREVIEW_FPS,
                 // 导航中**关掉 SDK 的定位层**（蓝点 + 三角形朝向）。
                 //
                 // 2026-10-12 真机反馈：卡片上同时出现"我的实际位置"和"车的位置"两个点，
@@ -339,6 +348,7 @@ fun MapPreviewCard(
                 showMyLocation = naviShape == null,
                 naviShape = naviShape,
                 naviCar = naviCar,
+                naviCarBearing = naviCarBearing,
             )
         }
     }

@@ -148,6 +148,15 @@ data class NaviGuidance(
      * "剩余 12.3 公里"同帧更新，拆成两条流就会出现"点动了、数字还是上一秒的"。
      */
     val car: GeoPoint? = null,
+
+    /**
+     * 车的行进方向（度，正北为 0，顺时针）。首页卡**跟车**时要靠它把地图转过来，
+     * 让"前方"始终朝着屏幕上方 —— 没有它跟车就只是平移，看不出要往哪拐。
+     *
+     * 取值顺序见 `onLocationChange`：先用 [AMapNaviLocation.getBearing]（实际航向），
+     * 拿不到再用 [AMapNaviLocation.getRoadBearing]（道路方向，静止时也有值）。
+     */
+    val carBearing: Float? = null,
 ) {
     /** "300 米" / "1.2 公里" —— 转向距离的通行写法。 */
     val turnDistanceText: String
@@ -336,6 +345,14 @@ object NaviSession {
      */
     private var carPoint: GeoPoint? = null
 
+    /**
+     * 车的行进方向（度）。跟 [carPoint] 同一条时间线，一起更新、一起清理。
+     *
+     * 为什么单独存而不直接用某一条引导里的值：定位回调比引导回调先到，
+     * 而且方向只有在**连续两个位置**都拿到之后才谈得上"朝哪儿走"。
+     */
+    private var carBearing: Float? = null
+
     /** 车点日志的节流时间戳。定位回调约 1 Hz，不节流会把日志撑爆。 */
     private var lastCarLogAt = 0L
 
@@ -437,17 +454,31 @@ object NaviSession {
         override fun onLocationChange(location: AMapNaviLocation?) {
             val coord = location?.coord ?: return
             val point = GeoPoint(coord.latitude, coord.longitude)
-            if (carPoint == point) return
+
+            // 方向：先用**实际航向**（getBearing），它拿不到（车静止时为 0）再退到
+            // 道路方向（getRoadBearing，静止时也有值）。两个都没有就保留上一次的 ——
+            // 车没动的时候把地图转回正北，看着像"画面自己转了一下"，比不转更怪。
+            val rawBearing = runCatching { location.bearing }.getOrDefault(0f)
+            val bearing = rawBearing.takeIf { it > 0f }
+                ?: runCatching { location.roadBearing }.getOrDefault(0f).takeIf { it > 0f }
+                ?: carBearing
+
+            val moved = carPoint != point
+            val turned = bearing != carBearing
+            if (!moved && !turned) return
             carPoint = point
+            carBearing = bearing
             // 已经有一条引导数据就把车点补进去；还没有就等 publishGuidance 带上它。
-            _guidance.value = _guidance.value?.copy(car = point)
+            _guidance.value = _guidance.value?.copy(car = point, carBearing = bearing)
 
             // 节流落盘：这是"车点数据真的在流"的唯一现场证据（模拟导航下约 1 Hz）。
             // 首页卡上那颗点动不动，全看这条有没有输出。
             val now = System.currentTimeMillis()
             if (now - lastCarLogAt >= CAR_LOG_INTERVAL_MILLIS) {
                 lastCarLogAt = now
-                MapLog.i("$TAG_LOG: car ${point.latitude},${point.longitude}")
+                MapLog.i(
+                    "$TAG_LOG: car ${point.latitude},${point.longitude} bearing=$bearing",
+                )
             }
         }
 
@@ -749,6 +780,7 @@ object NaviSession {
         // 几何也要清：留着的话退出导航后首页卡还会画着那条线，而路线早就不作数了。
         _shape.value = null
         carPoint = null
+        carBearing = null
         lastStart = null
         lastEnd = null
         autoStartAfterCalc = false
@@ -991,6 +1023,7 @@ object NaviSession {
             remainLights = src.routeRemainLightCount,
             speedKph = src.currentSpeed,
             car = carPoint,
+            carBearing = carBearing,
         )
         if (_guidance.value == value) return
         _guidance.value = value

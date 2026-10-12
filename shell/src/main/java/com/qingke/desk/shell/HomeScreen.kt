@@ -240,6 +240,7 @@ private fun MapPage(
                 onOpenFull = onOpenMap,
                 naviShape = naviShape,
                 naviCar = naviGuidance?.car,
+                naviCarBearing = naviGuidance?.carBearing,
             )
 
             // 引导浮层叠在卡片之上。它**不吃触摸**（见 NaviCardOverlay 的说明），
