@@ -33,7 +33,14 @@ import kotlinx.coroutines.flow.asSharedFlow
  * adb shell am broadcast -a com.qingke.desk.VALIDATION --es cmd agree
  * adb shell am broadcast -a com.qingke.desk.VALIDATION --es cmd revoke
  * adb shell am broadcast -a com.qingke.desk.VALIDATION --es cmd side:right
+ * adb shell am broadcast -a com.qingke.desk.VALIDATION --es cmd daylight:night
+ * adb shell am broadcast -a com.qingke.desk.VALIDATION --es cmd daylight:day
+ * adb shell am broadcast -a com.qingke.desk.VALIDATION --es cmd daylight:auto
  * ```
+ *
+ * `daylight:*` 是**昼夜样式的探针注入**：改的是 `Daylight` 的日出日落，不是系统时间 ——
+ * 改系统时间会连带弄坏地图 SDK 的 TLS 校时（证书校验依赖正确时间），
+ * 结果"验夜间样式"变成"验地图白屏"（2026-10-12 踩过）。
  *
  * release 构建里 [register] 直接返回：**接收器根本不注册**，
  * 外部无法从任何渠道驱动 release 包。

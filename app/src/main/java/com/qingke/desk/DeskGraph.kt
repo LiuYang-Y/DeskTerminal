@@ -5,6 +5,7 @@ import com.qingke.desk.connection.ConnectionOrchestrator
 import com.qingke.desk.connection.ProjectionSessionRegistryImpl
 import com.qingke.desk.core.data.HomeRepository
 import com.qingke.desk.core.data.LocalHomeRepository
+import com.qingke.desk.core.data.OpenMeteoWeatherRepository
 import com.qingke.desk.core.model.DisplayInfo
 import com.qingke.desk.projection.api.ProjectionSessionFactory
 import com.qingke.desk.projection.api.ProjectionSessionRegistry
@@ -36,10 +37,12 @@ object DeskGraph {
     }
 
     /**
-     * 首页卡片数据源。时钟读系统时间（东八区）；天气下一步换成 Open-Meteo
-     * （那时这里要改成 `by lazy`，因为请求要用 [appContext]）。
+     * 首页卡片数据源：时钟读系统时间（东八区），天气走 Open-Meteo（西安，非商业用途）。
+     *
+     * 不需要 [appContext] —— 天气只用 `HttpURLConnection` + 平台自带的 JSON 解析，
+     * 没有 SDK 初始化那一套，所以也就不必 lazy。
      */
-    val homeRepository: HomeRepository = LocalHomeRepository()
+    val homeRepository: HomeRepository = LocalHomeRepository(OpenMeteoWeatherRepository())
 
     /**
      * 同一 kind 有多个实现时，**列表顺序就是优先级**：registry.find() 取第一个同 kind 的。

@@ -48,6 +48,7 @@ import com.qingke.desk.core.data.ShellSettings
 import com.qingke.desk.core.data.SidebarSide
 import com.qingke.desk.core.model.DisplayInfo
 import com.qingke.desk.core.platform.BurnInGuard
+import com.qingke.desk.core.platform.Daylight
 import com.qingke.desk.core.platform.RemedyIntents
 import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.DeskTheme
@@ -372,6 +373,29 @@ fun DeskRoot(
                     cmd == "revoke" -> AMapPrivacy.revoke(context)
                     cmd == "settings:open" -> settingsOpen = true
                     cmd == "settings:close" -> settingsOpen = false
+
+                    // 昼夜样式的**探针注入**（2026-10-12 加）。
+                    //
+                    // 为什么要造这个命令：夜间地图样式原来是"等天黑"才能验的，
+                    // 而唯一的办法是把系统时间改到晚上 —— 那会同时把地图 SDK 的
+                    // TLS 校时搞坏（证书校验依赖正确的时间），地图直接连不上瓦片，
+                    // 于是"验证夜间样式"变成了"验证地图白屏"。
+                    //
+                    // 现在改成注入**日出日落这四个数字**，不碰系统时钟：
+                    // [Daylight.publish] 正是天气 API 到货时走的那条路，
+                    // 所以这条探针验的是真实代码路径，不是另一条只在验证时才存在的旁路。
+                    //   daylight:night —— 日出 23:58 / 日落 23:59，当前时刻必然在区间外
+                    //   daylight:day   —— 日出 00:00 / 日落 23:59，当前时刻必然在区间内
+                    //   daylight:auto  —— 清掉注入值，回到本地天文算法（也是天气失败时的状态）
+                    cmd.startsWith("daylight:") -> {
+                        when (cmd.removePrefix("daylight:")) {
+                            "night" -> Daylight.publish(sunriseClock = "23:58", sunsetClock = "23:59")
+                            "day" -> Daylight.publish(sunriseClock = "00:00", sunsetClock = "23:59")
+                            "auto" -> Daylight.clearExternal()
+                            else -> Log.w(SHELL_TAG, "bad daylight cmd=$cmd")
+                        }
+                        Log.i(SHELL_TAG, "daylight probe $cmd -> ${Daylight.isDaylight()}")
+                    }
                     cmd.startsWith("side:") -> {
                         val side = if (cmd.endsWith("right")) {
                             SidebarSide.RIGHT

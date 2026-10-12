@@ -317,7 +317,27 @@ private fun WeatherBody(card: HomeCard) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            card.lines.firstOrNull()?.let { WeatherDetailRow(it) }
+
+            Column {
+                card.lines.firstOrNull()?.let { WeatherDetailRow(it) }
+                // 署名行（现在只有天气卡有：Open-Meteo 的 CC BY 4.0 要求）。
+                // 放在卡片最底部的小字里，跟着数据一起出现 —— 只写在 README 里等于没署。
+                if (card.footnote.isNotBlank()) {
+                    if (card.lines.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                    }
+                    Text(
+                        text = card.footnote,
+                        fontSize = minOf(
+                            DeskDimens.cardFootnote.value,
+                            fitByWidth(card.footnote, available),
+                        ).coerceAtLeast(9f).sp,
+                        color = Color.White.copy(alpha = 0.45f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
         }
     }
 }

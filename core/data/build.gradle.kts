@@ -22,4 +22,8 @@ dependencies {
 
     implementation(project(":core:model"))
     implementation(project(":core:common"))
+
+    // Daylight：天气响应里带回来的日出日落要喂给它（决定地图白天/夜间底色）。
+    // 依赖方向是 data → platform，单向 —— :core:platform 不认识 :core:data。
+    implementation(project(":core:platform"))
 }

@@ -131,8 +131,13 @@ private fun rememberAutoMapStyle(): AMapStyle {
     LaunchedEffect(external) {
         // 每次进来先报一句当前判定（含日出日落与下一次翻转还要多久），
         // 这样在真机上不用猜"为什么是这个底色"。
+        //
+        // `source=` 是 2026-10-12 加的：本地算法与天气 API 给的日出日落只差一两分钟，
+        // 光看分钟数分不清那一份到底是谁算的（真机排查时确实卡在这儿），
+        // 于是把来源直接写进日志。探针注入（daylight:night/day/auto）也走同一条路。
         MapLog.i(
             "daylight now: ${style.name} ${Daylight.sunTimes()}, " +
+                "source=${if (external == null) "local" else "api"}, " +
                 "next switch in ${Daylight.millisUntilNextSwitch() / 60_000} min",
         )
         while (true) {

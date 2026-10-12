@@ -245,6 +245,15 @@ object DeskDimens {
     val cardCaption: TextUnit = 13.sp
 
     /**
+     * 卡面最底部那行小字（署名）的字号上限。
+     *
+     * 10 sp 是"看得见但不会插话"的档位：它是**法规性文字**（Open-Meteo 的 CC BY 4.0
+     * 要求署名），必须真的能读，不能小到糊成一团；但也绝不能和卡片内容抢视线。
+     * 与其他字号一样，这里只是上限 —— 实际值仍按可用宽度反推（见 WeatherBody）。
+     */
+    val cardFootnote: TextUnit = 10.sp
+
+    /**
      * 卡片内大时钟的**字号上限**。
      *
      * 实测：本机单卡内容区只有约 88.5 dp 高（卡 120.5 - cardPadding 32），
