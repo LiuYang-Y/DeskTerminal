@@ -18,9 +18,9 @@ android {
 
     buildFeatures {
         compose = true
-        // 只为一件事：ValidationDriver 要靠 BuildConfig.DEBUG 门控
-        // （release 包里那个广播接收器根本不注册）。
-        buildConfig = true
+        // 不开 buildConfig：验证驱动不再靠 BuildConfig.DEBUG 门控，而是整份拆到
+        // src/debug（真实实现）与 src/release（空实现）两个源码集 ——
+        // 前者能编译进 release 包的东西，后者里一行都没有（见两个文件头的说明）。
     }
 }
 
