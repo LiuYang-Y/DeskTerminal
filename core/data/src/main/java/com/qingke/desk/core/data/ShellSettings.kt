@@ -24,7 +24,22 @@ enum class SidebarSide {
 data class GeoPoint(val latitude: Double, val longitude: Double)
 
 /**
- * 壳层的持久设置。三项：侧栏在哪一侧、屏幕是否强制常亮、上次定位到的位置。
+ * 一个"常用地点"（家 / 公司）。
+ *
+ * 存**标题 + 坐标 + 地址**三项，**不存高德的 POI ID**：
+ * ID 是服务端给的，Key 换一把或 SDK 升一版就可能查不回来，而坐标是过了今天还能用的东西。
+ * 这条口径与上面的 [lastLocation] 一致 —— 宁可少一个字段，也不要一个会失效的字段。
+ *
+ * 放在 :core:data 而不是用高德的类型（同 [GeoPoint] 的理由）：存位置的模块不该知道地图 SDK 的存在。
+ */
+data class NaviPlace(
+    val title: String,
+    val point: GeoPoint,
+    val address: String = "",
+)
+
+/**
+ * 壳层的持久设置：**侧栏在哪一侧、屏幕是否强制常亮、上次定位到的位置、家与公司的地址**。
  *
  * 用 SharedPreferences 而不是 DataStore：全工程只有这几个开关要存，
  * 为它引入一条协程 + Proto 的链路不划算（:hosting 的 ShizukuBootPrompt、
@@ -40,6 +55,18 @@ object ShellSettings {
     private const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
     private const val KEY_LAST_LAT = "last_lat"
     private const val KEY_LAST_LON = "last_lon"
+
+    // 家 / 公司。各 4 个 key：标题、纬度、经度、地址。
+    // 坐标照旧用 Float（约 1 m 精度）—— 目的地只要落在"几十米内是它"就够了，
+    // 没必要为它引入 Double 到 String 的往返。
+    private const val KEY_HOME_TITLE = "home_title"
+    private const val KEY_HOME_LAT = "home_lat"
+    private const val KEY_HOME_LON = "home_lon"
+    private const val KEY_HOME_ADDR = "home_addr"
+    private const val KEY_WORK_TITLE = "work_title"
+    private const val KEY_WORK_LAT = "work_lat"
+    private const val KEY_WORK_LON = "work_lon"
+    private const val KEY_WORK_ADDR = "work_addr"
 
     /** 默认在左：基准机横屏时挖孔在左侧，侧栏贴左能把挖孔条一起吃掉。 */
     private val DEFAULT_SIDE = SidebarSide.LEFT
@@ -115,6 +142,69 @@ object ShellSettings {
             .putFloat(KEY_LAST_LAT, point.latitude.toFloat())
             .putFloat(KEY_LAST_LON, point.longitude.toFloat())
             .apply()
+    }
+
+    /**
+     * 读"家"。没设过返回 null（三个字段缺任何一个也当没设过 ——
+     * 半个地点比没有地点更危险：界面会显示一个点不开、也导不了航的按钮）。
+     */
+    fun naviHome(context: Context): NaviPlace? = readPlace(context, KEY_HOME_TITLE, KEY_HOME_LAT, KEY_HOME_LON, KEY_HOME_ADDR)
+
+    /** 读"公司"。没设过返回 null。 */
+    fun naviWork(context: Context): NaviPlace? = readPlace(context, KEY_WORK_TITLE, KEY_WORK_LAT, KEY_WORK_LON, KEY_WORK_ADDR)
+
+    /**
+     * 写"家"。传 null = **删除**（用户搬了家、或不想留这个地址）。
+     *
+     * 用 `commit()` 而不是 `apply()`：这是用户显式点出来的动作，紧接着就会被
+     * 首页/搜索页读一次去刷新按钮，异步落盘会出现"存了但界面还是旧的"。
+     */
+    fun setNaviHome(context: Context, place: NaviPlace?) {
+        writePlace(context, place, KEY_HOME_TITLE, KEY_HOME_LAT, KEY_HOME_LON, KEY_HOME_ADDR)
+    }
+
+    /** 写"公司"。传 null = 删除。 */
+    fun setNaviWork(context: Context, place: NaviPlace?) {
+        writePlace(context, place, KEY_WORK_TITLE, KEY_WORK_LAT, KEY_WORK_LON, KEY_WORK_ADDR)
+    }
+
+    private fun readPlace(
+        context: Context,
+        keyTitle: String,
+        keyLat: String,
+        keyLon: String,
+        keyAddr: String,
+    ): NaviPlace? {
+        val p = prefs(context)
+        val title = p.getString(keyTitle, null) ?: return null
+        val lat = p.getFloat(keyLat, Float.NaN)
+        val lon = p.getFloat(keyLon, Float.NaN)
+        if (lat.isNaN() || lon.isNaN()) return null
+        return NaviPlace(
+            title = title,
+            point = GeoPoint(lat.toDouble(), lon.toDouble()),
+            address = p.getString(keyAddr, "").orEmpty(),
+        )
+    }
+
+    private fun writePlace(
+        context: Context,
+        place: NaviPlace?,
+        keyTitle: String,
+        keyLat: String,
+        keyLon: String,
+        keyAddr: String,
+    ) {
+        val editor = prefs(context).edit()
+        if (place == null) {
+            editor.remove(keyTitle).remove(keyLat).remove(keyLon).remove(keyAddr)
+        } else {
+            editor.putString(keyTitle, place.title)
+                .putFloat(keyLat, place.point.latitude.toFloat())
+                .putFloat(keyLon, place.point.longitude.toFloat())
+                .putString(keyAddr, place.address)
+        }
+        editor.commit()
     }
 
     private fun prefs(context: Context) =

@@ -2,6 +2,7 @@ package com.qingke.desk.map
 
 import android.content.Context
 import com.amap.api.maps.MapsInitializer
+import com.amap.api.navi.NaviSetting
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -76,8 +77,13 @@ object AMapPrivacy {
      */
     fun revoke(context: Context) {
         prefs(context).edit().putBoolean(KEY_AGREED, false).apply()
-        runCatching { MapsInitializer.updatePrivacyAgree(context.applicationContext, false) }
+        runCatching {
+            MapsInitializer.updatePrivacyAgree(context.applicationContext, false)
+            // 撤回对导航 SDK 同样生效，否则"撤回同意"在这里的含义就成了半成品。
+            NaviSetting.updatePrivacyAgree(context.applicationContext, false)
+        }
         _agreed.value = false
+        MapLog.i("privacy revoked (map + navi)")
     }
 
     /**
@@ -96,13 +102,22 @@ object AMapPrivacy {
      * isContains = true：我们的隐私政策里确实写明了会包含高德的隐私权政策；
      * isShow = true：确实弹窗告知过用户。
      * 两个 true 都必须是事实 —— 它们是给 SDK 的声明，不是给 SDK 的开关。
+     *
+     * **两套闸门都要过**（2026-10-12 补）：
+     * 除地图的 [MapsInitializer] 外，导航 SDK 有一套自己的 [NaviSetting]，
+     * 两者状态并不互通 —— 只过地图那一套时，`AMapNavi.getInstance()` 照样返回实例，
+     * 但算路回调永远不来（`NaviProbeActivity` 里的注释早就写了"合规必须在 getInstance 之前"）。
+     * 所以在同一个写入点里一起声明，不可能出现"一边同意、一边没同意"。
      */
     private fun push(context: Context) {
         val app = context.applicationContext
         runCatching {
             MapsInitializer.updatePrivacyShow(app, true, true)
             MapsInitializer.updatePrivacyAgree(app, true)
+            NaviSetting.updatePrivacyShow(app, true, true)
+            NaviSetting.updatePrivacyAgree(app, true)
         }
+        MapLog.i("privacy pushed (map + navi)")
     }
 
     private fun prefs(context: Context) =
