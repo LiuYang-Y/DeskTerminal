@@ -30,10 +30,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qingke.desk.core.data.SidebarSide
 import com.qingke.desk.core.ui.DeskDimens
+import com.qingke.desk.hosting.ShizukuStatus
+import com.qingke.desk.hosting.ui.statusLabel
 
 /**
  * 设置浮层：齿轮入口 + 展开后的面板。
@@ -52,38 +55,52 @@ import com.qingke.desk.core.ui.DeskDimens
  * 齿轮放右上角而不是塞进侧栏，有两个理由：
  *  1. 侧栏竖排 5 项 × 64dp 已经把 361dp 的屏高占满（6 项需要 384dp，放不下，
  *     见 [SideBar] 顶部的算术），没有第六项的位置；
- *  2. 这里是 Shizuku 角标已经在用的悬浮区，两者上下相邻、各占各的一行 ——
- *     角标只在状态异常时出现，齿轮常驻，不会互相遮挡。
+ *  2. 它是**全局**东西，不该跟着"当前在哪一屏"换来换去。
  *
  * ---------------------------------------------------------------------------
- * 面板里现在只有两项，都是"显示/硬件"层面的开关
+ * 悬浮区只有齿轮这一个元素（2026-10-12 定的）
  *
- * 刻意不把业务开关（通知使用权、定位、Shizuku 授权）搬进来：那些开关的**生效位置在
- * 系统设置里**，我们能做的只是把系统界面推到前台（见 [com.qingke.desk.feature.media.MediaPermission]），
- * 在浮层里放一个点了会跳转到别处的假开关只会误导人。
+ * 原来齿轮下面还挂着一颗 Shizuku 状态角标。它压在卡片角上会跟天气卡、全屏隐私卡、
+ * 「回家/去公司」快捷卡叠字（真机截图 .verify/pager/v11-revoke-fullscreen.png），
+ * 而它传递的信息（Shizuku 能不能用）属于"用到托管/投屏时才关心"，不是常驻信息。
+ * 现在状态收进本面板的「Shizuku」一行，悬浮区只剩齿轮 ——
+ * 那三处叠字是同一个原因，一起解决。
+ *
+ * ---------------------------------------------------------------------------
+ * 面板里的每一项都是"用户在这儿就能按到的开关"
+ *
+ * 刻意不放**假开关**：通知使用权、定位、Shizuku 授权这些的生效位置在系统设置里，
+ * 我们能做的只是把系统界面推到前台（见 [com.qingke.desk.feature.media.MediaPermission]），
+ * 在浮层里放一个点了会跳到别处的开关只会误导人。所以：
+ *  · 侧栏位置、屏幕常亮 —— 真开关，就地生效；
+ *  · 地图隐私 —— 撤回是真动作（同意在隐私卡里），"已停用"只是文字，不是能按的按钮；
+ *  · Shizuku —— 状态是**只读**的，右侧按钮去的是引导页（那里才有一步步的动作）。
  */
 @Composable
 fun SettingsPane(
     sidebarSide: SidebarSide,
     keepScreenOn: Boolean,
     amapAgreed: Boolean,
+    shizukuStatus: ShizukuStatus,
     onSidebarSideChange: (SidebarSide) -> Unit,
     onKeepScreenOnChange: (Boolean) -> Unit,
     onRevokeAmapConsent: () -> Unit,
+    onOpenShizukuGuide: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // 高度上限 = 屏幕高 - 顶部留白 - 齿轮 - 间距 - 底部留白。
+    // 高度上限 = 屏幕高 - 上下两条留白。
     //
-    // 这个上限不是"设计成这么高"，而是**兜底**：横屏只有 361 dp，三项设置刚好塞满，
-    // 一旦系统字号被调大、或者以后加第四项，没有上限就会直接从屏幕下沿漏出去
-    // （实测过，见 .verify/settings/15-pane-3items.png）。有了它，内容再高也只是
-    // 面板内部滚动，不会顶穿屏幕。高度用屏幕高反推而不是写死，换机器不用改。
+    // 面板现在与齿轮**并列**（见 DeskRoot 里的定位），所以不再减齿轮那一行 ——
+    // 这也是四项设置能一屏放下的原因（之前减掉 60 dp，最后一项被挤出屏幕）。
+    //
+    // 这个上限不是"设计成这么高"，而是**兜底**：横屏只有 411 dp，一旦系统字号被调大、
+    // 或者以后加第五项，没有上限就会从屏幕下沿漏出去（实测过，见
+    // .verify/settings/15-pane-3items.png）。有了它，内容再高也只是面板内部滚动，
+    // 不会顶穿屏幕。高度用屏幕高反推而不是写死，换机器不用改。
     val screenHeightDp = LocalConfiguration.current.screenHeightDp.dp
     val maxPaneHeight = screenHeightDp -
         DeskDimens.statusChipTopPadding -
-        DeskDimens.settingsChipSize -
-        DeskDimens.statusChipGap -
         DeskDimens.statusChipSidePadding
 
     Card(
@@ -123,7 +140,7 @@ fun SettingsPane(
 
             SettingsItem(
                 title = "侧栏位置",
-                help = "卡片浮层与状态角标会跟着移到另一侧。",
+                help = "卡片与状态角标跟着镜像。",
             ) {
                 SidePicker(
                     current = sidebarSide,
@@ -135,7 +152,7 @@ fun SettingsPane(
 
             SettingsItem(
                 title = "屏幕常亮",
-                help = "关闭后跟随系统熄灭：省电、几乎不烧屏，但看时间要先点亮。",
+                help = "关闭后跟随系统熄灭，更省电。",
             ) {
                 Switch(
                     checked = keepScreenOn,
@@ -150,7 +167,7 @@ fun SettingsPane(
             SettingsItem(
                 title = "地图隐私",
                 help = if (amapAgreed) {
-                    "已同意高德隐私政策，地图可显示。"
+                    "已同意高德隐私政策。"
                 } else {
                     "尚未同意，地图未启用。"
                 },
@@ -167,8 +184,38 @@ fun SettingsPane(
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(DeskDimens.settingsItemGap))
+
+            // Shizuku 状态。2026-10-12 从右上角悬浮角标搬到这里（理由见类注释）。
+            //
+            // 右侧的按钮**显示状态本身**（"未运行" / "运行中"），而不是写"查看"：
+            // 用户点开面板是为了看它现在行不行，状态放在按钮上等于一眼看到答案，
+            // 想处理再点进去。引导页里才是那一步步的动作。
+            SettingsItem(
+                title = "Shizuku",
+                help = shizukuHelp(shizukuStatus),
+            ) {
+                TextButton(onClick = onOpenShizukuGuide) {
+                    Text(text = statusLabel(shizukuStatus), fontSize = 13.sp)
+                }
+            }
         }
     }
+}
+
+/**
+ * Shizuku 那一项的说明：只写"这个状态意味着什么"，不重复状态本身
+ * （状态已经在右侧按钮上）。
+ *
+ * 一律把"不装/不跑也能正常用"说清楚 —— 它是投屏与托管的**前置条件**，
+ * 不是本应用的主功能，读起来不该像"应用坏了"。
+ */
+private fun shizukuHelp(status: ShizukuStatus): String = when (status) {
+    ShizukuStatus.READY -> "投屏与托管可用。"
+    ShizukuStatus.NOT_INSTALLED -> "只有投屏与托管需要它。"
+    ShizukuStatus.NOT_RUNNING -> "重启手机后需重新启动一次。"
+    ShizukuStatus.NOT_AUTHORIZED -> "点右侧按钮完成授权。"
 }
 
 /**
@@ -238,8 +285,13 @@ private fun SettingsItem(
             Text(
                 text = help,
                 fontSize = 12.sp,
-                // 说明最多两行：横屏纵向预算是硬约束，长文案会把整块面板顶出屏幕。
-                maxLines = 2,
+                // **只允许一行**：横屏纵向预算是硬约束 —— 面板从齿轮下面开始，
+                // 到屏幕下沿只剩不到 300 dp，而这里已经排了四项。
+                // 允许换行时，只要有一条说明折成两行，最后一项（Shizuku）就会被顶出屏幕
+                // （真机截图 .verify/pager/w1-settings.png 就是这么被截掉的）。
+                // 约束反过来定：文案必须写得进一行，写不进就改文案，不是给面板加高。
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
             )
         }

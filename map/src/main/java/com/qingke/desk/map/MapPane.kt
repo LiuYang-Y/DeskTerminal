@@ -33,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qingke.desk.core.platform.Daylight
@@ -52,6 +53,7 @@ import kotlinx.coroutines.delay
  * @param style 地图样式。**null（默认）= 日出日落自动切换**：白天 NORMAL、夜里 NIGHT。
  *              传具体样式则不自动切换（给调试预览页用）。
  * @param renderEnabled false = 停渲染（翻到别的页 / 别的屏时用）。
+ * @param topInset 未同意隐私时，隐私卡顶部额外让出的高度（给悬浮齿轮让位）。
  * @param onConsentChanged 可选回调，让外层知道当前能不能显示地图（用于排布局）。
  */
 @Composable
@@ -62,6 +64,7 @@ fun MapPane(
     showMyLocation: Boolean = true,
     renderEnabled: Boolean = true,
     renderFps: Int = MAP_FULL_FPS,
+    topInset: Dp = 0.dp,
     onConsentChanged: ((Boolean) -> Unit)? = null,
 ) {
     val context = LocalContext.current
@@ -97,6 +100,7 @@ fun MapPane(
 
     AMapPrivacyCard(
         modifier = modifier,
+        topInset = topInset,
         onAgree = {
             AMapPrivacy.agree(context)
             MapLog.i("privacy agreed at ${AMapPrivacy.agreedAt(context)}")
@@ -158,10 +162,17 @@ private fun mapStyleForDaylight(): AMapStyle =
  * 文字按高德官方《SDK 合规使用方案》里要求开发者向用户说明的口径写：
  * SDK 名称、第三方主体、使用目的、收集的信息类型、隐私政策链接。
  * 少写哪一项都属于披露不完整。
+ *
+ * @param topInset 顶部**额外**让出的高度。全屏页传"设置齿轮占掉的那条带"
+ *                 （[com.qingke.desk.core.ui.DeskDimens.overlayChipBandHeight]）：
+ *                 齿轮是常驻悬浮元素，压在标题上两边都读不清。
+ *                 它与卡片自己的内边距取**大者**而不是叠加 —— 内边距 20 dp、
+ *                 齿轮带 60 dp 的情况下叠加成 80 dp，只是白扔掉一截版面。
  */
 @Composable
 fun AMapPrivacyCard(
     modifier: Modifier = Modifier,
+    topInset: Dp = 0.dp,
     onAgree: () -> Unit,
     onDecline: () -> Unit,
 ) {
@@ -176,11 +187,13 @@ fun AMapPrivacyCard(
             // 面板可能很窄（原来 3:4 那块只有 230 dp 宽），横向预算得先看一眼。
             val narrow = maxWidth < 300.dp
             val body = if (narrow) 12.sp else 14.sp
+            val edge = if (narrow) 14.dp else 20.dp
+            val topPadding = if (topInset > edge) topInset else edge
 
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(if (narrow) 14.dp else 20.dp),
+                    .padding(start = edge, end = edge, bottom = edge, top = topPadding),
             ) {
                 Text(
                     text = "使用地图前请先同意隐私政策",

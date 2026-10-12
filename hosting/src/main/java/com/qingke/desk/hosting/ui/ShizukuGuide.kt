@@ -36,14 +36,20 @@ import com.qingke.desk.hosting.ShizukuStatus
 
 /** 状态点颜色。绿色只在"能用"时出现，其余一律警示色 —— 这是唯一需要用户看的信号。 */
 @Composable
-private fun statusColor(status: ShizukuStatus): Color = when (status) {
+fun statusColor(status: ShizukuStatus): Color = when (status) {
     ShizukuStatus.READY -> Color(0xFF3DDC84)
     ShizukuStatus.NOT_INSTALLED -> MaterialTheme.colorScheme.outline
     ShizukuStatus.NOT_RUNNING, ShizukuStatus.NOT_AUTHORIZED -> MaterialTheme.colorScheme.error
 }
 
+/**
+ * 状态的一句话说明。
+ *
+ * 公开给 :shell 用：设置面板里的「Shizuku」一行要显示同一句话，
+ * 同一个状态在两处给出两种说法，用户会以为是两个不同的问题。
+ */
 @Composable
-private fun statusLabel(status: ShizukuStatus): String = when (status) {
+fun statusLabel(status: ShizukuStatus): String = when (status) {
     ShizukuStatus.READY -> "Shizuku 运行中"
     ShizukuStatus.NOT_RUNNING -> "Shizuku 未运行"
     ShizukuStatus.NOT_AUTHORIZED -> "Shizuku 未授权"
@@ -51,10 +57,13 @@ private fun statusLabel(status: ShizukuStatus): String = when (status) {
 }
 
 /**
- * 首页状态栏上的常驻指示。
+ * 小圆点 + 一句话的紧凑状态指示。
  *
- * 刻意做成**小圆点 + 一句话**：占的地方越小越好，但它必须一直在 ——
- * Shizuku 停了这件事，如果只在"点开地图失败"时才说，用户会以为是我们的应用坏了。
+ * 2026-10-12：**不再挂在壳层的右上角悬浮区** —— 那个位置现在只留设置齿轮。
+ * 角标压在卡片角上会跟天气卡、隐私卡、快捷卡叠字（真机截图
+ * .verify/pager/v11-revoke-fullscreen.png），而它传递的信息（Shizuku 能不能用）
+ * 不属于"每时每刻都要看见"的那一类：用到托管/投屏时才有意义。
+ * 现在它只在设置面板里（见 [SettingsPane] 的 Shizuku 一行）与下面这个 debug 预览页出现。
  */
 @Composable
 fun ShizukuStatusChip(

@@ -60,7 +60,6 @@ import com.qingke.desk.hosting.ShizukuStatus
 import com.qingke.desk.hosting.ShizukuStatusMonitor
 import com.qingke.desk.hosting.ui.ShizukuBootPromptCard
 import com.qingke.desk.hosting.ui.ShizukuGuideScreen
-import com.qingke.desk.hosting.ui.ShizukuStatusChip
 import com.qingke.desk.map.AMapPrivacy
 import com.qingke.desk.map.AMapPrivacyCard
 import com.qingke.desk.map.MapPane
@@ -518,15 +517,21 @@ fun DeskRoot(
                                     .fillMaxSize()
                                     .testTag(FULLSCREEN_MAP_TAG),
                             ) {
+                                // 顶部一律给悬浮齿轮让出一条带：齿轮常驻在左上或右上
+                                // （跟着侧栏镜像），隐私卡的标题是横向铺满的，
+                                // 不让位就会被压住（真机截图 v11-revoke-fullscreen.png）。
+                                val overlayInset = DeskDimens.overlayChipBandHeight
                                 if (amapAgreed) {
                                     MapPane(
                                         modifier = Modifier.fillMaxSize(),
                                         host = mapViewHost,
                                         renderEnabled = true,
+                                        topInset = overlayInset,
                                     )
                                 } else {
                                     AMapPrivacyCard(
                                         modifier = Modifier.fillMaxSize(),
+                                        topInset = overlayInset,
                                         onAgree = {
                                             AMapPrivacy.agree(context)
                                             onMessage?.invoke("已同意，地图将开始显示")
@@ -599,7 +604,7 @@ fun DeskRoot(
                 //
                 // 两个元素，声明顺序就是 z 序，不能颠倒：
                 //   1. 遮罩层：只在浮层展开时存在，点它 → 关闭浮层；
-                //   2. 右上角悬浮区（齿轮 + Shizuku 角标 + 浮层本体）：在遮罩**之后**声明，
+                //   2. 右上角悬浮区（齿轮 + 浮层本体）：在遮罩**之后**声明，
                 //      所以浮层展开时齿轮依然浮在遮罩之上、还能再点一次收起。
                 // 反过来写的话，遮罩会把齿轮盖住，用户只能靠"完成"按钮退出。
                 if (chromeScreen && settingsOpen) {
@@ -615,58 +620,72 @@ fun DeskRoot(
 
                 if (chromeScreen) {
                     // 悬浮区跟着侧栏镜像：侧栏在左则贴右上，侧栏在右则贴左上
-                    // （右上角那时被侧栏占着）。子项的对齐方向也要跟着翻，
-                    // 否则齿轮会跑到这一列的内侧去。
+                    // （右上角那时被侧栏占着）。
                     val overlayCorner = sidebarSide == SidebarSide.LEFT
-                    Column(
+                    val alignTo = if (overlayCorner) Alignment.TopEnd else Alignment.TopStart
+
+                    // **齿轮与浮层是并列的两块，不是上下叠的一列**（2026-10-12 改）。
+                    //
+                    // 之前浮层排在齿轮下面（同一个 Column），白白扔掉"顶部留白 +
+                    // 齿轮 40 + 间距 8"共 60 dp —— 横屏只有 411 dp 高，60 dp 换来的
+                    // 后果是四项设置排不下，最后一项（Shizuku）被挤出屏幕
+                    // （真机截图 .verify/pager/w3-settings.png）。改成并列之后，
+                    // 浮层的可用高度从约 312 dp 变成约 387 dp，四项一次全见。
+                    //
+                    // 并列的代价是浮层要**让开齿轮那一列**：齿轮占顶部 40 dp 宽的一条，
+                    // 所以浮层在齿轮那一侧多留 52 dp（40 + 8 间距）。
+                    // 悬浮区**只有齿轮一个常驻元素**：原来还挂着一颗 Shizuku 状态角标，
+                    // 它压在卡片角上会跟天气卡、全屏隐私卡、「回家/去公司」快捷卡叠字 ——
+                    // 三处叠字同一个原因。状态现在在设置面板里（[SettingsPane] 的
+                    // 「Shizuku」一行）。
+                    Box(
                         modifier = Modifier
-                            .align(
-                                if (overlayCorner) Alignment.TopEnd else Alignment.TopStart,
-                            )
+                            .align(alignTo)
                             .padding(
                                 top = DeskDimens.statusChipTopPadding,
                                 start = DeskDimens.statusChipSidePadding,
                                 end = DeskDimens.statusChipSidePadding,
                             ),
-                        horizontalAlignment = if (overlayCorner) {
-                            Alignment.End
-                        } else {
-                            Alignment.Start
-                        },
-                        verticalArrangement = Arrangement.spacedBy(DeskDimens.statusChipGap),
                     ) {
                         SettingsToggleChip(
                             open = settingsOpen,
                             onClick = { settingsOpen = !settingsOpen },
                         )
+                    }
 
-                        // Shizuku 角标：**只在异常时出现**（未装 / 未运行 / 未授权）。
-                        // 一切正常时这一行不存在，屏幕上只剩齿轮。
-                        if (shizukuStatus != ShizukuStatus.READY) {
-                            ShizukuStatusChip(
-                                status = shizukuStatus,
-                                onClick = { screen = DeskScreen.SHIZUKU_GUIDE },
-                            )
-                        }
-
-                        if (settingsOpen) {
-                            SettingsPane(
-                                sidebarSide = sidebarSide,
-                                keepScreenOn = keepScreenOn,
-                                amapAgreed = amapAgreed,
-                                onSidebarSideChange = { side ->
-                                    sidebarSide = ShellSettings.setSidebarSide(context, side)
-                                },
-                                onKeepScreenOnChange = { enabled ->
-                                    keepScreenOn = ShellSettings.setKeepScreenOn(context, enabled)
-                                },
-                                onRevokeAmapConsent = {
-                                    AMapPrivacy.revoke(context)
-                                    onMessage?.invoke("已撤回地图隐私同意，地图将不再显示")
-                                },
-                                onDismiss = { settingsOpen = false },
-                            )
-                        }
+                    if (settingsOpen) {
+                        // 面板贴齿轮的外侧：齿轮在右上时面板靠右、让开右边那一条。
+                        val gearLane =
+                            DeskDimens.settingsChipSize + DeskDimens.statusChipGap
+                        SettingsPane(
+                            modifier = Modifier
+                                .align(alignTo)
+                                .padding(
+                                    top = DeskDimens.statusChipTopPadding,
+                                    start = DeskDimens.statusChipSidePadding +
+                                        if (overlayCorner) 0.dp else gearLane,
+                                    end = DeskDimens.statusChipSidePadding +
+                                        if (overlayCorner) gearLane else 0.dp,
+                                ),
+                            sidebarSide = sidebarSide,
+                            keepScreenOn = keepScreenOn,
+                            amapAgreed = amapAgreed,
+                            shizukuStatus = shizukuStatus,
+                            onSidebarSideChange = { side ->
+                                sidebarSide = ShellSettings.setSidebarSide(context, side)
+                            },
+                            onKeepScreenOnChange = { enabled ->
+                                keepScreenOn = ShellSettings.setKeepScreenOn(context, enabled)
+                            },
+                            onRevokeAmapConsent = {
+                                AMapPrivacy.revoke(context)
+                                onMessage?.invoke("已撤回地图隐私同意，地图将不再显示")
+                            },
+                            // 切屏时设置面板会自动收起（见上面的 LaunchedEffect(screen)），
+                            // 所以这里只管切屏，不用自己关浮层。
+                            onOpenShizukuGuide = { screen = DeskScreen.SHIZUKU_GUIDE },
+                            onDismiss = { settingsOpen = false },
+                        )
                     }
                 }
             }
