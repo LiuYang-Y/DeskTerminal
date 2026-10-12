@@ -16,7 +16,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -29,6 +32,7 @@ import com.amap.api.maps.model.LatLng
 import com.amap.api.maps.model.MyLocationStyle
 import com.qingke.desk.core.data.GeoPoint
 import com.qingke.desk.core.data.ShellSettings
+import com.qingke.desk.map.navi.NaviShape
 
 /**
  * 地图样式。三个都是高德 SDK 自带的 mapType，不涉及自定义样式文件
@@ -99,6 +103,17 @@ fun AMapCanvas(
     preview: Boolean = false,
     renderEnabled: Boolean = true,
     renderFps: Int = MAP_FULL_FPS,
+    /**
+     * 导航总览：整条路线 + 车点（首页地图卡在导航中显示的就是它）。
+     *
+     * 传 null 会**清掉**已有叠加层 —— 这一点很关键，退出导航之后必须有谁调一次
+     * 带 null 的渲染，否则那条不作数的路线会一直挂在地图上（见 [NaviMapOverlay]）。
+     *
+     * @param naviShape 整条路线的几何。含包围盒，镜头按它框一次。
+     * @param naviCar 车当前的位置，沿路线移动的那颗点。
+     */
+    naviShape: NaviShape? = null,
+    naviCar: GeoPoint? = null,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -172,6 +187,10 @@ fun AMapCanvas(
         }
     }
 
+    // 地图区域**真实的布局尺寸**。导航总览框镜头要用它，而不是 MapView 内部的尺寸缓存
+    // —— 那个缓存刚从别的父容器搬过来时还是旧值（见 NaviMapOverlay.render 的相机那段）。
+    var mapViewport by remember { mutableStateOf(IntSize.Zero) }
+
     AndroidView(
         factory = {
             MapLog.i(
@@ -197,7 +216,7 @@ fun AMapCanvas(
                 mapView
             }
         },
-        modifier = modifier,
+        modifier = modifier.onSizeChanged { mapViewport = it },
         update = {
             // 用捕获的 mapView，不用 update 回调给的 view ——
             // 预览模式下那一层是包装容器（FrameLayout），没有 .map。
@@ -305,6 +324,32 @@ fun AMapCanvas(
                 MapLog.w("setDisableRender(${!renderEnabled}) failed: ${it.javaClass.simpleName}")
             }
         MapLog.i("render enabled=$renderEnabled fps=$renderFps")
+    }
+
+    // ---- 导航总览叠加层 ----------------------------------------------------
+    //
+    // 首页地图卡在导航中要显示"整条路线 + 沿路线移动的车点"。
+    //
+    // 顺序上这是本组件做的最后一件事：它要盖过上面那次初始视角（初始视角每个
+    // MapView 只种一次，导航中早就种过了，所以两者不会互相拉拽）。
+    //
+    // 折线宽度按密度换算：SDK 的 `PolylineOptions.width()` 是**屏幕像素**，
+    // 写死像素值换台机器要么细成头发丝、要么粗成色块。
+    val overviewLineWidthPx = NAVI_OVERVIEW_LINE_WIDTH_DP * LocalDensity.current.density
+    LaunchedEffect(aMap, naviShape, naviCar, renderEnabled, overviewLineWidthPx, mapViewport) {
+        // 停渲染时不铺（翻到第 2 页）：一帧都不画的页面上没必要维护覆盖物。
+        if (!renderEnabled) return@LaunchedEffect
+        NaviMapOverlay.render(
+            aMap = aMap,
+            shape = naviShape,
+            car = naviCar,
+            lineWidthPx = overviewLineWidthPx,
+            viewportWidth = mapViewport.width,
+            viewportHeight = mapViewport.height,
+            // 退出导航后视角回到"我"这里。拿不到上次定位就传 null，
+            // 那时叠加层会**不动相机** —— 猜个坐标把人扔到别处比停在原地更糟。
+            selfPoint = fallbackCenter?.let { GeoPoint(it.latitude, it.longitude) },
+        )
     }
 }
 

@@ -44,6 +44,8 @@ import com.qingke.desk.feature.media.MediaCommand
 import com.qingke.desk.feature.media.MediaUiState
 import com.qingke.desk.map.MapPreviewCard
 import com.qingke.desk.map.MapViewHost
+import com.qingke.desk.map.navi.NaviGuidance
+import com.qingke.desk.map.navi.NaviShape
 import kotlinx.coroutines.launch
 
 /** 首页页数。今天只有两页；以后加页只改这个数与 [MapPage] / [InfoPage] 的分支。 */
@@ -115,6 +117,17 @@ fun HomeScreen(
     mediaState: MediaUiState = MediaUiState.Checking,
     onMediaCommand: (MediaCommand) -> Unit = {},
     onMediaRequestPermission: () -> Unit = {},
+    /**
+     * 导航总览：整条路线的几何（含包围盒）。非 null 时地图卡画"整条路线 + 车点"。
+     * 由 [DeskRoot] 从 [com.qingke.desk.map.navi.NaviSession] 订阅后下发 ——
+     * 首页只负责画，判断"在不在导航"不在这一层。
+     */
+    naviShape: NaviShape? = null,
+    /**
+     * 实时引导。非 null 时在地图卡上叠一层引导信息：下一转向、距离、路名、
+     * 剩余里程与预计时间（见 [NaviCardOverlay]）。
+     */
+    naviGuidance: NaviGuidance? = null,
     modifier: Modifier = Modifier,
 ) {
     val pagerState = rememberPagerState { HOME_PAGE_COUNT }
@@ -154,6 +167,8 @@ fun HomeScreen(
                     workTitle = workTitle,
                     onHomeClick = onHomeClick,
                     onWorkClick = onWorkClick,
+                    naviShape = naviShape,
+                    naviGuidance = naviGuidance,
                     driftX = driftX,
                     driftY = driftY,
                 )
@@ -200,6 +215,8 @@ private fun MapPage(
     workTitle: String?,
     onHomeClick: () -> Unit,
     onWorkClick: () -> Unit,
+    naviShape: NaviShape?,
+    naviGuidance: NaviGuidance?,
     driftX: Dp,
     driftY: Dp,
 ) {
@@ -221,7 +238,13 @@ private fun MapPage(
                 host = mapHost,
                 renderEnabled = renderEnabled,
                 onOpenFull = onOpenMap,
+                naviShape = naviShape,
+                naviCar = naviGuidance?.car,
             )
+
+            // 引导浮层叠在卡片之上。它**不吃触摸**（见 NaviCardOverlay 的说明），
+            // 所以"点卡片回全屏导航页"在地图上是通的，在浮层上也是通的。
+            naviGuidance?.let { NaviCardOverlay(guidance = it) }
         }
 
         Column(

@@ -36,8 +36,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.qingke.desk.core.data.GeoPoint
 import com.qingke.desk.core.platform.Daylight
 import com.qingke.desk.map.BuildConfig
+import com.qingke.desk.map.navi.NaviShape
 import kotlinx.coroutines.delay
 
 /**
@@ -281,6 +283,10 @@ fun AMapPrivacyCard(
  *     点它跳到全屏页看完整的隐私说明 —— 首页卡只有 409×313，塞不下整篇政策文本。
  *
  * @param onOpenFull 无论当前是地图还是占位，点击都走它：进全屏地图页。
+ *                   **导航中它指向的就是导航画面**（地图屏在导航中画的是导航），
+ *                   所以"点卡片回到全屏导航页"不需要额外的分支。
+ * @param naviShape 导航总览的整条路线几何。非 null 时卡片变成"路线总览 + 车点"。
+ * @param naviCar 车当前的位置。
  */
 @Composable
 fun MapPreviewCard(
@@ -288,6 +294,8 @@ fun MapPreviewCard(
     host: MapViewHost? = null,
     renderEnabled: Boolean = true,
     onOpenFull: () -> Unit = {},
+    naviShape: NaviShape? = null,
+    naviCar: GeoPoint? = null,
 ) {
     val context = LocalContext.current
     val agreed by AMapPrivacy.agreed.collectAsState()
@@ -318,6 +326,19 @@ fun MapPreviewCard(
                 preview = true,
                 renderEnabled = renderEnabled,
                 renderFps = MAP_PREVIEW_FPS,
+                // 导航中**关掉 SDK 的定位层**（蓝点 + 三角形朝向）。
+                //
+                // 2026-10-12 真机反馈：卡片上同时出现"我的实际位置"和"车的位置"两个点，
+                // 一眼看上去像是"导航在按我的真实位置跑"。实际上模拟导航的起点就是
+                // 当前定位，两点当然重合，但界面上给出两个点就等于逼用户去猜哪个算数。
+                //
+                // 导航中的位置只应该有一个来源：NaviSession 给的车点（由 NaviMapOverlay 画）。
+                // 它才是"引擎认为你在哪" —— 模拟导航里它沿路线走，真导航里它跟着 GPS，
+                // 两者都不是"手机定位蓝点"。退出导航（naviShape == null）后这里恢复 true，
+                // 卡片回到普通地图的样子。
+                showMyLocation = naviShape == null,
+                naviShape = naviShape,
+                naviCar = naviCar,
             )
         }
     }

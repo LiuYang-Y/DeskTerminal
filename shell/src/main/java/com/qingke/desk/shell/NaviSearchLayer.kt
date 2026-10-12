@@ -145,6 +145,11 @@ fun NaviSearchLayer(
      * 由调用方落到 [NaviSession.clearRoute]（界面不直接改会话状态）。
      */
     onClearDestination: () -> Unit,
+    /**
+     * 算路失败后点"重试"。落到 [NaviSession.retryCalculate] ——
+     * 界面不自己再算一遍（起终点在会话里，界面拿不到）。
+     */
+    onRetry: () -> Unit,
 ) {
     val context = LocalContext.current
     val searcher = remember { PlaceSearch(context) }
@@ -327,6 +332,7 @@ fun NaviSearchLayer(
                 onSaveHome = { onSaveHome(destination) },
                 onSaveWork = { onSaveWork(destination) },
                 onStartNavi = onStartNavi,
+                onRetry = onRetry,
                 onDismiss = {
                     // "算了"就是"当我没说"：关键词一起清掉，下次打开是干净的输入框，
                     // 而不是又看到刚放弃的那次搜索（同 [onPicked] 那条的理由）。
@@ -613,6 +619,7 @@ private fun RoutePreviewCard(
     onSaveHome: () -> Unit,
     onSaveWork: () -> Unit,
     onStartNavi: () -> Unit,
+    onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val cardShape = RoundedCornerShape(18.dp)
@@ -665,11 +672,27 @@ private fun RoutePreviewCard(
                     Text("正在算路…", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
                 }
 
-                is RouteState.Failed -> Text(
-                    text = routeState.message,
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.error,
-                )
+                // 失败必须同时给出"为什么"和"下一步做什么"。只留一行红字的话，
+                // 用户唯一能做的就是把卡片关掉重来 —— 而这颗"重试"走的**正是同一条算路链路**
+                // （起点终点都在会话里），不必再搜一次目的地。
+                is RouteState.Failed -> Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = routeState.message,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    TextButton(
+                        onClick = onRetry,
+                        contentPadding = PaddingValues(horizontal = 10.dp),
+                    ) {
+                        Text("重试", fontSize = 13.sp)
+                    }
+                }
 
                 is RouteState.Ready -> RouteList(
                     options = routeState.options,

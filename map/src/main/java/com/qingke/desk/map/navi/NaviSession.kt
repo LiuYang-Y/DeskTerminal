@@ -8,6 +8,7 @@ import com.amap.api.navi.SimpleNaviListener
 import com.amap.api.navi.enums.NaviType
 import com.amap.api.navi.enums.PathPlanningStrategy
 import com.amap.api.navi.model.AMapCalcRouteResult
+import com.amap.api.navi.model.AMapNaviLocation
 import com.amap.api.navi.model.NaviInfo
 import com.amap.api.navi.model.NaviPoi
 import com.qingke.desk.core.data.GeoPoint
@@ -130,6 +131,7 @@ enum class NaviPhase {
  * @param remainSeconds 剩余总时间（`getPathRetainTime`）。
  * @param remainLights 剩余红绿灯数。
  * @param speedKph 当前车速。
+ * @param car 车当前所在的位置（`AMapNaviLocation.getCoord()`）。没拿到定位时 null。
  */
 data class NaviGuidance(
     val iconType: Int,
@@ -141,6 +143,11 @@ data class NaviGuidance(
     val remainSeconds: Int,
     val remainLights: Int,
     val speedKph: Int,
+    /**
+     * 车的位置。放在引导数据里**而不是单开一条流**：首页卡上那颗"车点"必须和
+     * "剩余 12.3 公里"同帧更新，拆成两条流就会出现"点动了、数字还是上一秒的"。
+     */
+    val car: GeoPoint? = null,
 ) {
     /** "300 米" / "1.2 公里" —— 转向距离的通行写法。 */
     val turnDistanceText: String
@@ -162,6 +169,38 @@ data class NaviGuidance(
             val minutes = remainSeconds / 60
             return if (minutes < 60) "$minutes 分钟" else "${minutes / 60} 小时 ${minutes % 60} 分"
         }
+}
+
+/**
+ * 整条路线的几何 —— **纯数据，一个 SDK 类型都不带**。
+ *
+ * 为什么要拷一份，而不是把 `AMapNaviPath` 直接交给界面：
+ *
+ *  1. `:shell` 在编译期看不到导航 aar（`NaviLatLng` / `LatLngBounds` 都取不到引用），
+ *     而首页地图卡要用这份几何画总览 —— 它必须是一串 Kotlin 基础类型才递得过去；
+ *  2. SDK 的 path 对象会随重算 / 换路线**被换掉或失效**，拷出来的这份不受影响；
+ *  3. 首页卡每帧都要读它，缓存住比每帧回头问 SDK 便宜。
+ *
+ * @param points 整条路线的形状点（`AMapNaviPath.getCoordList()`），按行进顺序排列。
+ *               几万个点是正常的（70 公里实测 5000+ 个），只在算路 / 换路线时重建一次。
+ * @param south 包围盒南边界（`getBoundsForPath()` 的 southwest.latitude）。
+ * @param west 包围盒西边界。
+ * @param north 包围盒北边界。
+ * @param east 包围盒东边界。
+ */
+data class NaviShape(
+    val points: List<GeoPoint>,
+    val south: Double,
+    val west: Double,
+    val north: Double,
+    val east: Double,
+) {
+    /** 少于两个点连不成线。false 时界面按"没有几何"处理（不画线、不摆镜头）。 */
+    val usable: Boolean get() = points.size >= 2
+
+    /** 包围盒中心 —— 没有 bounds 可用时的兜底镜头目标。 */
+    val centerLat: Double get() = (south + north) / 2.0
+    val centerLng: Double get() = (west + east) / 2.0
 }
 
 /**
@@ -197,8 +236,19 @@ object NaviSession {
 
     private const val TAG_LOG = "navi"
 
-    /** 算路兜底超时。真机实测正常情况下 5 秒内出结果，20 秒还没来就是真出问题了。 */
+    /**
+     * 算路兜底超时。真机实测正常情况下 5 秒内出结果，20 秒还没来就是真出问题了。
+     *
+     * 超时后**先自动重试一次**（真机上偶发过一次 20 秒不回调，紧接着重算就正常），
+     * 第二次仍超时才判失败并把"重试"按钮交给用户。
+     */
     private const val CALC_TIMEOUT_MILLIS = 20_000L
+
+    /** 超时（含自动重试一次之后仍超时）时给用户看的话。要指明"下一步该做什么"。 */
+    private const val CALC_TIMEOUT_MESSAGE = "算路超时，请检查网络后重试"
+
+    /** 引擎直接拒收算路请求时的话。与超时区分开，两种原因的处置不一样。 */
+    private const val CALC_REJECTED_MESSAGE = "算路请求被拒绝，请重试"
 
     /**
      * 等 `onStopNavi` 回调的兜底。回调不来也必须把状态推进 ——
@@ -243,6 +293,15 @@ object NaviSession {
     private val _guidance = MutableStateFlow<NaviGuidance?>(null)
     val guidance: StateFlow<NaviGuidance?> = _guidance.asStateFlow()
 
+    /**
+     * 当前选中路线的几何（首页地图卡画"整条路线总览"用）。没有路线时是 null。
+     *
+     * 它只在**算好一条路**和**换了一条路线**这两个时刻变，是个低频流 ——
+     * 首页卡订阅它不会带来持续重组（高频的是 [guidance]）。
+     */
+    private val _shape = MutableStateFlow<NaviShape?>(null)
+    val shape: StateFlow<NaviShape?> = _shape.asStateFlow()
+
     /** 当前目的地（带坐标）。退出导航后清空。 */
     private val _destination = MutableStateFlow<PlaceSuggestion?>(null)
     val destination: StateFlow<PlaceSuggestion?> = _destination.asStateFlow()
@@ -270,6 +329,27 @@ object NaviSession {
     private var lastGuidanceLogAt = 0L
 
     /**
+     * 车当前的位置，来自 `onLocationChange`。
+     *
+     * 存成字段而不是只塞进 `_guidance`：定位回调与引导回调是**两条独立的时间线**，
+     * 定位往往先到。先存下来，下一条引导数据就能带上它，不会出现"先有引导没有车点"。
+     */
+    private var carPoint: GeoPoint? = null
+
+    /** 车点日志的节流时间戳。定位回调约 1 Hz，不节流会把日志撑爆。 */
+    private var lastCarLogAt = 0L
+
+    /** 车点日志的最短间隔。5 秒一条，足够证明"在动"，又不至于淹没引导日志。 */
+    private const val CAR_LOG_INTERVAL_MILLIS = 5_000L
+
+    /**
+     * 本次算路是否已经用掉了"自动重试一次"的机会。见 [doCalculate]。
+     *
+     * 每次真正开始算路（[calculate] / [switchStrategy]）时复位。
+     */
+    private var calcRetryUsed = false
+
+    /**
      * 监听器只注册一次，挂在进程级引擎上。
      *
      * 为什么不做 add/remove 配对：引擎的生命周期就是进程的生命周期，
@@ -294,15 +374,16 @@ object NaviSession {
             val options = collectOptions(ids)
             if (options.isEmpty()) {
                 MapLog.i("$TAG_LOG: calc ok but no usable path")
-                _route.value = RouteState.Failed("没有可用路线")
-                _phase.value = NaviPhase.IDLE
-                autoStartAfterCalc = false
+                failCalc("没有可用路线")
                 return
             }
             // 默认选中第一条，并把"选中"这件事**同步给 SDK**：
             // 否则 startNavi 走的可能是 SDK 自己的主路线，出现"界面高亮第二条、
             // 实际按第一条导航"这种最坏情况（界面在撒谎，而且没人能一眼看出来）。
             selectInternal(options.first().id)
+            // 几何要在 `_route` 之前发布：首页卡拿到 Ready 那一刻就要有路线可画，
+            // 否则会先看见"有剩余里程、没有路线"的一帧。
+            publishShape(options.first().id)
             _route.value = RouteState.Ready(options, 0)
 
             if (autoStartAfterCalc) {
@@ -316,16 +397,13 @@ object NaviSession {
         }
 
         override fun onCalculateRouteFailure(result: AMapCalcRouteResult) {
-            calcJob?.cancel()
-            calcJob = null
-            autoStartAfterCalc = false
             // 错误原文照抄进日志：真机排查时它就是去控制台对账的唯一线索。
+            // （真机见过 1806 = CLIENT_NETWORK_EXCEPTION，客户端网络偶发，下次请求就成功。）
             MapLog.i(
                 "$TAG_LOG: calc FAILED code=${result.errorCode} " +
                     "desc=${result.errorDescription} detail=${result.errorDetail}",
             )
-            _route.value = RouteState.Failed("算路失败（${result.errorCode}）")
-            _phase.value = NaviPhase.IDLE
+            failCalc("算路失败（${result.errorCode}）")
         }
 
         override fun onStartNavi(type: Int) {
@@ -349,6 +427,30 @@ object NaviSession {
             publishGuidance(naviInfo)
         }
 
+        /**
+         * 位置回调。**这是首页卡上那颗车点的唯一来源**（`getCoord()`）。
+         *
+         * 不拿 `NaviInfo.getCurPoint()` 去 `coordList` 里查点：那是"当前形状点下标"，
+         * 模拟导航下会一跳一跳地走，而且下标越界时还得自己兜底。
+         * `AMapNaviLocation` 是引擎给的真实位置，直接可用。
+         */
+        override fun onLocationChange(location: AMapNaviLocation?) {
+            val coord = location?.coord ?: return
+            val point = GeoPoint(coord.latitude, coord.longitude)
+            if (carPoint == point) return
+            carPoint = point
+            // 已经有一条引导数据就把车点补进去；还没有就等 publishGuidance 带上它。
+            _guidance.value = _guidance.value?.copy(car = point)
+
+            // 节流落盘：这是"车点数据真的在流"的唯一现场证据（模拟导航下约 1 Hz）。
+            // 首页卡上那颗点动不动，全看这条有没有输出。
+            val now = System.currentTimeMillis()
+            if (now - lastCarLogAt >= CAR_LOG_INTERVAL_MILLIS) {
+                lastCarLogAt = now
+                MapLog.i("$TAG_LOG: car ${point.latitude},${point.longitude}")
+            }
+        }
+
         @Suppress("DEPRECATION")
         override fun onGetNavigationText(text: String?) {
             // 内置语音自己会播；这一条只用来在真机上确认"播报确实发生了"。
@@ -368,6 +470,8 @@ object NaviSession {
      * 不允许新旧两条导航并存（见类注释的硬约束 3）。
      */
     fun calculate(context: Context, start: GeoPoint, end: PlaceSuggestion) {
+        // 新一轮算路：重新享有一次"自动重试"的机会。
+        calcRetryUsed = false
         when (_phase.value) {
             NaviPhase.NAVIGATING, NaviPhase.STARTING, NaviPhase.STOPPING -> {
                 MapLog.i("$TAG_LOG: calculate while phase=${_phase.value} -> stop old first")
@@ -379,6 +483,28 @@ object NaviSession {
 
             else -> doCalculate(context, start, end)
         }
+    }
+
+    /**
+     * 用户点了错误提示旁边那颗"重试"。
+     *
+     * 用上一轮的起终点重算，并且**复位"自动重试已用过"的标志** —— 手动重试是新的一轮，
+     * 理应重新享有一次自动重试，否则用户在弱网下点一次就少一次容错。
+     *
+     * @return false = 连起终点都没有（界面上不该出现这种状态，兜一下）。
+     */
+    fun retryCalculate(context: Context): Boolean {
+        val start = lastStart
+        val end = lastEnd
+        if (start == null || end == null) {
+            MapLog.i("$TAG_LOG: retry ignored, no last start/end")
+            return false
+        }
+        MapLog.i("$TAG_LOG: manual retry for ${end.name}")
+        calcRetryUsed = false
+        // 复用 doCalculate：它会把 destination / 几何 / 阶段铺成和首次一致的状态。
+        doCalculate(context, start, end)
+        return true
     }
 
     /**
@@ -411,6 +537,9 @@ object NaviSession {
             return
         }
         MapLog.i("$TAG_LOG: selected route id=${option.id} (index=$index)")
+        // 换了路线，首页卡上那条线也得跟着换 —— 否则用户选的是第 3 条，
+        // 首页画的是第 1 条，正是"界面在撒谎"的另一张面孔。
+        publishShape(option.id)
         _route.value = current.copy(selectedIndex = index)
     }
 
@@ -529,8 +658,10 @@ object NaviSession {
         calcJob = null
         _route.value = RouteState.Idle
         _destination.value = null
+        _shape.value = null
         lastStart = null
         lastEnd = null
+        calcRetryUsed = false
         if (_phase.value != NaviPhase.STOPPING) _phase.value = NaviPhase.IDLE
     }
 
@@ -615,9 +746,13 @@ object NaviSession {
         _strategy.value = Strategy.RECOMMENDED
         _destination.value = null
         _guidance.value = null
+        // 几何也要清：留着的话退出导航后首页卡还会画着那条线，而路线早就不作数了。
+        _shape.value = null
+        carPoint = null
         lastStart = null
         lastEnd = null
         autoStartAfterCalc = false
+        calcRetryUsed = false
         MapLog.i("$TAG_LOG: exit done, engine destroyed, phase=IDLE")
     }
 
@@ -646,38 +781,81 @@ object NaviSession {
         _route.value = RouteState.Calculating
         _phase.value = NaviPhase.CALCULATING
         calcJob?.cancel()
+
+        // **一个 job 管两轮超时**：第一轮超时自动重试一次，第二轮还超时才判失败。
+        //
+        // 为什么不写成"超时后递归调用 doCalculate"：那会在协程内部取消到**自身**
+        // （doCalculate 开头就有 `calcJob?.cancel()`），能不能继续跑取决于取消发生在
+        // 哪一行 —— 这种事不该赌。线性走完两轮，行为一眼可见。
         calcJob = scope.launch {
             delay(CALC_TIMEOUT_MILLIS)
+            if (_route.value !is RouteState.Calculating) return@launch
+
+            if (calcRetryUsed) {
+                MapLog.i("$TAG_LOG: calc timeout AGAIN after retry -> give up")
+                failCalc(CALC_TIMEOUT_MESSAGE)
+                return@launch
+            }
+            calcRetryUsed = true
+            MapLog.i("$TAG_LOG: calc timeout after ${CALC_TIMEOUT_MILLIS / 1000}s -> auto retry once")
+            if (!dispatchToEngine(engine, start, end)) {
+                failCalc(CALC_REJECTED_MESSAGE)
+                return@launch
+            }
+
+            delay(CALC_TIMEOUT_MILLIS)
             if (_route.value is RouteState.Calculating) {
-                MapLog.i("$TAG_LOG: calc timeout after ${CALC_TIMEOUT_MILLIS / 1000}s")
-                _route.value = RouteState.Failed("算路超时")
-                _phase.value = NaviPhase.IDLE
-                autoStartAfterCalc = false
+                MapLog.i("$TAG_LOG: calc timeout after retry -> give up")
+                failCalc(CALC_TIMEOUT_MESSAGE)
             }
         }
 
+        if (!dispatchToEngine(engine, start, end)) {
+            failCalc(CALC_REJECTED_MESSAGE)
+        }
+    }
+
+    /**
+     * 只做一件事：把这一次算路请求递给引擎，返回它有没有被接受。
+     *
+     * 抽出来是为了让"首次请求"与"超时后的重试"走**同一条下发路径** ——
+     * 重试若走另一条路，验的就不是同一个东西了。
+     */
+    private fun dispatchToEngine(
+        engine: AMapNavi,
+        start: GeoPoint,
+        end: PlaceSuggestion,
+    ): Boolean {
+        val destination = end.point ?: return false
         val startPoi = NaviPoi("起点", LatLng(start.latitude, start.longitude), null)
         val endPoi = NaviPoi(end.name, LatLng(destination.latitude, destination.longitude), end.poiId)
-
         val accepted = runCatching {
             engine.calculateDriveRoute(startPoi, endPoi, ArrayList<NaviPoi>(), _strategy.value.value)
         }.getOrElse { t ->
             MapLog.i("$TAG_LOG: calc threw ${t.javaClass.simpleName}")
             false
         }
-
         MapLog.i(
-            "$TAG_LOG: calc start=${start.latitude},${start.longitude} " +
+            "$TAG_LOG: calc dispatched start=${start.latitude},${start.longitude} " +
                 "end=${destination.latitude},${destination.longitude} " +
                 "strategy=${_strategy.value.value} accepted=$accepted",
         )
-        if (!accepted) {
-            calcJob?.cancel()
-            calcJob = null
-            autoStartAfterCalc = false
-            _route.value = RouteState.Failed("算路请求被拒绝")
-            _phase.value = NaviPhase.IDLE
-        }
+        return accepted
+    }
+
+    /**
+     * 算路失败的统一收口（超时 / 被拒 / 没有可用路线都走这里）。
+     *
+     * 在超时协程**内部**被调用时，`calcJob?.cancel()` 取消的是它自己 —— 这没问题：
+     * Kotlin 的取消是协作式的，打上取消标记之后**同步代码仍会继续执行**，
+     * 所以紧随其后的几行状态赋值照样生效。
+     */
+    private fun failCalc(message: String) {
+        calcJob?.cancel()
+        calcJob = null
+        autoStartAfterCalc = false
+        _route.value = RouteState.Failed(message)
+        _phase.value = NaviPhase.IDLE
     }
 
     // ---- 内部：引擎 --------------------------------------------------------
@@ -749,6 +927,46 @@ object NaviSession {
         return result
     }
 
+    /**
+     * 把"当前选中那条路线"的几何拷成 [NaviShape] 并发布。
+     *
+     * 失败时**置 null 而不是留着上一条**：留旧几何的后果是首页卡上画着一条已经
+     * 不作数的路线，而用户会以为那就是要走的路 —— 比不画更坏。
+     */
+    private fun publishShape(routeId: Int) {
+        val engine = navi
+        if (engine == null) {
+            _shape.value = null
+            return
+        }
+        val path = runCatching { engine.naviPaths?.get(routeId) }.getOrNull()
+            ?: runCatching { engine.naviPath }.getOrNull()
+        val coords = path?.let { runCatching { it.coordList }.getOrNull() }.orEmpty()
+        val bounds = path?.let { runCatching { it.boundsForPath }.getOrNull() }
+        if (coords.isEmpty() || bounds == null) {
+            MapLog.i("$TAG_LOG: shape skipped id=$routeId coords=${coords.size} bounds=${bounds != null}")
+            _shape.value = null
+            return
+        }
+        // `getCoordList()` 在 Kotlin 眼里是平台类型，元素可能为 null，这里过一遍。
+        val points = ArrayList<GeoPoint>(coords.size)
+        for (c in coords) {
+            if (c != null) points.add(GeoPoint(c.latitude, c.longitude))
+        }
+        val value = NaviShape(
+            points = points,
+            south = bounds.southwest.latitude,
+            west = bounds.southwest.longitude,
+            north = bounds.northeast.latitude,
+            east = bounds.northeast.longitude,
+        )
+        _shape.value = value
+        MapLog.i(
+            "$TAG_LOG: shape id=$routeId points=${points.size} " +
+                "box=${value.south},${value.west}..${value.north},${value.east}",
+        )
+    }
+
     /** 把"选中的是哪条"告诉 SDK。失败返回 false，由调用方决定要不要说话。 */
     private fun selectInternal(routeId: Int): Boolean =
         runCatching { navi?.selectRouteId(routeId) ?: false }.getOrDefault(false)
@@ -772,6 +990,7 @@ object NaviSession {
             remainSeconds = src.pathRetainTime,
             remainLights = src.routeRemainLightCount,
             speedKph = src.currentSpeed,
+            car = carPoint,
         )
         if (_guidance.value == value) return
         _guidance.value = value

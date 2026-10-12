@@ -392,6 +392,10 @@ fun DeskRoot(
         val naviPhase by NaviSession.phase.collectAsState()
         val naviActive = naviPhase == NaviPhase.STARTING || naviPhase == NaviPhase.NAVIGATING
         val naviDestination by NaviSession.destination.collectAsState()
+        // 首页地图卡要的两份数据：整条路线的几何（低频，只在算好/换路线时变）
+        // 和实时引导（约 1 Hz）。都在会话里，这一层只订阅、不改写。
+        val naviShape by NaviSession.shape.collectAsState()
+        val naviGuidance by NaviSession.guidance.collectAsState()
 
         // 退出确认对话框是否在屏。**退出导航是唯一的结束入口，所以它必须被确认一次**——
         // 这颗按钮就压在导航画面右上角，误触一次就是"导航没了"。
@@ -628,6 +632,11 @@ fun DeskRoot(
                                 driftY = drift.second.dp,
                                 onOpenMap = { screen = DeskScreen.MAP },
                                 mapHost = mapViewHost,
+                                // 导航中这两份非 null：地图卡变成"整条路线 + 车点"，
+                                // 并叠上下一转向 / 距离 / 路名 / 剩余里程与时间。
+                                // 点卡片走的还是 onOpenMap —— 导航中地图屏画的就是导航画面。
+                                naviShape = naviShape,
+                                naviGuidance = naviGuidance,
                                 pageRequest = pageRequest,
                                 mediaState = mediaState,
                                 onMediaCommand = mediaMonitor::command,
@@ -731,9 +740,41 @@ fun DeskRoot(
 
                                         // 退出按钮。SDK 自带的返回在它自己的 UI 里，
                                         // 位置与样式我们控制不了；这一颗是我们自己的兜底出口。
-                                        // 放在**右上**并做成玻璃块：SDK 自己的转向卡占着左上，
-                                        // 一开始把按钮放左上，真机上直接被转向卡压掉一半
-                                        // （截图 .verify/nav/S4-navi.png）。
+                                        //
+                                        // ---- 位置：左下角，但**实测过左下角有什么** ----
+                                        //
+                                        // 2026-10-12 从右上挪到左下，当时的理由是"右上压鹰眼图、
+                                        // 左上被转向卡占、右下是全览，且导航页没有自带底栏、左下是空的"。
+                                        // **后面这个判断是错的**，真机截图逐像素量过（.verify/reg/
+                                        // geometry.txt，3200×1440，1 dp = 3.5 px）：
+                                        //
+                                        //   · 左侧信息面板  x 169..767, y  70..1411   ← **全高，占满左列**
+                                        //   · 面板底部「中速」x 413..529, y 1222..1278
+                                        //   · SDK 自带底栏  x 821..1204, y 1259..1363  ← 存在，但在**中间**
+                                        //   · SDK「全览」   x 2682..2845, y 1259..1363
+                                        //
+                                        // 也就是说：自带底栏确实有（原来那句"没有自带底栏"是看漏了），
+                                        // 但它在底部**居中**、不在角上，所以与左下角天然不冲突；
+                                        // 真正的问题反倒是——**左下角落在那块全高信息面板里**，
+                                        // 面板底部正好是「中速」。
+                                        //
+                                        // 4 字标签时实测按钮 x 172..480，与「中速」(x 413..529)
+                                        // 相交 x 413..480、y 1262..1278 —— 4 倍放大能看清「中」字
+                                        // 左下被按钮的圆角切掉一块（.verify/reg/crop-zhongsu.png）。
+                                        //
+                                        // 修法**不是**把按钮挪走（左列全被面板占着，挪哪儿都还在面板上），
+                                        // 而是把它压窄：标签改成 2 字「结束」，右边缘落在 x≈382，
+                                        // 与「中速」左边缘(413)留出 ≈9 dp。垂直方向允许与「中速」重叠
+                                        // （本来它们在同一带），只要**横向不相交**就不会碰到字。
+                                        //
+                                        // 为什么不干脆挪到右边那片空地（x 1204..1748 / 2133..2682 一带
+                                        // 确实空着）：那是底部中间，离"想结束导航"时的视线落点更远，
+                                        // 而且用户明确要的是左下角。这里选择守用户的位置要求、
+                                        // 用改标签的方式解决遮挡。
+                                        //
+                                        // 标签用「结束」而不是「退出」：SDK 自己的按钮就叫「退出」，
+                                        // 两个同名按钮更容易搞混；而二次确认框的标题与确认键都是
+                                        // 「结束导航」，和这颗「结束」是同一套说法。
                                         //
                                         // 用 [deskGlassOverlay] 而不是侧栏那块真玻璃：导航画面是
                                         // 独立 GL 图层，Compose 的背景层采不到它，真玻璃在这里
@@ -741,12 +782,12 @@ fun DeskRoot(
                                         val exitShape = RoundedCornerShape(18.dp)
                                         Box(
                                             modifier = Modifier
-                                                .align(Alignment.TopEnd)
-                                                .padding(end = 12.dp, top = 12.dp)
+                                                .align(Alignment.BottomStart)
+                                                .padding(start = 12.dp, bottom = 12.dp)
                                                 .shadow(6.dp, exitShape)
                                                 .deskGlassOverlay(exitShape)
                                                 .clickable(onClick = ::askExitNavi)
-                                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                                                .padding(horizontal = 14.dp, vertical = 10.dp),
                                         ) {
                                             // **颜色必须显式给**（2026-10-12 真机裁图发现的 bug）：
                                             // 不写 color 时 Text 取的是 `LocalContentColor`，而它的默认值
@@ -756,8 +797,8 @@ fun DeskRoot(
                                             // 而这颗按钮是导航页唯一的官方出口。
                                             // 证据：`.verify/nav/G7-exit-zoom.png`。
                                             Text(
-                                                text = "退出导航",
-                                                fontSize = 14.sp,
+                                                text = "结束",
+                                                fontSize = 15.sp,
                                                 color = MaterialTheme.colorScheme.onSurface,
                                             )
                                         }
@@ -818,6 +859,9 @@ fun DeskRoot(
                                             NaviSession.requestStart(context, ValidationDriver.emulatorOverride)
                                         },
                                         onClearDestination = { NaviSession.clearRoute() },
+                                        // 算路失败后的"重试"：起终点都在会话里，
+                                        // 界面只负责说一声"再算一次"。
+                                        onRetry = { NaviSession.retryCalculate(context) },
                                     )
                                 } else {
                                     AMapPrivacyCard(
@@ -893,9 +937,9 @@ fun DeskRoot(
 
                 // ---- 退出导航的二次确认 --------------------------------------
                 //
-                // 为什么非要问一句：「退出导航」是**唯一**会结束导航的动作，而它就压在
-                // 导航画面右上角、离鹰眼图和路况条都不远。误触一次 = 正在跑的导航没了，
-                // 而且（重构前）还会连带把下一次导航也搞坏。
+                // 为什么非要问一句：「结束」是**唯一**会结束导航的动作，而它就在导航画面
+                // 左下角，挨着 SDK 自己的信息面板（两者相距不到 10 dp），误触一次 =
+                // 正在跑的导航没了，而且（重构前）还会连带把下一次导航也搞坏。
                 // 另一颗入口（边缘上滑手势）走的是同一颗确认框：它是"逃生"而不是"快捷退出"，
                 // 多一次点击不影响它能不能用 —— 卡住的时候对话框照样出得来。
                 if (exitConfirm) {
