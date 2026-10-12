@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  仅 debug 变体：侧栏玻璃透镜原型的预览入口。
+
+  为什么要单独一页：透镜效果要改的是"侧栏选中指示块怎么画"，而真机上验它需要
+  「左右两侧同时存在（验镜像）+ 能一键切回改动前的样式（验回归）+ 看得见当前设备的
+  能力探测结果（API 30 上真折射是静默失效的）」。把这三件事塞进正式侧栏就等于
+  在正式界面里留调试入口；单独一页则一处都不碰正式代码。
+
+  release 构建不会包含本文件与对应 Activity。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+
+        <activity
+            android:name=".debug.SidebarLensPreviewActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboardHidden|uiMode"
+            android:exported="true"
+            android:label="侧栏透镜原型"
+            android:screenOrientation="sensorLandscape" />
+
+    </application>
+
+</manifest>
