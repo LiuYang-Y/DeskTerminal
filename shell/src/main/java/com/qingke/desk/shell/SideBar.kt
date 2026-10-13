@@ -72,6 +72,7 @@ fun SideBar(
     onSelect: (ShellItem) -> Unit,
     glassBackdrop: LayerBackdrop?,
     modifier: Modifier = Modifier,
+    availableHeightDp: Float? = null,
 ) {
     LensSideBar(
         items = items,
@@ -80,5 +81,6 @@ fun SideBar(
         backdrop = glassBackdrop,
         lensEnabled = LensSpec.ENABLED,
         modifier = modifier,
+        availableHeightDp = availableHeightDp,
     )
 }

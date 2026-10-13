@@ -1,6 +1,9 @@
 package com.qingke.desk.core.data
 
 import android.content.Context
+import com.qingke.desk.core.platform.DeviceProfile
+import com.qingke.desk.core.platform.EffectLevel
+import com.qingke.desk.core.platform.EffectTier
 
 /**
  * 侧栏在屏幕的哪一侧。
@@ -67,6 +70,16 @@ object ShellSettings {
     private const val KEY_WORK_LAT = "work_lat"
     private const val KEY_WORK_LON = "work_lon"
     private const val KEY_WORK_ADDR = "work_addr"
+
+    // 效果等级。真实 key 是 "$KEY_EFFECT_LEVEL:<设备指纹>"，见 effectLevelKey()。
+    private const val KEY_EFFECT_LEVEL = "effect_level"
+    // 调试：强制档位与模拟屏幕尺寸（这两个不按设备分，调试值本来就该全局一致）。
+    private const val KEY_FORCED_EFFECT_TIER = "forced_effect_tier"
+    private const val KEY_SIM_WIDTH_DP = "sim_width_dp"
+    private const val KEY_SIM_HEIGHT_DP = "sim_height_dp"
+
+    /** 默认 AUTO：让设备能力自己决定，不替用户猜。 */
+    private val DEFAULT_EFFECT_LEVEL = EffectLevel.AUTO
 
     /** 默认在左：基准机横屏时挖孔在左侧，侧栏贴左能把挖孔条一起吃掉。 */
     private val DEFAULT_SIDE = SidebarSide.LEFT
@@ -206,6 +219,79 @@ object ShellSettings {
         }
         editor.commit()
     }
+
+    // ---------- 效果等级（2026-10-13 加：自适应框架）----------
+
+    /**
+     * 效果等级。**按设备**存：key 里带 [DeviceProfile.fingerprint]。
+     *
+     * 为什么按设备而不是一个全局 key：换一台机器，屏幕尺寸、API、内存都不一样，
+     * 上一台机器上"锁定高档"的选择在新机器上很可能是错的（新机可能根本跑不动）。
+     * 按设备存之后，换机天然回到 AUTO，由新机器的能力自己决定 —— 这正是
+     * "自适应框架"想要的默认行为。
+     *
+     * 指纹刻意不含宽高与刷新率：用 `wm size` 改分辨率、改刷新率都不算换机，
+     * 不该把用户的选择冲掉。
+     */
+    fun effectLevel(context: Context, profile: DeviceProfile): EffectLevel {
+        val raw = prefs(context).getString(effectLevelKey(profile), null) ?: return DEFAULT_EFFECT_LEVEL
+        return runCatching { EffectLevel.valueOf(raw) }.getOrDefault(DEFAULT_EFFECT_LEVEL)
+    }
+
+    /** 写入并**立刻**返回新值（与 [setSidebarSide] 同样的理由：写完马上要读）。 */
+    fun setEffectLevel(context: Context, profile: DeviceProfile, level: EffectLevel): EffectLevel {
+        val key = effectLevelKey(profile)
+        prefs(context).edit()
+            .putString(key, level.name)
+            .putString(effectLevelOwnerKey(key), profile.shortLabel)
+            .commit()
+        return level
+    }
+
+    /**
+     * 这个值是在哪台设备上设的。用于调试页显示"当前档位来源"，
+     * 以及解释"为什么换了机器之后它回到自动了"。
+     */
+    fun effectLevelOwner(context: Context, profile: DeviceProfile): String? =
+        prefs(context).getString(effectLevelOwnerKey(effectLevelKey(profile)), null)
+
+    /** 调试页的**强制档位**。null = 不强制（走正常裁决）。 */
+    fun forcedEffectTier(context: Context): EffectTier? {
+        val raw = prefs(context).getString(KEY_FORCED_EFFECT_TIER, null) ?: return null
+        return runCatching { EffectTier.valueOf(raw) }.getOrNull()
+    }
+
+    /** 传 null = 取消强制。用 `apply()`：调试用，不值得同步落盘。 */
+    fun setForcedEffectTier(context: Context, tier: EffectTier?) {
+        prefs(context).edit().apply {
+            if (tier == null) remove(KEY_FORCED_EFFECT_TIER) else putString(KEY_FORCED_EFFECT_TIER, tier.name)
+        }.apply()
+    }
+
+    /**
+     * 调试页的**模拟屏幕尺寸**（dp）。null = 用真实屏幕。
+     *
+     * 与 `wm size` 的区别：`wm size` 改的是整个系统（更真实，但要 adb、要记得还原）；
+     * 这个是**应用内**把内容塞进一个指定尺寸的盒子里，用来快速截图对比，
+     * 不需要动系统设置、也不会忘记还原。
+     */
+    fun simulatedWidthDp(context: Context): Int? = readNullableInt(context, KEY_SIM_WIDTH_DP)
+
+    fun simulatedHeightDp(context: Context): Int? = readNullableInt(context, KEY_SIM_HEIGHT_DP)
+
+    fun setSimulatedSize(context: Context, widthDp: Int?, heightDp: Int?) {
+        prefs(context).edit().apply {
+            if (widthDp == null) remove(KEY_SIM_WIDTH_DP) else putInt(KEY_SIM_WIDTH_DP, widthDp)
+            if (heightDp == null) remove(KEY_SIM_HEIGHT_DP) else putInt(KEY_SIM_HEIGHT_DP, heightDp)
+        }.apply()
+    }
+
+    private fun effectLevelKey(profile: DeviceProfile) = "$KEY_EFFECT_LEVEL:${profile.fingerprint}"
+
+    private fun effectLevelOwnerKey(levelKey: String) = "$levelKey.owner"
+
+    private fun readNullableInt(context: Context, key: String): Int? =
+        if (prefs(context).contains(key)) prefs(context).getInt(key, 0) else null
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

@@ -43,6 +43,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
@@ -61,6 +62,8 @@ import com.qingke.desk.core.data.SidebarSide
 import com.qingke.desk.core.model.DisplayInfo
 import com.qingke.desk.core.platform.BurnInGuard
 import com.qingke.desk.core.platform.Daylight
+import com.qingke.desk.core.platform.EffectLevel
+import com.qingke.desk.core.platform.EffectTier
 import com.qingke.desk.core.platform.RemedyIntents
 import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.DeskTheme
@@ -166,6 +169,18 @@ fun DeskRoot(
     displayInfo: DisplayInfo = DisplayInfo.Unspecified,
     onMessage: ((String) -> Unit)? = null,
     onKeepScreenOnChange: (Boolean) -> Unit = {},
+    /**
+     * 效果等级（用户在设置里选的）。默认 AUTO。
+     *
+     * 这里只**显示与转发**，判断档位的事全在 [com.qingke.desk.core.platform.EffectGovernor]，
+     * 壳层不自己算 —— 否则"设备能力"和"运行时温度"两套逻辑会散在两个地方。
+     */
+    effectLevel: EffectLevel = EffectLevel.AUTO,
+    /** 当前**实际生效**的档位，由 Governor 下发。 */
+    effectTier: EffectTier = EffectTier.HIGH,
+    /** 一行状态说明（"高（设备最高 高 · 掉帧 8% · 温度 正常）"）。 */
+    effectStatusLine: String = "",
+    onEffectLevelChange: (EffectLevel) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var screen by remember { mutableStateOf(DeskScreen.HOME) }
@@ -1071,6 +1086,10 @@ fun DeskRoot(
                             keepScreenOn = keepScreenOn,
                             amapAgreed = amapAgreed,
                             shizukuStatus = shizukuStatus,
+                            effectLevel = effectLevel,
+                            effectTier = effectTier,
+                            effectStatusLine = effectStatusLine,
+                            onEffectLevelChange = onEffectLevelChange,
                             onSidebarSideChange = { side ->
                                 sidebarSide = ShellSettings.setSidebarSide(context, side)
                             },
@@ -1216,15 +1235,29 @@ private fun RowScope.SideBarSlot(
     onMessage: ((String) -> Unit)?,
     onScreenChange: (DeskScreen) -> Unit,
 ) {
-    SideBar(
-        items = defaultShellItems(),
-        selectedId = selectedShellId(screen),
-        onSelect = { item ->
-            onScreenChange(handleShellSelect(item, orchestrator, onMessage, screen))
-        },
-        glassBackdrop = glassBackdrop,
-        modifier = Modifier.align(Alignment.CenterVertically),
-    )
+    // **侧栏的可用高度必须量出来，不能拿档案算**（2026-10-13）：
+    //
+    // 档案里的 heightDp 是"窗口范围"（上界），而沉浸式下系统仍会留一圈不给应用
+    // （基准机上是左侧挖孔 39dp + 底部手势条 16dp）。按上界均分会把最后一项排到
+    // 画不到的地方 —— `wm size` 模拟 800×360 dp 时第 5 项「手机投屏」实测被屏幕底边切掉。
+    // 这里量的是外层 Row 真正给它的高度，是唯一不会错的那个数。
+    BoxWithConstraints(modifier = Modifier.fillMaxHeight()) {
+        // maxHeight 已经是 Dp（BoxWithConstraints 给的约束），直接用。
+        val railHeightDp = maxHeight.value
+        SideBar(
+            items = defaultShellItems(),
+            selectedId = selectedShellId(screen),
+            onSelect = { item ->
+                onScreenChange(handleShellSelect(item, orchestrator, onMessage, screen))
+            },
+            glassBackdrop = glassBackdrop,
+            // 这里从 RowScope 的 `align(CenterVertically)` 换成 Box 的 `align(CenterStart)`：
+            // 多包了一层 BoxWithConstraints 之后，隐式接收者已经变成 BoxScope。
+            // 两者对"竖直居中"是同一件事，横向本来就是这个盒子自己撑开的宽度。
+            modifier = Modifier.align(Alignment.CenterStart),
+            availableHeightDp = railHeightDp,
+        )
+    }
 }
 
 /**

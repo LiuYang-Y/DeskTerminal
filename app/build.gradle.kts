@@ -44,6 +44,9 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    // lifecycleScope：效果档位的采样协程挂在 Activity 生命周期上
+    // （见 MainActivity 的 governor.start()/stop()）。
+    implementation(libs.androidx.lifecycle.runtime.ktx)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     implementation(project(":shell"))

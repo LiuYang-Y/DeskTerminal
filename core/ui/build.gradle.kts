@@ -35,6 +35,12 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
+    // 设备档案与效果档位（DeviceProfile / EffectTier / EffectLevel）。
+    // 依赖方向是 ui → platform，单向 —— :core:platform 不认识 Compose，也不认识 :core:ui。
+    // 需要它，是因为 CompositionLocal（LocalDeviceProfile / LocalEffectTier）要放在 UI 层，
+    // 而"设备能力"与"效果门槛"是平台层的概念，不该为了放个 CompositionLocal 搬到 UI 层。
+    implementation(project(":core:platform"))
+
     // 液态玻璃效果。用 api：它暴露的 LayerBackdrop 类型会出现在 :shell 的签名里。
     //
     // 必须排除 org.jetbrains.compose.* —— 这个库是 Compose Multiplatform 产物，

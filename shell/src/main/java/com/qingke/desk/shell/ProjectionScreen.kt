@@ -281,10 +281,13 @@ private fun ProjectionSurfaceHost(
         contentAlignment = Alignment.Center,
     ) {
         val density = LocalDensity.current
+        // 尺寸直接取 BoxWithConstraints 的可用空间 —— "不超过屏幕"由它自己保证。
+        //
+        // 原来这里再 coerceAtMost(3200x1440)，那两个数是**某台机器的横屏分辨率**；
+        // 换一台分辨率更高的机器会把画面无谓裁小，换一台更低的又起不到限制作用。
+        // 上限这件事本来就该由"实际可用空间"说了算，不需要一个写死的数。
         val surfaceWidthPx = with(density) { maxWidth.roundToPx() }
-            .coerceAtMost(DeskDimens.PROJECTION_MAX_WIDTH_PX)
         val surfaceHeightPx = with(density) { maxHeight.roundToPx() }
-            .coerceAtMost(DeskDimens.PROJECTION_MAX_HEIGHT_PX)
 
         key(session) {
             AndroidView(

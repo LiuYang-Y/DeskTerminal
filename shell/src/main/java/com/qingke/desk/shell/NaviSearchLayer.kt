@@ -50,11 +50,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qingke.desk.core.data.NaviPlace
 import com.qingke.desk.core.data.ShellSettings
+import com.qingke.desk.core.ui.AdaptiveDimens
+import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.DeskGlass
+import com.qingke.desk.core.ui.LocalDeviceProfile
 import com.qingke.desk.core.ui.deskGlassOverlay
 // 扩展属性要单独 import：`import DeskGlass` 只把那个 object 带进来，
 // 挂在它上面的 `val DeskGlass.xxx` 仍在 core:ui 包里（SideBar.kt 同样是显式导入的）。
@@ -153,6 +157,8 @@ fun NaviSearchLayer(
 ) {
     val context = LocalContext.current
     val searcher = remember { PlaceSearch(context) }
+    // 会被屏幕尺寸影响的尺寸，全部在这里算一次，再往下传。
+    val metrics = rememberNaviMetrics()
     val routeState by NaviSession.route.collectAsState()
     // 策略是**会话**的状态而不是界面的：换策略会触发重算，界面只负责"点哪个"。
     val strategy by NaviSession.strategy.collectAsState()
@@ -221,8 +227,8 @@ fun NaviSearchLayer(
                     .align(Alignment.TopStart)
                     .padding(start = 20.dp, top = 10.dp, end = 20.dp)
                     .fillMaxWidth()
-                    .widthIn(max = PANEL_MAX_WIDTH)
-                    .heightIn(max = LIST_MAX_HEIGHT)
+                    .widthIn(max = metrics.panelMaxWidth)
+                    .heightIn(max = metrics.listMaxHeight)
                     .shadow(6.dp, panelShape)
                     // 用**文字面板**那一档不透明度（0.90）而不是搜索条那档（0.72）：
                     // 这面板里全是地点名与地址，底下地图的 POI 标注穿进来就成了"两张字叠一起"。
@@ -304,24 +310,27 @@ fun NaviSearchLayer(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(start = 20.dp, bottom = 14.dp)
-                    .widthIn(max = SEARCH_BAR_MAX_WIDTH),
+                    .widthIn(max = metrics.searchBarMaxWidth),
                 onToggle = { state.expanded = true },
             )
         }
 
         // ---- 3. 路线预览卡 ----
         //
-        // 只在「没展开联想面板」时显示：面板从顶部往下最多 250 dp，卡片从底部往上
-        // 也有三百出头，两者同时出现会在屏幕中段撞在一起（内容区只有 411 dp 高）。
+        // 只在「没展开联想面板」时显示：面板从顶部往下最多 [NaviMetrics.listMaxHeight]，
+        // 卡片从底部往上也有三百出头，两者同时出现会在屏幕中段撞在一起
+        // （横屏纵向预算就那么紧，411 dp 那台机器上是这样，361 dp 那台更紧）。
         // 用户点开搜索条的那一刻，他要的是重新选目的地，卡片留着也没用。
         if (destination != null && !state.expanded && routeState !is RouteState.Idle) {
             RoutePreviewCard(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     // 抬高到搜索条上方：搜索条最宽 320、卡片最宽 460，
-                    // 20+320+460+20 = 820 > 内容区 786 —— 同一行放不下，
-                    // 靠纵向错开而不是靠"祈祷宽度不超"。
+                    // 两者同一行放不下 —— 靠纵向错开而不是靠"祈祷宽度不超"。
+                    // （原来注释里写的"内容区 786"是某台机器的宽度，换机即失效；
+                    //   现在这个判断不再依赖任何具体数字。）
                     .padding(end = 20.dp, bottom = 14.dp + SEARCH_BAR_HEIGHT + 10.dp),
+                metrics = metrics,
                 destination = destination,
                 routeState = routeState,
                 strategy = strategy,
@@ -609,6 +618,7 @@ private fun CommuteChip(
 @Composable
 private fun RoutePreviewCard(
     modifier: Modifier = Modifier,
+    metrics: NaviMetrics,
     destination: PlaceSuggestion,
     routeState: RouteState,
     strategy: NaviSession.Strategy,
@@ -625,8 +635,8 @@ private fun RoutePreviewCard(
     val cardShape = RoundedCornerShape(18.dp)
     Box(
         modifier = modifier
-            .widthIn(max = PREVIEW_MAX_WIDTH)
-            .heightIn(max = PREVIEW_MAX_HEIGHT)
+            .widthIn(max = metrics.previewMaxWidth)
+            .heightIn(max = metrics.previewMaxHeight)
             .shadow(6.dp, cardShape)
             // 文字面板那一档（0.90）。这张卡是全屏地图上**唯一**要求逐位读数的地方：
             // 3 行 × 3 个数字要横向比较，任何一块透出来的白色 POI 标注都会毁掉其中一行。
@@ -698,6 +708,7 @@ private fun RoutePreviewCard(
                     options = routeState.options,
                     selectedIndex = routeState.selectedIndex,
                     onSelect = onSelectRoute,
+                    routeListMaxHeight = metrics.routeListMaxHeight,
                 )
             }
 
@@ -824,16 +835,19 @@ private fun RouteList(
     options: List<RouteOption>,
     selectedIndex: Int,
     onSelect: (Int) -> Unit,
+    routeListMaxHeight: Dp,
 ) {
     LazyColumn(
         modifier = Modifier
             .fillMaxWidth()
             // 限高 + 内部滚动：见 [RoutePreviewCard] 的说明。
-            .heightIn(max = ROUTE_LIST_MAX_HEIGHT),
+            // 高度由 [rememberNaviMetrics] 按可用高反推，**只给整行**
+            // （原来写死 164 = 52×3+4×2，矮屏上这一块会把动作行顶出卡片）。
+            .heightIn(max = routeListMaxHeight),
         // 行间距用 `spacedBy` 而不是每行后面塞一个 Spacer：
         // 行高必须能被整除成整数行 —— 否则最后一行会被切掉半行，
         // 半行里露出的"11 个红绿灯"正好贴在动作行上，看起来像两个控件叠在一起
-        // （`.verify/nav/R5-routes.png` 就是这样）。3 条 = 52×3 + 4×2 = 164 dp。
+        // （`.verify/nav/R5-routes.png` 就是这样）。
         verticalArrangement = Arrangement.spacedBy(ROUTE_ROW_GAP),
     ) {
         itemsIndexed(options) { index, option ->
@@ -935,39 +949,92 @@ private fun RouteOptionRow(
     }
 }
 
-// ---------- 尺寸常量 ----------
+// ---------- 尺寸 ----------
 //
-// 全部按**可用宽高反推**，不假设屏幕多大：内容区在基准机上是 786×411 dp 这一级，
-// 纵向很紧、横向很宽，所以"一行条 + 中上部面板"的分法比侧边抽屉合适。
+// **凡会被屏幕尺寸影响的，一律按可用宽高反推**（2026-10-13 改）。
+//
+// 改的直接原因：这一段原来写着"内容区在基准机上是 786×411 dp"，而 786 根本不是
+// 当前基准机的数（它是另一台机器的宽度），411 是另一台的高度。照着这组数字定出来的
+// `PREVIEW_MAX_HEIGHT = 332.dp`，换到 361 dp 高的机器上就放不下了 ——
+// 真机症状是"选了路线却看不到『开始导航』按钮"。
+//
+// 现在只有两类值还留成常量：
+//   · **组件自身的可读性下限**（行高、搜索条高、策略 chip 高）—— 它们与屏幕无关，
+//     是"这行文字/这个按钮自己需要多高"；
+//   · 会被屏幕影响的，全部挪进 [NaviMetrics]，由 [rememberNaviMetrics] 算。
 
 private val SEARCH_BAR_HEIGHT = 44.dp
-private val SEARCH_BAR_MAX_WIDTH = 320.dp
-private val LIST_MAX_HEIGHT = 250.dp
-private val PANEL_MAX_WIDTH = 420.dp
 private val ROW_HEIGHT = 48.dp
-private val PREVIEW_MAX_WIDTH = 460.dp
-
-/**
- * 预览卡整体限高。内容区纵向 411 dp，卡片下沿还要给搜索条让出 68 dp，
- * 所以理论天花板是 343 dp —— 取 332 留一点余量。
- *
- * 这个数**是被算出来的**，不是随手定的：本地三档策略最多回 3 条路线
- * （`routeIds=[12,13,14]` 实测），要让 3 条**整行**显示，卡片至少要
- * 28(内边距) + 19(目的地) + 15(副标题) + 8 + 30(策略行) + 8 + 164(3 行列表)
- * + 8 + 1(分隔线) + 4 + 40(动作行) = 325 dp。
- */
-private val PREVIEW_MAX_HEIGHT = 332.dp
-
-/** 路线列表限高：**正好 3 整行**（52×3 + 4×2 = 164），超出才滚动。 */
-private val ROUTE_LIST_MAX_HEIGHT = 164.dp
-
 private val ROUTE_ROW_HEIGHT = 52.dp
 
 /** 路线行间距。 */
 private val ROUTE_ROW_GAP = 4.dp
 
-/** 策略按钮高度。30 dp 是横屏手指一次点中的下限，再矮就变成"点不中"。 */
+/**
+ * 策略按钮高度。
+ *
+ * **诚实标注：30 dp 低于本工程的触控下限 64 dp**（[DeskDimens.minTouchTarget]）。
+ * 它是"推荐/最快/躲避拥堵"这类**次要**选择：主操作是下面那条"开始导航"（40+ dp），
+ * 策略行是选路时的微调。历史上它没被放大的原因是纵向预算实在太紧 —— 三档策略
+ * 各加到 64 dp 会吃掉 102 dp，在矮屏上直接把动作行挤没。
+ *
+ * 这条是**已知的例外，不是被遗漏的 bug**：真要改，得先解决"矮屏上预览卡放不下"
+ * 这个更根本的问题（现在靠 [NaviMetrics.previewMaxHeight] 按可用高收缩解决）。
+ */
 private val STRATEGY_CHIP_HEIGHT = 30.dp
+
+/**
+ * 会被屏幕尺寸影响的那一批尺寸。
+ *
+ * 由 [rememberNaviMetrics] 从**设备档案**（[LocalDeviceProfile]）算出来，
+ * 不再引用任何一台具体机器的宽度或高度。
+ *
+ * 内容区 = 整屏 − 挖孔 − 侧栏。侧栏宽度用 [DeskDimens.sideBarItemSize] 的上限估，
+ * 差几个 dp 不影响这里的结论（每个值都有上下限夹取）。
+ */
+private data class NaviMetrics(
+    val panelMaxWidth: Dp,
+    val listMaxHeight: Dp,
+    val searchBarMaxWidth: Dp,
+    val previewMaxWidth: Dp,
+    val previewMaxHeight: Dp,
+    val routeListMaxHeight: Dp,
+)
+
+@Composable
+private fun rememberNaviMetrics(): NaviMetrics {
+    val profile = LocalDeviceProfile.current
+    val contentWidthDp = (
+        profile.widthDp -
+            (DeskDimens.sideBarItemSize.value + DeskDimens.sideBarInnerPadding.value * 2f)
+        ).coerceAtLeast(240f)
+    // 内容区宽高都由 [DeviceProfile] 给出（系统栏与挖孔已扣），这里不再减挖孔。
+    val contentHeightDp = profile.heightDp.toFloat().coerceAtLeast(200f)
+
+    // 预览卡限高之后，剩下的才是路线列表能用的高度。
+    // 先按"预览卡内固定占掉的部分"估一个列表可用高：
+    // 28(内边距) + 19(目的地) + 15(副标题) + 8 + 30(策略行) + 8 + 8 + 1 + 4 + 40(动作行)
+    // = 161 dp 是卡片里不随列表变化的那一段。
+    val previewHeight = AdaptiveDimens.previewMaxHeight(contentHeightDp)
+    val routeListBudget = (previewHeight.value - PREVIEW_FIXED_PART_DP).coerceAtLeast(ROUTE_ROW_HEIGHT.value)
+
+    return NaviMetrics(
+        panelMaxWidth = AdaptiveDimens.searchPanelWidth(contentWidthDp),
+        listMaxHeight = AdaptiveDimens.searchListHeight(contentHeightDp),
+        searchBarMaxWidth = AdaptiveDimens.searchBarWidth(contentWidthDp),
+        previewMaxWidth = AdaptiveDimens.previewWidth(contentWidthDp),
+        previewMaxHeight = previewHeight,
+        routeListMaxHeight = AdaptiveDimens.routeListHeight(
+            availableHeightDp = routeListBudget,
+            rowHeightDp = ROUTE_ROW_HEIGHT.value,
+            rowGapDp = ROUTE_ROW_GAP.value,
+            maxRows = 3,
+        ),
+    )
+}
+
+/** 预览卡里不随路线列表变化的那一段高度（见 [rememberNaviMetrics] 里的算式）。 */
+private const val PREVIEW_FIXED_PART_DP: Float = 161f
 
 private const val SEARCH_DEBOUNCE_MILLIS = 300L
 

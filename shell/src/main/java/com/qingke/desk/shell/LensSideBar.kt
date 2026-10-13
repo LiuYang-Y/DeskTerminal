@@ -55,7 +55,11 @@ import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.highlight.Highlight
 import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.DeskGlass
+import com.qingke.desk.core.ui.LocalDeviceProfile
+import com.qingke.desk.core.ui.SidebarFit
+import com.qingke.desk.core.ui.SidebarFitLevel
 import com.qingke.desk.core.ui.deskGlassSurface
+import com.qingke.desk.core.ui.fitSidebar
 import com.qingke.desk.core.ui.indicatorAlpha
 import com.qingke.desk.shell.ShellItem
 import kotlinx.coroutines.launch
@@ -218,16 +222,50 @@ fun LensSideBar(
     backdrop: LayerBackdrop?,
     lensEnabled: Boolean,
     modifier: Modifier = Modifier,
+    /**
+     * 侧栏**真正**能用的纵向空间（dp）。调用方用 `BoxWithConstraints` 量出来传进来。
+     *
+     * 为什么不直接读 [com.qingke.desk.core.platform.DeviceProfile.heightDp]：
+     * 那是**窗口范围**（上界），比真实可画范围大 —— 基准机上是 411 dp vs 395 dp，
+     * 而 `wm size` 模拟 800×360 dp 那组差到 360 dp vs 344 dp。
+     * 按上界均分就会把最后一项排到屏幕外（实测被裁掉一截，见 step 6 截图）。
+     *
+     * 为 null 时退回档案值 —— 只在"没有确定容器可量"的调试页里发生。
+     */
+    availableHeightDp: Float? = null,
 ) {
     if (items.isEmpty()) return
 
     val density = LocalDensity.current
-    val stepPx = with(density) {
-        (DeskDimens.sideBarItemSize + DeskDimens.sideBarItemGap).toPx()
+
+    // ---- 条目尺寸按可用高度均分（2026-10-13 自适应框架）--------------------
+    //
+    // 原来 `sideBarItemSize` 是写死的 64dp，配套的算术是
+    // "5×64 + 4×6 + 2×6 = 356 ≤ 361" —— 只在 361dp 高的机器上成立。
+    // 换一台矮一点的机器这列就比屏幕高（第五项被挤掉），换高的又留一大段空。
+    //
+    // 现在交给 fitSidebar()：先均分，放不下标签就只留图标，再放不下就缩间距，
+    // **永不低于触控下限**；三级都退完还放不下时它返回 fitting=false，
+    // 这里按它给的 suggestedMaxItems 少显示几个入口（历史上 6 项 → 5 项就是这么做的：
+    // 宁可少一个入口，也不做点不中的小按钮）。
+    // 优先用**量出来的**容器高度（调用方给），没有才退回档案里的窗口上界。
+    val profile = LocalDeviceProfile.current
+    val railHeightDp = (availableHeightDp ?: profile.heightDp.toFloat()).coerceAtLeast(1f)
+    val fit = remember(railHeightDp, items.size) {
+        fitSidebar(
+            availableHeightDp = railHeightDp,
+            itemCount = items.size,
+        )
     }
-    val itemSizePx = with(density) { DeskDimens.sideBarItemSize.toPx() }
+    // fitting=false 时按"触控下限能排几个"截掉尾部入口。
+    // 被截掉的是最后几项（ newest 优先保留前几个主入口）。
+    val shownItems = if (fit.fitting) items else items.take(fit.suggestedMaxItems)
+    if (shownItems.isEmpty()) return
+
+    val stepPx = with(density) { (fit.itemSize + fit.gap).toPx() }
+    val itemSizePx = with(density) { fit.itemSize.toPx() }
     val innerPaddingPx = with(density) { DeskDimens.sideBarInnerPadding.toPx() }
-    val lastIndex = items.lastIndex
+    val lastIndex = shownItems.lastIndex
 
     val selectedIndex = items.indexOfFirst { it.id == selectedId }.let { if (it < 0) 0 else it }
 
@@ -274,8 +312,20 @@ fun LensSideBar(
     val active = lensEnabled && LensSpec.ENABLED
     val tier = remember { resolveLensTier() }
 
-    // 镜片尺寸：开启时 68dp（比项大 4），关闭时回到 64dp（= 改动前的指示块）。
-    val lensSize = if (active) LensSpec.lensSize else DeskDimens.sideBarItemSize
+    // 镜片尺寸：开启时比项大一点，关闭时回到条目尺寸（= 改动前的指示块）。
+    //
+    // 68dp 这个数原来是写死的，它的**约束**其实是"按下放大 1.12 倍之后不越出侧栏宽"，
+    // 而侧栏宽 = 条目边长 + 内边距×2 —— 条目边长现在按屏幕算了，这个数也得跟着算：
+    //   lensSize × 1.12 ≤ itemSize + 2×innerPadding
+    // 条目 64、内边距 6 时解得 67.86 ≈ 68，与原来的值对上。
+    // 另外夹一个 itemSize + 4 的上限，避免在很高的屏上镜片比条目大太多。
+    val lensSize = if (active) {
+        val maxByWidth = (fit.itemSize.value + DeskDimens.sideBarInnerPadding.value * 2f) /
+            (1f + LensSpec.PRESS_SCALE_EXTRA)
+        minOf(maxByWidth, fit.itemSize.value + 4f).dp
+    } else {
+        fit.itemSize
+    }
     val lensOverhangPx = with(density) {
         ((lensSize - DeskDimens.sideBarItemSize) / 2).toPx()
     }
@@ -298,7 +348,8 @@ fun LensSideBar(
 
     Box(
         modifier = modifier
-            .width(DeskDimens.sideBarWidth)
+            // 宽度跟着**实际**条目尺寸走（原来取写死的 sideBarWidth 76dp）。
+            .width(fit.itemSize + DeskDimens.sideBarInnerPadding * 2)
             .deskGlassSurface(
                 backdrop = backdrop,
                 shape = { RoundedCornerShape(DeskDimens.sideBarCorner) },
@@ -345,6 +396,8 @@ fun LensSideBar(
     ) {
         // 镜片画在条目**下层**：它是"选中项后面的一块透镜"，镜内副本由它自己带。
         //
+        // （纵向定位的说明见下；条目尺寸现在由 [fit] 给，不读 DeskDimens.sideBarItemSize。）
+        //
         // 纵向要减掉 overhang：镜片比项高 8dp，不减会让它整体偏下 4dp，
         // 镜内副本就会与它"罩住"的那一项错开半个身位。
         // 外层先占一个"跟条目一样大"的盒子，跟着 indicator 走；镜片再在这个盒子里
@@ -359,7 +412,7 @@ fun LensSideBar(
         Box(
             modifier = Modifier
                 .offset { IntOffset(0, (indicatorState.value * stepPx).roundToInt()) }
-                .size(DeskDimens.sideBarItemSize),
+                .size(fit.itemSize),
             contentAlignment = Alignment.Center,
         ) {
         Box(
@@ -448,7 +501,11 @@ fun LensSideBar(
                                         )
                                     },
                             ) {
-                                LensGlyph(item = items[i], tint = MaterialTheme.colorScheme.primary)
+                                LensGlyph(
+                                    item = shownItems[i],
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    fit = fit,
+                                )
                             }
                         }
                     }
@@ -458,9 +515,9 @@ fun LensSideBar(
         }
 
         Column(
-            verticalArrangement = Arrangement.spacedBy(DeskDimens.sideBarItemGap),
+            verticalArrangement = Arrangement.spacedBy(fit.gap),
         ) {
-            items.forEachIndexed { index, item ->
+            shownItems.forEachIndexed { index, item ->
                 val selected = item.id == selectedId
                 // 开启透镜时，镜外一律原色（染色只发生在镜内）；
                 // 关闭时恢复改动前的规则：选中项在列内染强调色。
@@ -482,6 +539,7 @@ fun LensSideBar(
                     LensRailItem(
                         item = item,
                         tint = tint,
+                        fit = fit,
                         onClick = { onSelect(item) },
                     )
                 }
@@ -561,9 +619,10 @@ private fun Modifier.lensGlass(
 private fun LensGlyph(
     item: ShellItem,
     tint: Color,
+    fit: SidebarFit,
 ) {
     Box(
-        modifier = Modifier.size(DeskDimens.sideBarItemSize),
+        modifier = Modifier.size(fit.itemSize),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -571,15 +630,19 @@ private fun LensGlyph(
                 imageVector = item.icon,
                 contentDescription = null,
                 tint = tint,
-                modifier = Modifier.size(DeskDimens.sideBarIconSize),
+                modifier = Modifier.size(fit.iconSize),
             )
-            Spacer(modifier = Modifier.height(3.dp))
-            Text(
-                text = item.label,
-                fontSize = DeskDimens.sideBarLabel,
-                color = tint,
-                maxLines = 1,
-            )
+            // 放不下文字标签时（[SidebarFitLevel.ICON_ONLY]）这一行整段不画 ——
+            // 不是把字号缩到看不见，而是**只留图标**：半截标签比没有标签更难看。
+            if (fit.showLabel) {
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = item.label,
+                    fontSize = fit.labelSize,
+                    color = tint,
+                    maxLines = 1,
+                )
+            }
         }
     }
 }
@@ -594,11 +657,12 @@ private fun LensGlyph(
 private fun LensRailItem(
     item: ShellItem,
     tint: Color,
+    fit: SidebarFit,
     onClick: () -> Unit,
 ) {
     Box(
         modifier = Modifier
-            .size(DeskDimens.sideBarItemSize)
+            .size(fit.itemSize)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -611,15 +675,17 @@ private fun LensRailItem(
                 imageVector = item.icon,
                 contentDescription = item.label,
                 tint = tint,
-                modifier = Modifier.size(DeskDimens.sideBarIconSize),
+                modifier = Modifier.size(fit.iconSize),
             )
-            Spacer(modifier = Modifier.height(3.dp))
-            Text(
-                text = item.label,
-                fontSize = DeskDimens.sideBarLabel,
-                color = tint,
-                maxLines = 1,
-            )
+            if (fit.showLabel) {
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = item.label,
+                    fontSize = fit.labelSize,
+                    color = tint,
+                    maxLines = 1,
+                )
+            }
         }
     }
 }

@@ -192,7 +192,7 @@ fun AMapPrivacyCard(
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             // 面板可能很窄（原来 3:4 那块只有 230 dp 宽），横向预算得先看一眼。
-            val narrow = maxWidth < 300.dp
+            val narrow = maxWidth < NARROW_PANEL_WIDTH
             val body = if (narrow) 12.sp else 14.sp
             val edge = if (narrow) 14.dp else 20.dp
             val topPadding = if (topInset > edge) topInset else edge
@@ -376,7 +376,7 @@ fun AMapPrivacyPlaceholder(
         ),
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val narrow = maxWidth < 300.dp
+            val narrow = maxWidth < NARROW_PANEL_WIDTH
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -421,3 +421,19 @@ fun AMapPlaceholder(
         )
     }
 }
+
+/**
+ * 判"窄面板"的宽度阈值。
+ *
+ * **这一条刻意不改成按屏幕比例**（2026-10-13 自查结论）：它不是"屏幕有多宽"的判断，
+ * 而是"这块面板自己需要多宽"的判断 —— 窄于 300 dp 时两栏并排会把文字压成两三个字
+ * 一行，必须改成上下堆叠。这类"组件自身的可读性下限"与屏幕尺寸无关，写死是对的。
+ *
+ * 从原来散在两处的 `maxWidth < 300.dp` 提到这里并写清理由，是为了不再出现
+ * "同一个魔法数字在两处各写一遍、改了一处忘了另一处"。
+ *
+ * 没有挪到 `core:ui` 的 `AdaptiveDimens` 里，是因为 :map 刻意不依赖 :core:ui
+ * （见 map/build.gradle.kts：**这个模块不画自家的设计语言**），为这一个阈值
+ * 破坏那条依赖约束不划算。
+ */
+private val NARROW_PANEL_WIDTH = 300.dp

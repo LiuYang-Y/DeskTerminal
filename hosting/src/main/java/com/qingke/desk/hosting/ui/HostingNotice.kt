@@ -1,5 +1,6 @@
 package com.qingke.desk.hosting.ui
 
+import com.qingke.desk.core.ui.AdaptiveDimens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -69,7 +70,7 @@ fun HostingNotice(
         // 就得从步骤里挤出来，而步骤是被裁得最难看的一块。
         Surface(
             modifier = Modifier
-                .widthIn(max = 560.dp)
+                .widthIn(max = AdaptiveDimens.noticeMaxWidth(maxWidth.value))
                 .heightIn(max = maxCardHeight)
                 .padding(12.dp),
             shape = RoundedCornerShape(20.dp),

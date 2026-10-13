@@ -475,44 +475,87 @@ private fun RowScope.CommuteSlot(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = if (set) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                Color.White.copy(alpha = 0.28f)
-            },
-            modifier = Modifier.size(24.dp),
-        )
-        Spacer(modifier = Modifier.height(6.dp))
-        Text(
-            text = label,
-            fontSize = 14.sp,
-            color = if (set) {
-                MaterialTheme.colorScheme.onSurface
-            } else {
-                Color.White.copy(alpha = 0.4f)
-            },
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(modifier = Modifier.height(2.dp))
-        Text(
-            // 已设置时第二行显示**地点名**（"回家 · 楼观新镇"这种口径太挤，
-            // 卡片只有 205×150，宁可让第一行是动作、第二行是地名）。
-            text = title ?: "设置地址",
-            fontSize = 12.sp,
-            color = if (set) {
-                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-            } else {
-                Color.White.copy(alpha = 0.28f)
-            },
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        // ---- 尺寸按**可用高度**反推（2026-10-13 自适应框架）-------------------
+        //
+        // 原先这里全是写死的：图标 24dp、字 14sp / 12sp、间距 6dp / 2dp，
+        // 整摞自然高度约 73 dp。卡片高的时候没事，卡片一矮就出事 ——
+        // 列是顺序测量的：图标和第一行先拿走它们的固有高度，剩下的才给副标题，
+        // 不够就被裁。真机实测（`wm size 900x2000` → 571×257 dp，单卡 98.6 dp、
+        // 槽位 70.6 dp）：副标题的墨迹下边距只剩 **1 px**、字高 27 px（应约 40 px），
+        // 截图里"渭水佳苑"下半截直接没了。而同一张卡上 14sp 的「回家」下边距还有 19 px ——
+        // 所以不是字体问题，是高度不够。
+        //
+        // 修法与时钟卡/天气卡同一套路：从可用高度反推一个缩放系数。
+        // 分母 78 dp = 上面那摞的自然高度（73）留约 7% 余量；上限 1 保证
+        // **空间充足时与改动前逐像素一致**（基准机 411 dp 高时槽位 147.7 dp → 系数 1）。
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val available = maxHeight.value
+            val scale = (available / COMMUTE_NATURAL_HEIGHT_DP).coerceIn(0.5f, 1f)
+            // 高度实在不够（< 45 dp）时先舍副标题，保住"回家 / 去公司"这两个动作名 ——
+            // 与侧栏"放不下标签就只留图标"同一条取舍原则：宁可少给信息，不给半个字。
+            val showTitle = available >= 45f
+
+            // ⚠ 这层 Column 不能省：`BoxWithConstraints` 的容器是 **Box**，
+            // 它把子项**叠放**在左上角，不是竖排。第一版就是直接把
+            // Icon/Spacer/Text 写进 Box，结果三行字互相压在一起
+            // （截图 .verify/reg/step6/crop-fix-p1.png 一眼可见）。
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (set) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        Color.White.copy(alpha = 0.28f)
+                    },
+                    modifier = Modifier.size((24f * scale).dp),
+                )
+                Spacer(modifier = Modifier.height((6f * scale).dp))
+                Text(
+                    text = label,
+                    fontSize = (14f * scale).sp,
+                    color = if (set) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        Color.White.copy(alpha = 0.4f)
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (showTitle) {
+                    Spacer(modifier = Modifier.height((2f * scale).dp))
+                    Text(
+                        // 已设置时第二行显示**地点名**（"回家 · 楼观新镇"这种口径太挤，
+                        // 卡片只有 205×150，宁可让第一行是动作、第二行是地名）。
+                        text = title ?: "设置地址",
+                        fontSize = (12f * scale).sp,
+                        color = if (set) {
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        } else {
+                            Color.White.copy(alpha = 0.28f)
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
     }
 }
+
+/**
+ * [CommuteSlot] 里"图标 + 两个间距 + 两行字"的自然高度（dp）。
+ *
+ * 按 14sp/12sp 在 560 dpi 上的实测行高反推：
+ * 图标 24 + 间距 6 + 动作名约 24 + 间距 2 + 地点名约 17 ≈ 73。
+ * 取 78 是给它留约 7% 余量 —— 卡着 73 去分配，余量为 0，等于把
+ * "差 1 px 就被裁"的老问题原样搬回来。
+ */
+private const val COMMUTE_NATURAL_HEIGHT_DP = 78f
 
 /**
  * 占位卡底色：比卡片色再灰一档。

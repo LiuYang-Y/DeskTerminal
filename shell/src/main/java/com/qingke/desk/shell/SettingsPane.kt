@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -28,13 +29,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qingke.desk.core.data.SidebarSide
+import com.qingke.desk.core.platform.EffectLevel
+import com.qingke.desk.core.platform.EffectTier
+import com.qingke.desk.core.ui.AdaptiveDimens
 import com.qingke.desk.core.ui.DeskDimens
+import com.qingke.desk.core.ui.LocalDeviceProfile
 import com.qingke.desk.hosting.ShizukuStatus
 import com.qingke.desk.hosting.ui.statusLabel
 
@@ -82,6 +86,13 @@ fun SettingsPane(
     keepScreenOn: Boolean,
     amapAgreed: Boolean,
     shizukuStatus: ShizukuStatus,
+    /** 用户选的效果等级。 */
+    effectLevel: EffectLevel = EffectLevel.AUTO,
+    /** 当前实际生效的档位。 */
+    effectTier: EffectTier = EffectTier.HIGH,
+    /** 一行状态说明，由 Governor 给。 */
+    effectStatusLine: String = "",
+    onEffectLevelChange: (EffectLevel) -> Unit = {},
     onSidebarSideChange: (SidebarSide) -> Unit,
     onKeepScreenOnChange: (Boolean) -> Unit,
     onRevokeAmapConsent: () -> Unit,
@@ -94,18 +105,34 @@ fun SettingsPane(
     // 面板现在与齿轮**并列**（见 DeskRoot 里的定位），所以不再减齿轮那一行 ——
     // 这也是四项设置能一屏放下的原因（之前减掉 60 dp，最后一项被挤出屏幕）。
     //
-    // 这个上限不是"设计成这么高"，而是**兜底**：横屏只有 411 dp，一旦系统字号被调大、
+    // 这个上限不是"设计成这么高"，而是**兜底**：横屏只有 361 dp，一旦系统字号被调大、
     // 或者以后加第五项，没有上限就会从屏幕下沿漏出去（实测过，见
     // .verify/settings/15-pane-3items.png）。有了它，内容再高也只是面板内部滚动，
-    // 不会顶穿屏幕。高度用屏幕高反推而不是写死，换机器不用改。
-    val screenHeightDp = LocalConfiguration.current.screenHeightDp.dp
-    val maxPaneHeight = screenHeightDp -
+    // 不会顶穿屏幕。
+    //
+    // 高度用**设备档案**反推而不是读 LocalConfiguration：后者在"应用内模拟尺寸"
+    // （调试页）时不跟着变，会出现"面板按真机高度算、内容按模拟尺寸排"的错位。
+    val profile = LocalDeviceProfile.current
+    val maxPaneHeight = profile.heightDp.dp -
         DeskDimens.statusChipTopPadding -
         DeskDimens.statusChipSidePadding
 
+    // 宽度由内容区反推（替代写死的 380.dp）：内容区 = 整屏 − 侧栏。
+    //
+    // **不再减挖孔**：`DeviceProfile.widthDp` 已经是"内容区"宽（系统栏与挖孔都扣过了，
+    // 见 DeviceProfile 的 readContentSize）。这里再减一次就是扣两遍。
+    //
+    // 侧栏那一项按最宽的情况估（[DeskDimens.sideBarItemSize] 的上限 76dp + 内边距），
+    // 这里只需要一个"够用的保守值" —— 浮层宽度本来就有上下限夹取，
+    // 差几个 dp 不会让"切到左侧/右侧"两个按钮换行。
+    val contentWidthDp = (
+        profile.widthDp -
+            (DeskDimens.sideBarItemSize.value + DeskDimens.sideBarInnerPadding.value * 2f)
+        ).coerceAtLeast(240f)
+
     Card(
         modifier = modifier
-            .width(DeskDimens.settingsPaneWidth)
+            .width(AdaptiveDimens.settingsPaneWidth(contentWidthDp))
             .heightIn(max = maxPaneHeight),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
@@ -157,6 +184,28 @@ fun SettingsPane(
                 Switch(
                     checked = keepScreenOn,
                     onCheckedChange = onKeepScreenOnChange,
+                )
+            }
+
+            Spacer(modifier = Modifier.height(DeskDimens.settingsItemGap))
+
+            // 效果等级（2026-10-13 加）。
+            //
+            // 放"自动/高/中/低/关"五档而不是只给一个开关：同一台机器上"效果好不好看"
+            // 和"机器扛不扛得住"是两件事，有人愿意为了省电直接锁到低档，
+            // 也有人机器够强想一直锁高档。AUTO 是默认 —— 设备能力 + 运行时温度/掉帧
+            // 自己决定，用户不介入也能用。
+            //
+            // help 里显示的是**当前实际生效的档位**（不是用户选的等级）：
+            // 选了 AUTO 但机器正热的时候，用户需要看到"现在是中档、为什么是中档"，
+            // 否则会以为自己选的没生效。
+            SettingsItemStacked(
+                title = "效果等级",
+                help = effectStatusLine.ifBlank { "当前：${effectTier.label}" },
+            ) {
+                EffectLevelPicker(
+                    current = effectLevel,
+                    onPick = onEffectLevelChange,
                 )
             }
 
@@ -299,6 +348,100 @@ private fun SettingsItem(
         control()
     }
 }
+
+/**
+ * 一行设置的标题 + 说明 + **独占一行的控件**。
+ *
+ * 与 [SettingsItem] 的差别是控件不放在右侧而是另起一行：五档的 segmented 控件
+ * 横向要 230dp 以上，和标题挤在一行会把标题压成省略号。
+ * 代价是多占约 34dp 纵向 —— 面板本来就有 [maxPaneHeight] 兜底 + 内部滚动，付得起。
+ */
+@Composable
+private fun SettingsItemStacked(
+    title: String,
+    help: String,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        Text(
+            text = title,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(modifier = Modifier.height(3.dp))
+        Text(
+            text = help,
+            fontSize = 12.sp,
+            // 与 [SettingsItem] 同一个理由：只允许一行，写不进就改文案。
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        content()
+    }
+}
+
+/**
+ * 效果等级五选一。
+ *
+ * 用一排按钮而不是下拉框：五个选项全部平铺，用户一眼看到有哪些档、以及当前在哪一档，
+ * 不需要先点开才知道。选项数固定为 5 且不会增长，平铺的代价是划算的。
+ *
+ * 按钮上用的是**短标签**（自动/高/中/低/关），完整说明写在 help 里 ——
+ * 平铺五个按钮时横向预算只够两三个字。
+ */
+@Composable
+private fun EffectLevelPicker(
+    current: EffectLevel,
+    onPick: (EffectLevel) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        EffectLevel.entries.forEach { level ->
+            val selected = level == current
+            // weight(1f) 让五个按钮自己分宽度：面板宽度是按屏幕反推的，
+            // 窄屏上按钮跟着变窄，不会挤出去。
+            Button(
+                onClick = { onPick(level) },
+                modifier = Modifier.weight(1f).height(32.dp),
+                contentPadding = PaddingValues(horizontal = 2.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (selected) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    },
+                    contentColor = if (selected) {
+                        MaterialTheme.colorScheme.onPrimary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                ),
+            ) {
+                Text(
+                    text = EFFECT_LEVEL_SHORT[level] ?: level.label,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+/** 五档在按钮上的短标签。平铺时横向只够两三个字。 */
+private val EFFECT_LEVEL_SHORT: Map<EffectLevel, String> = mapOf(
+    EffectLevel.AUTO to "自动",
+    EffectLevel.HIGH to "高",
+    EffectLevel.MEDIUM to "中",
+    EffectLevel.LOW to "低",
+    EffectLevel.OFF to "关",
+)
 
 /**
  * 侧栏左/右二选一。
