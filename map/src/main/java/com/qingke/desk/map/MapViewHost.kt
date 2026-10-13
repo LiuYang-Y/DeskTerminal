@@ -1,12 +1,10 @@
 package com.qingke.desk.map
 
-import android.os.Bundle
 import android.view.ViewGroup
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import com.amap.api.maps.AMap
-import com.amap.api.maps.MapView
 import com.amap.api.maps.MapsInitializer
 
 /**
@@ -38,7 +36,7 @@ class MapViewHost(
 ) {
 
     @Volatile
-    private var view: MapView? = null
+    private var view: AMapSurface? = null
 
     @Volatile
     private var observer: LifecycleEventObserver? = null
@@ -73,7 +71,7 @@ class MapViewHost(
      * @param onAttachCount 每次真正挂上（包括重挂）时回调，用于观察"有没有重建"。
      */
     @Synchronized
-    fun acquire(): MapView? {
+    fun acquire(): AMapSurface? {
         if (destroyed) {
             MapLog.w("host: acquire after destroy -> refused")
             return null
@@ -91,37 +89,44 @@ class MapViewHost(
             // 再叫醒它 —— Activity 的生命周期压根没变，观察者自然不会重发 ON_RESUME。
             // 现象就是"从首页点进全屏页，地图整块黑"，而且拖动也不刷新（渲染根本没跑）。
             // 用 post：attach 发生在本帧之后，直接同步调 onResume 会打在还没挂上的 view 上。
+            //
+            // ⚠️ 这一段**只解决"整块不渲染"**，不解决"渲染出来了、但视口停在旧尺寸"
+            // （右侧一条纯黑）。后者 2026-10-14 由 [AMapSurface] 换纹理版解决：
+            // 当时先试的是在这里补一次 onPause，6 次只有 1 次生效 —— 时序赌博，已放弃。
             resumeAfterAttach(existing)
             return existing
         }
-        // 重挂后黑屏的候选解法（2026-10-12）：
-        // 高德给了几个开关来改变"被 detach 时内部纹理被销毁"的行为，先打开试试，
-        // 看能不能让"重挂"之后自己恢复渲染。
+        // 下面两个开关是给 SDK 的**纹理路径**准备的（管"被 detach 时内部纹理怎么处理"）。
         //
-        // 更正一条旧说法：这里原先写着"高德 MapView 内部是 TextureView" —— 那是**推断**，
-        // 后来实测不成立：`dumpsys SurfaceFlinger --list` 里有独立层
-        // `SurfaceView - com.qingke.desk/...MainActivity#1`，`dumpsys activity` 的
-        // View Hierarchy 也在 `com.amap.api.maps.MapView{0,0-2755,1440}` 这一级终止。
-        // 本机走的是 **GL SurfaceView（打洞独立图层）**，这几个 `setTexture*` 开关
-        // 是给 SDK 内部的纹理路径准备的，对当前路径未必生效（保留无害，重挂恢复确实做到了）。
-        // 这个事实的另一个后果：地图浮层做不了真背景模糊，见 core/ui 的 DeskGlass.kt。
+        // 2026-10-14 起默认就走纹理路径了（[AMapSurface] 用 `TextureMapView`，理由见那个类
+        // 顶部注释），所以这两个开关**现在是真生效的**，不再只是"保留无害"。
+        // 仍然 runCatching 兜住：万一某个版本的 so 不认，也只是"没生效"，不能把地图整没了。
+        //
+        // 顺带更正两条历史说法，免得以后又绕回来：
+        //  · "高德 MapView 内部是 TextureView" —— 对**旧的普通 `MapView` 那条路不成立**
+        //    （`dumpsys SurfaceFlinger --list` 有独立层 `SurfaceView - .../MainActivity#1`，
+        //    View Hierarchy 在 `com.amap.api.maps.MapView{...}` 这一级终止）；
+        //  · 但"地图浮层做不了真背景模糊"**仍然成立，而且换成纹理版也一样**：
+        //    `AndroidView` 走 `dispatchDraw`、Compose 玻璃层在 `onDraw` 录制，顺序对不上。
+        //    见 `core/ui` 的 `DeskGlass.kt`。
         runCatching { MapsInitializer.setTextureViewDestorySync(true) }
             .onFailure { MapLog.w("setTextureViewDestorySync failed: ${it.javaClass.simpleName}") }
         runCatching { MapsInitializer.setTextureDestroyedRender(true) }
             .onFailure { MapLog.w("setTextureDestroyedRender failed: ${it.javaClass.simpleName}") }
 
-        val created = runCatching {
-            MapView(context).apply { onCreate(Bundle()) }
-        }.onFailure {
-            MapLog.e("host: MapView create failed", it)
-        }.getOrElse { return null }
+        val created = runCatching { AMapSurface.create(context) }
+            .onFailure { MapLog.e("host: map view create failed", it) }
+            .getOrElse { return null }
 
         createCount++
         attachCount++
         refCount++
         view = created
         observeLifecycle()
-        MapLog.i("host: MapView created (create=$createCount attach=$attachCount refs=$refCount)")
+        MapLog.i(
+            "host: map view created (create=$createCount attach=$attachCount refs=$refCount " +
+                "kind=${created.kind})",
+        )
         return created
     }
 
@@ -150,18 +155,20 @@ class MapViewHost(
      * 这时候 `onResume()` 打在一个游离的 view 上，高德那边不会真的重启渲染循环。
      * post 的 runnable 会排在 attach 之后执行。
      */
-    private fun resumeAfterAttach(target: MapView) {
-        target.post {
+    private fun resumeAfterAttach(target: AMapSurface) {
+        target.view.post {
             if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
                 MapLog.i("host: skip resume (lifecycle not resumed)")
                 return@post
             }
             runCatching { target.onResume() }
                 .onFailure { MapLog.w("host: onResume after attach failed: ${it.javaClass.simpleName}") }
-            // 诊断：重挂后到底有没有父容器、容器多大。父容器为 null 就是黑屏的直接证据。
-            val parent = target.parent as? android.view.View
-            val size = if (target.width > 0 && target.height > 0) {
-                "${target.width}x${target.height}"
+            // 诊断：重挂后到底有没有父容器、容器多大、地图块自己多大。
+            // 三者对不上就是黑屏的直接证据（2026-10-14 在一加上靠这三行定位到
+            // "视口停在首页卡宽度" —— 容器 2332px 而画面只画到 1883px）。
+            val parent = target.view.parent as? android.view.View
+            val size = if (target.view.width > 0 && target.view.height > 0) {
+                "${target.view.width}x${target.view.height}"
             } else {
                 "unsized"
             }
@@ -220,8 +227,8 @@ class MapViewHost(
         MapLog.i("host: destroy (create=$createCount attach=$attachCount detach=$detachCount)")
     }
 
-    private fun detachFromParent(target: MapView) {
-        (target.parent as? ViewGroup)?.removeView(target)
+    private fun detachFromParent(target: AMapSurface) {
+        (target.view.parent as? ViewGroup)?.removeView(target.view)
     }
 
     /**

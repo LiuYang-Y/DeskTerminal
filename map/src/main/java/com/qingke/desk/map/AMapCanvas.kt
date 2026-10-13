@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
-import android.os.Bundle
 import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,7 +26,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.amap.api.maps.AMap
 import com.amap.api.maps.CameraUpdateFactory
-import com.amap.api.maps.MapView
 import com.amap.api.maps.model.LatLng
 import com.amap.api.maps.model.MyLocationStyle
 import com.qingke.desk.core.data.GeoPoint
@@ -66,13 +64,15 @@ const val MAP_PREVIEW_FPS: Int = 15
 const val MAP_FULL_FPS: Int = 30
 
 /**
- * 把高德的 `MapView` 包成 Compose 组件。
+ * 把高德的地图 View 包成 Compose 组件。
  *
  * 三件必须做对的事：
  *
- * 1. **生命周期转发**。`MapView` 是传统 View，它靠 `onCreate/onResume/onPause/onDestroy`
+ * 1. **生命周期转发**。地图 View 是传统 View，它靠 `onCreate/onResume/onPause/onDestroy`
  *    管理自己的渲染线程与定位客户端。传了 [host] 时由 [MapViewHost] 统一转发一次；
  *    没传（预览页等独立场景）才在这里自己注册一个观察者。
+ *    具体用的是 `TextureMapView` 还是 `MapView` 由 [AMapSurface] 决定 ——
+ *    2026-10-14 起默认纹理版（普通版的 GL 视口会停在旧尺寸，跨尺寸重挂后右侧纯黑）。
  *
  * 2. **必须在 [AMapPrivacy] 合规通过之后再构造**。所以本组件只应该从 [MapPane]
  *    里被调起，它保证了"先弹隐私政策、同意后才挂地图"。
@@ -80,7 +80,7 @@ const val MAP_FULL_FPS: Int = 30
  * 3. **不要假设自己有多大**。地图可以铺满一块任意尺寸的区域，
  *    这里只吃外面传进来的 `modifier`，不写死宽高 —— 首页怎么摆放是 :shell 的事。
  *
- * @param host 单实例宿主。传了就复用同一个 `MapView`（首页卡 ↔ 全屏页来回切不重建），
+ * @param host 单实例宿主。传了就复用同一块地图 View（首页卡 ↔ 全屏页来回切不重建），
  *             并且 `onDispose` 只解挂、不销毁。不传则退回"每次出现都新建"的旧行为。
  * @param preview 预览模式：关掉全部手势、吞掉 View 层触摸、不显示罗盘。
  *                首页卡片用，避免和横滑翻页抢手势（详见 [com.qingke.desk.shell.HomeScreen]）。
@@ -146,9 +146,8 @@ fun AMapCanvas(
     // 没有 host 时保持旧行为：remember 一次、离开组合时销毁 —— 预览页和探针页走这条。
     val ownedView = if (host == null) {
         remember {
-            MapView(context).apply {
-                onCreate(Bundle())
-                MapLog.i("MapView created (standalone)")
+            AMapSurface.create(context).also {
+                MapLog.i("map view created (standalone, kind=${it.kind})")
             }
         }
     } else {
@@ -160,7 +159,7 @@ fun AMapCanvas(
     // view 从旧父容器摘下来（否则 attach 时抛 already has a parent）—— 于是每次重组
     // 都"摘一次、再挂回去"，日志里表现为 attach 一路涨到 2、4、8…（真机实测过），
     // 画面就是闪。放进 remember 之后，acquire 与 release 才成对。
-    val mapView: MapView? = remember(host) { host?.acquire() } ?: ownedView
+    val mapView: AMapSurface? = remember(host) { host?.acquire() } ?: ownedView
     if (mapView == null) {
         AMapPlaceholder(modifier = modifier, text = "地图不可用")
         return
@@ -196,18 +195,18 @@ fun AMapCanvas(
     AndroidView(
         factory = {
             MapLog.i(
-                "MapView attached, style=${style.name} preview=$preview " +
-                    "(host=${host != null})",
+                "map view attached, style=${style.name} preview=$preview " +
+                    "(host=${host != null} kind=${mapView.kind})",
             )
             mapView.map.setOnMapLoadedListener { MapLog.i("map loaded (tiles on screen)") }
-            // 预览卡把 MapView 塞进一层"拦下来但不消费"的容器里，见 [TouchTransparentLayout]。
-            // 只关 uiSettings 是不够的：MapView 就算不解释手势，它的 onTouchEvent 仍会返回
+            // 预览卡把地图塞进一层"拦下来但不消费"的容器里，见 [TouchTransparentLayout]。
+            // 只关 uiSettings 是不够的：地图 View 就算不解释手势，它的 onTouchEvent 仍会返回
             // true（消费），而 Compose 的 Main pass 是"子先父后"—— 子消费掉之后
             // Pager 就再也收不到这一串事件，横滑翻页在地图卡上直接失效。
             if (preview) {
                 TouchTransparentLayout(context).apply {
                     addView(
-                        mapView,
+                        mapView.view,
                         ViewGroup.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -215,7 +214,7 @@ fun AMapCanvas(
                     )
                 }
             } else {
-                mapView
+                mapView.view
             }
         },
         modifier = modifier.onSizeChanged { mapViewport = it },
