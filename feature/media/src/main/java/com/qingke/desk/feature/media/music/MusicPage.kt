@@ -17,11 +17,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -56,6 +58,7 @@ import com.qingke.desk.feature.media.music.online.QqLoginState
 import com.qingke.desk.feature.media.music.online.QqLibraryState
 import com.qingke.desk.feature.media.music.online.QqLog
 import com.qingke.desk.feature.media.music.online.isUsableCredential
+import com.qingke.desk.feature.media.music.spectrum.SpectrumControl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -133,6 +136,12 @@ fun MusicPage(
      * 此时"选歌"入口不出现 —— 页面不认识 ExoPlayer，只认识这个抽象。
      */
     library: QqMusicLibrary? = null,
+    /**
+     * PCM 频谱旁路（第 3 步）。null = 壳层没挂 QQ 自播源，圆环按满幅观感走
+     * （与没有频谱数据的历史行为一致）。门控由本页驱动 —— 它是唯一同时知道
+     * "播放中 / 页面可见 / 效果档位"三件事的地方。
+     */
+    spectrum: SpectrumControl? = null,
 ) {
     val context = LocalContext.current
     val tier = LocalEffectTier.current
@@ -279,6 +288,37 @@ fun MusicPage(
         periodMs = wave.periodMs,
     )
 
+    // ---- 频谱电平（第 3 步）------------------------------------------------
+    //
+    // TeeAudioProcessor.level 写在播放线程（每个 PCM 缓冲一次，约 30Hz）。
+    // **不 collect 进组合**（那会是每秒 30 次重组）—— 与呼吸相位同一条路：
+    // 写进快照态、只在绘制期读，写入触发的只是重绘。
+    //
+    // spectrum 为 null 时保持 1（满幅观感，即没有频谱时的历史行为）。
+    val amplitude = remember { mutableFloatStateOf(1f) }
+    LaunchedEffect(spectrum) {
+        if (spectrum == null) {
+            amplitude.floatValue = 1f
+            return@LaunchedEffect
+        }
+        amplitude.floatValue = spectrum.level.value
+        spectrum.level.collect { amplitude.floatValue = it }
+    }
+
+    // 门控三条件由本页驱动（可停算）：播放中 && 页面在组合里（可见）&& 这一档有圆环。
+    // 三者任一不成立，TeeAudioProcessor.queueInput 首行早退、零分析（计数器取证）。
+    LaunchedEffect(spectrum, track?.isPlaying, wave.rings) {
+        spectrum?.setGates(
+            playing = track?.isPlaying == true,
+            visible = true,
+            enabled = wave.rings > 0,
+        )
+    }
+    // 页面离开组合（切去别的屏）：三门全关。onDispose 是"页面不可见"的唯一判据。
+    DisposableEffect(spectrum) {
+        onDispose { spectrum?.setGates(playing = false, visible = false, enabled = false) }
+    }
+
     // ---- 防烧屏微位移 ------------------------------------------------------
     //
     // 与首页同一套：走挂钟时间纯函数，所以配置重建（旋转、`wm size`）不会让位置跳变。
@@ -342,6 +382,7 @@ fun MusicPage(
             maxRadius = metrics.waveMaxRadiusDp,
             accent = visual.accent,
             phase = phase,
+            amplitude = amplitude,
             driftX = driftX,
             driftY = driftY,
         )

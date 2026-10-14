@@ -10,9 +10,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.RenderersFactory
 import com.qingke.desk.feature.media.music.online.QqCredential
 import com.qingke.desk.feature.media.music.online.QqDeviceFactory
 import com.qingke.desk.feature.media.music.online.QqDeviceProfile
@@ -24,6 +22,9 @@ import com.qingke.desk.feature.media.music.online.QqQuality
 import com.qingke.desk.feature.media.music.online.QqTrack
 import com.qingke.desk.feature.media.music.online.isUsableCredential
 import com.qingke.desk.feature.media.music.online.qqAlbumCoverUrl
+import com.qingke.desk.feature.media.music.spectrum.SpectrumControl
+import com.qingke.desk.feature.media.music.spectrum.SpectrumRenderersFactory
+import com.qingke.desk.feature.media.music.spectrum.TeeAudioProcessor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -83,16 +84,19 @@ interface QqMusicLibrary {
  * `rememberCoroutineScope()` 上，即 Dispatchers.Main）；网络在 Dispatchers.IO。
  * 其余方法（previous / playPause / …）可从任意线程调 —— ExoPlayer 的 API 本身线程安全。
  *
- * @param renderersFactory 第 3 步（TeeAudioProcessor）的注入位。**现在就把工厂留好**：
- *        null = 用 [DefaultRenderersFactory]。壳层在第 3 步传
- *        `TeeRenderersFactory(context, tee)`，本类一行都不用改。
+ * @param spectrumTee 已移除（第 3 步定稿）：PCM 频谱旁路改由本类**内部持有**
+ *        （[SpectrumControl] 委派出去）。原因：media3 在 `:feature:media` 是
+ *        `implementation`，`RenderersFactory` / `BaseAudioProcessor` 这些类型一旦
+ *        出现在本类的公共签名里，`:shell` 就编译不过（或至少是一条"将来会变成
+ *        错误"的警告）。缝收窄成自有类型后，壳层经
+ *        [RoutingPlaybackSource] 的 [SpectrumControl] 委派就能驱动门控，
+ *        一行 media3 都不碰。
  */
 class ExoPlayerPlaybackSource(
     private val context: Context,
     private val loginController: QqLoginController,
     private val scope: CoroutineScope,
-    private val renderersFactory: RenderersFactory? = null,
-) : PlaybackSource, QqMusicLibrary {
+) : PlaybackSource, QqMusicLibrary, SpectrumControl {
 
     private val _status = MutableStateFlow<PlaybackStatus>(PlaybackStatus.Checking)
     override val status: StateFlow<PlaybackStatus> = _status.asStateFlow()
@@ -114,6 +118,23 @@ class ExoPlayerPlaybackSource(
         .build()
 
     private val api = QqMusicuApi(client)
+
+    /**
+     * PCM 频谱旁路（第 3 步）。**本类内部持有** —— 它只可能旁路我们自己的播放器，
+     * 系统会话源没有这东西，所以它天然属于这里。壳层 / 页面经 [SpectrumControl]
+     * 驱动门控与读电平，碰不到 media3 的类型（依赖不外泄，见类注释）。
+     */
+    private val spectrum = TeeAudioProcessor()
+
+    // ---- SpectrumControl -----------------------------------------------------
+    //
+    // 显式转发而不是 `by spectrum` 委派：委托表达式写在类头会早于 body 属性初始化
+    // （Kotlin 的构造顺序），三行转发没有这个坑。
+
+    override val level: StateFlow<Float> get() = spectrum.level
+
+    override fun setGates(playing: Boolean, visible: Boolean, enabled: Boolean) =
+        spectrum.setGates(playing, visible, enabled)
 
     /** 播放器。**惰性创建** —— 不登录就不该有一个 ExoPlayer 实例活在进程里。 */
     private var player: ExoPlayer? = null
@@ -381,7 +402,9 @@ class ExoPlayerPlaybackSource(
 
     private fun ensurePlayer(): ExoPlayer {
         player?.let { return it }
-        val p = ExoPlayer.Builder(context, renderersFactory ?: DefaultRenderersFactory(context))
+        // 频谱旁路的注入（第 3 步）：tee 常驻（零开销地）坐在音频链上透传，
+        // 真正的"算不算"由门控决定 —— 见 TeeAudioProcessor 的 queueInput 首行。
+        val p = ExoPlayer.Builder(context, SpectrumRenderersFactory(context, spectrum))
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)

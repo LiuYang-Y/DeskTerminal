@@ -184,7 +184,10 @@ fun rememberEffectPhase(active: Boolean, periodMs: Float): State<Float> {
  * 圆心**在屏幕两侧边缘上**（`x = 0` 与 `x = W`，`y = H/2`），所以每一侧露出来的
  * 是半个圆 —— "包裹住屏幕两侧边缘"就是靠这个：圆的另一半点在屏幕外面。
  *
- * `phase` 在绘制期读取（见 [rememberEffectPhase]），**不会触发重组**。
+ * `phase` 与 `amplitude` 都在绘制期读取（见 [rememberEffectPhase] 与
+ * [com.qingke.desk.feature.media.music.spectrum.TeeAudioProcessor.level]），
+ * **不会触发重组**。`amplitude` = 1 是"没有频谱数据时的满幅观感"
+ * （壳层没挂 QQ 自播源时就是这样），0 是静默。
  */
 @Composable
 fun WaveRings(
@@ -192,6 +195,7 @@ fun WaveRings(
     maxRadius: Dp,
     accent: Color,
     phase: State<Float>,
+    amplitude: State<Float>,
     driftX: Dp,
     driftY: Dp,
     modifier: Modifier = Modifier,
@@ -206,6 +210,10 @@ fun WaveRings(
         val radiusMax = maxRadius.toPx()
         if (radiusMax <= 0f) return@Canvas
         val p = phase.value
+        // 响度 → 半径行程与透明度。地板 0.3：完全静音时环缩到三成且近乎透明，
+        // 与"暂停时相位归零、环缩没"是同向的两件事，不会互相抽梯子。
+        val amp = amplitude.value.coerceIn(0f, 1f)
+        val radiusScale = AMPLITUDE_RADIUS_FLOOR + (1f - AMPLITUDE_RADIUS_FLOOR) * amp
 
         val centers = listOf(
             Offset(driftXPx, size.height / 2f + driftYPx),
@@ -219,9 +227,9 @@ fun WaveRings(
                     brush = Brush.radialGradient(
                         colors = listOf(accent.copy(alpha = spec.alpha * 0.55f), Color.Transparent),
                         center = center,
-                        radius = radiusMax * 0.85f,
+                        radius = radiusMax * 0.85f * radiusScale,
                     ),
-                    radius = radiusMax * 0.85f,
+                    radius = radiusMax * 0.85f * radiusScale,
                     center = center,
                 )
             }
@@ -229,10 +237,11 @@ fun WaveRings(
             for (i in 0 until spec.rings) {
                 // 每个环错开一个 1/rings 的相位，于是"一圈圈往外扩"是连续不断的。
                 val t = ((p + i.toFloat() / spec.rings) % 1f)
-                val radius = radiusMax * t
+                val radius = radiusMax * radiusScale * t
                 if (radius < 1f) continue
                 // 越往外越淡：t 从 0 到 1，alpha 从满到 0。这样新环冒出、旧环散尽。
-                val ringAlpha = spec.alpha * (1f - t) * (1f - t)
+                // 再叠一层响度：安静时整组环一起暗下去。
+                val ringAlpha = spec.alpha * (1f - t) * (1f - t) * amp
                 drawCircle(
                     color = accent.copy(alpha = ringAlpha.coerceIn(0f, 1f)),
                     radius = radius,
@@ -243,6 +252,9 @@ fun WaveRings(
         }
     }
 }
+
+/** 静音时圆环半径的地板比例（满幅 = 1）。见 [WaveRings] 的 `amplitude` 说明。 */
+private const val AMPLITUDE_RADIUS_FLOOR = 0.3f
 
 /** 把一堆"要画的东西"合成一层的空壳，便于页面按 z 序摆放。 */
 @Composable

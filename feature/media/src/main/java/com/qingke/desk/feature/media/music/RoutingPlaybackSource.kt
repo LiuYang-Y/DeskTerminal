@@ -4,6 +4,7 @@ import com.qingke.desk.feature.media.MediaCommand
 import com.qingke.desk.feature.media.MediaTrack
 import com.qingke.desk.feature.media.MediaUiState
 import com.qingke.desk.feature.media.music.online.QqLog
+import com.qingke.desk.feature.media.music.spectrum.SpectrumControl
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -52,12 +53,15 @@ import kotlinx.coroutines.launch
  *
  * @param qq QQ 自播源。壳层创建、随应用会话存活（切页不停播）。
  * @param session 系统会话源。它的 start/stop 归本类管（页面不再直接碰它）。
+ *
+ * 频谱旁路（[SpectrumControl]）只可能来自 [qq] —— 系统会话源没有自己的播放器，
+ * 所以直接委派；这也是"页面拿到的 spectrum 非空 ⟺ 有 QQ 自播源"的由来。
  */
 class RoutingPlaybackSource(
     private val qq: ExoPlayerPlaybackSource,
     private val session: MediaSessionPlaybackSource,
     private val scope: CoroutineScope,
-) : PlaybackSource, QqMusicLibrary by qq {
+) : PlaybackSource, QqMusicLibrary by qq, SpectrumControl by qq {
 
     private val _status = MutableStateFlow<PlaybackStatus>(PlaybackStatus.Checking)
     override val status: StateFlow<PlaybackStatus> = _status.asStateFlow()

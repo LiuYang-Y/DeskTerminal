@@ -1049,6 +1049,9 @@ fun DeskRoot(
                                 // QQ 曲库（我喜欢 / 歌单 / 选歌抽屉）。null 时页面
                                 // 不渲染抽屉入口 —— 桌面上的历史实现就是 null。
                                 library = playbackSource,
+                                // PCM 频谱旁路（驱动声波圆环的响度）。router 委派到
+                                // QQ 自播源内部持有的 tee —— 壳层不碰 media3 类型。
+                                spectrum = playbackSource,
                                 lyricsRepository = lyricsRepository,
                                 loginState = loginState,
                                 onStartLogin = { loginController.startLogin() },
