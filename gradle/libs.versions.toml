@@ -69,9 +69,17 @@ accompanistLyrics = "0.5.0"
 # 换包后的回归验证结论见 map/build.gradle.kts 与 README。
 amap = "11.3.100_3dmap11.3.100_loc11.3.000_sea9.8.1"
 
+# ExoPlayer（media3）。**目前只有 debug 变体在用** —— 见 app/build.gradle.kts 里的
+# debugImplementation：它服务于 spike/music-phase0-qq 分支上的 Phase 0 原生可行性探针，
+# 该探针不随 release 构建发布。正式把播放能力接进 :feature:media 时再决定作用域。
+#
+# 已核实（2026-10-14 直接读 dl.google.com/dl/android/maven2 的 maven-metadata.xml，
+# 不是看网页转述）：media3-exoplayer 的 release 为 1.11.1。
+# 注意 media3 只在 **Google Maven**，不在 Maven Central（在 Central 上查会得到空结果）。
+media3 = "1.11.1"
+
 # TODO(step-2): 以下依赖版本尚未核实，首次 sync 时按 IDE 提示补全后再写入
 # room-runtime + room-ktx + ksp（:core:data 持久化）
-# media3-exoplayer（:feature:music）
 # datastore-preferences（:feature:settings）
 # okhttp/retrofit（:feature:weather）
 
@@ -114,6 +122,9 @@ rikka-shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", versi
 
 # 导航合包 = 导航 + 3D地图 + 定位 + 搜索（四个能力一个 jar，不能与纯地图包并存）。
 amap-navi = { group = "com.amap.api", name = "navi-3dmap-location-search", version.ref = "amap" }
+
+# Phase 0 原生播放探针（debug-only）。见上面 [versions] 里 media3 的说明。
+androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

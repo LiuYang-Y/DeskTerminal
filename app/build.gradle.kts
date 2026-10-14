@@ -49,6 +49,12 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
+    // Phase 0（路线 B）原生播放探针：**只进 debug 变体**。
+    // 探针类住在 src/debug/，它的 Activity 也只在 src/debug/AndroidManifest.xml 里声明 ——
+    // 所以 release APK 里既没有这个类，也不会解析到 media3（依赖同样只挂在 debug 上）。
+    // 这是本项目「探针代码不进正式构建」那条硬约束的落地方式。
+    debugImplementation(libs.androidx.media3.exoplayer)
+
     implementation(project(":shell"))
     implementation(project(":feature:home"))
     implementation(project(":connection"))

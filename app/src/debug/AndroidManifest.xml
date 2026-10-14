@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Phase 0（路线 B）原生可行性探针的清单片段 —— **只在 debug 变体合并**。
+
+  这个文件被删除时，探针的 Activity 就不可能被启动（组件不在清单里，
+  即使类文件还在 APK 里也拉不起来）；反过来它也只进 debug APK，
+  release 构建里既没有这个 Activity 也没有 media3 依赖。
+
+  刻意**不加** android:usesCleartextTraffic / networkSecurityConfig：
+  实测同一 purl 在 https://ws.stream.qqmusic.qq.com/ 上返回 206，
+  所以这条链路全程可以走 TLS，不需要给任何域名开明文例外。
+  如果将来有人要靠"开明文"来救，先回去看探测记录，别默认打开它。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <activity
+            android:name="com.qingke.desk.phase0.Phase0ProbeActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:launchMode="singleInstance"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+    </application>
+
+</manifest>
