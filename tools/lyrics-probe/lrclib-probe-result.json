@@ -1,0 +1,571 @@
+{
+  "user_agent": "DeskTerminal/0.1.0",
+  "generated_at": "2026-10-14 11:07:55",
+  "rows": [
+    {
+      "title": "不遗憾",
+      "artist": "李荣浩",
+      "album": "麻雀",
+      "duration": 324,
+      "note": "参考图同款曲目 / VIP",
+      "stage": "L2",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 78,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "不遗憾",
+        "matched_artist": "李荣浩",
+        "matched_album": "你的婚礼 电影原声带",
+        "matched_duration": 320.0,
+        "lrclib_id": 26916543
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 503
+        },
+        {
+          "stage": "L2 get(名+歌手)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "晴天",
+      "artist": "周杰伦",
+      "album": "叶惠美",
+      "duration": 269,
+      "note": "周杰伦 / VIP",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 44,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "晴天",
+        "matched_artist": "周杰伦",
+        "matched_album": "叶惠美",
+        "matched_duration": 270.0,
+        "lrclib_id": 17788
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "七里香",
+      "artist": "周杰伦",
+      "album": "七里香",
+      "duration": 299,
+      "note": "周杰伦 / VIP",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 34,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "七里香",
+        "matched_artist": "周杰伦",
+        "matched_album": "七里香",
+        "matched_duration": 297.0,
+        "lrclib_id": 16363
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "夜曲",
+      "artist": "周杰伦",
+      "album": "11月的萧邦",
+      "duration": 226,
+      "note": "周杰伦 / VIP",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 47,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "夜曲",
+        "matched_artist": "周杰伦",
+        "matched_album": "11月的萧邦",
+        "matched_duration": 227.0,
+        "lrclib_id": 11714518
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "一路向北",
+      "artist": "周杰伦",
+      "album": "J III MP3 Player",
+      "duration": 295,
+      "note": "周杰伦 / VIP",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": false,
+        "has_word": false,
+        "has_plain": false,
+        "synced_lines": 0,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "一路向北",
+        "matched_artist": "周杰伦",
+        "matched_album": "J III MP3 Player",
+        "matched_duration": 294.0,
+        "lrclib_id": 3693891
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "告白气球",
+      "artist": "周杰伦",
+      "album": "周杰伦的床边故事",
+      "duration": 215,
+      "note": "周杰伦 / VIP",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 42,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "告白气球",
+        "matched_artist": "周杰伦",
+        "matched_album": "周杰伦的床边故事",
+        "matched_duration": 216.0,
+        "lrclib_id": 5708272
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "富士山下",
+      "artist": "陈奕迅",
+      "album": "What's Going On...?",
+      "duration": 259,
+      "note": "粤语经典 / VIP",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 42,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "富士山下",
+        "matched_artist": "陈奕迅",
+        "matched_album": "What's Going On....",
+        "matched_duration": 259.0,
+        "lrclib_id": 17207
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "孤勇者",
+      "artist": "陈奕迅",
+      "album": "孤勇者",
+      "duration": 256,
+      "note": "华语热门",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 42,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "孤勇者",
+        "matched_artist": "陈奕迅",
+        "matched_album": "孤勇者",
+        "matched_duration": 256.0,
+        "lrclib_id": 5887572
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "年少有为",
+      "artist": "李荣浩",
+      "album": "耳朵",
+      "duration": 279,
+      "note": "李荣浩 / VIP",
+      "stage": "L2",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 52,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "年少有为",
+        "matched_artist": "李荣浩",
+        "matched_album": "2019中国好声音巅峰之夜",
+        "matched_duration": 277.0,
+        "lrclib_id": 23524121
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 503
+        },
+        {
+          "stage": "L2 get(名+歌手)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "乌梅子酱",
+      "artist": "李荣浩",
+      "album": "纵横四海",
+      "duration": 246,
+      "note": "李荣浩",
+      "stage": "MISS",
+      "candidates": null,
+      "info": null,
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 404
+        },
+        {
+          "stage": "L2 get(名+歌手)",
+          "status": 404
+        },
+        {
+          "stage": "L3 search",
+          "status": 200,
+          "n": 0
+        }
+      ]
+    },
+    {
+      "title": "修炼爱情",
+      "artist": "林俊杰",
+      "album": "因你 而在",
+      "duration": 287,
+      "note": "林俊杰 / VIP",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 107,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "修炼爱情",
+        "matched_artist": "林俊杰",
+        "matched_album": "因你 而在",
+        "matched_duration": 287.0,
+        "lrclib_id": 30001485
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "江南",
+      "artist": "林俊杰",
+      "album": "第二天堂",
+      "duration": 268,
+      "note": "林俊杰",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 35,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "江南",
+        "matched_artist": "林俊杰",
+        "matched_album": "第二天堂",
+        "matched_duration": 268.0,
+        "lrclib_id": 11352116
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "泡沫",
+      "artist": "G.E.M. 邓紫棋",
+      "album": "Xposed",
+      "duration": 258,
+      "note": "邓紫棋 / VIP",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 35,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "泡沫",
+        "matched_artist": "G.E.M.邓紫棋",
+        "matched_album": "Xposed",
+        "matched_duration": 259.0,
+        "lrclib_id": 7340322
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "光年之外",
+      "artist": "G.E.M. 邓紫棋",
+      "album": "光年之外",
+      "duration": 235,
+      "note": "邓紫棋",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 72,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "光年之外",
+        "matched_artist": "G.E.M. 邓紫棋",
+        "matched_album": "光年之外",
+        "matched_duration": 236.0,
+        "lrclib_id": 30001631
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "起风了",
+      "artist": "买辣椒也用券",
+      "album": "起风了",
+      "duration": 325,
+      "note": "多版本同名测试",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 46,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "起风了",
+        "matched_artist": "买辣椒也用券",
+        "matched_album": "起风了",
+        "matched_duration": 326.0,
+        "lrclib_id": 13535076
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "成都",
+      "artist": "赵雷",
+      "album": "无法长大",
+      "duration": 328,
+      "note": "民谣独立",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 30,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "成都",
+        "matched_artist": "赵雷",
+        "matched_album": "无法长大",
+        "matched_duration": 329.0,
+        "lrclib_id": 9616882
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "杀死那个石家庄人",
+      "artist": "万能青年旅店",
+      "album": "万能青年旅店",
+      "duration": 344,
+      "note": "独立摇滚",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 36,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "杀死那个石家庄人",
+        "matched_artist": "万能青年旅店",
+        "matched_album": "万能青年旅店",
+        "matched_duration": 344.0,
+        "lrclib_id": 17855
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "悬溺",
+      "artist": "葛东琪",
+      "album": "第二街区",
+      "duration": 197,
+      "note": "流媒体热歌",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 27,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "悬溺",
+        "matched_artist": "葛东琪",
+        "matched_album": "第二街区",
+        "matched_duration": 197.0,
+        "lrclib_id": 5041004
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "Blinding Lights",
+      "artist": "The Weeknd",
+      "album": "After Hours",
+      "duration": 200,
+      "note": "英文热单对照",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 40,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "Blinding Lights",
+        "matched_artist": "The Weeknd",
+        "matched_album": "After Hours",
+        "matched_duration": 200.0,
+        "lrclib_id": 390
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "title": "Cruel Summer",
+      "artist": "Taylor Swift",
+      "album": "Lover",
+      "duration": 178,
+      "note": "英文热单对照",
+      "stage": "L1",
+      "candidates": null,
+      "info": {
+        "has_synced": true,
+        "has_word": false,
+        "has_plain": true,
+        "synced_lines": 60,
+        "word_tags": 0,
+        "instrumental": false,
+        "matched_track": "Cruel Summer",
+        "matched_artist": "Taylor Swift",
+        "matched_album": "Lover",
+        "matched_duration": 178.0,
+        "lrclib_id": 975383
+      },
+      "detail": [
+        {
+          "stage": "L1 get(全参)",
+          "status": 200
+        }
+      ]
+    }
+  ]
+}

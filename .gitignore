@@ -16,3 +16,6 @@ local.properties
 # 给外部 AI 分析用的一次性导出（生成物，体积 1MB+，不入库）
 deskterminal_context*.txt
 deskterminal_vol*.txt
+# 上述导出脚本与提示词模板（一次性工具，非源码）
+export_context.py
+gemini_prompt.md
