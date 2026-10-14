@@ -142,8 +142,18 @@ class ExoPlayerPlaybackSource(
     /** 与播放器播放列表一一对应的曲目队列（queue[0] 是用户点中的那首）。 */
     private var queue: List<QqTrack> = emptyList()
 
-    /** 当前曲目的候选地址（域名兜底）。换域名重试时前进一格。 */
-    private var currentCandidates: List<String> = emptyList()
+    /**
+     * 与 [queue] 一一平行的候选地址表（域名兜底）：`queueCandidates[i]` 是第 i 首的
+     * 候选列表，`[0]` 就是正在播放的那一个。换域名重试时在表内前进一格。
+     *
+     * **必须逐曲目存**：点中的歌在 [playTrackAt] 里取链，后台补全的歌在补队列时
+     * 另取一次链 —— 两者的 `purl` 不同。曾经只存点中那首的候选，补队列的歌播放
+     * 出错时会拿**第一首的 purl** 去重试，症状是"这首歌 CDN 挂了，放出来的却是
+     * 另一首"—— 域名兜底反而放错歌，比不兜底更难查。
+     */
+    private val queueCandidates: MutableList<List<String>> = mutableListOf()
+
+    /** 当前曲目已试到第几个候选。换曲目时归零（见 [playerListener] 的 onMediaItemTransition）。 */
     private var candidateCursor = 0
 
     private var loginJob: Job? = null
@@ -198,7 +208,7 @@ class ExoPlayerPlaybackSource(
         player?.release()
         player = null
         queue = emptyList()
-        currentCandidates = emptyList()
+        queueCandidates.clear()
         candidateCursor = 0
         _status.value = PlaybackStatus.Idle
         _library.update { it.copy(nowPlayingMid = null, resolvingIndex = -1) }
@@ -340,7 +350,8 @@ class ExoPlayerPlaybackSource(
             }
 
             queue = listOf(first)
-            currentCandidates = link.candidates
+            queueCandidates.clear()
+            queueCandidates += link.candidates
             candidateCursor = 0
             val p = ensurePlayer()
             p.setMediaItem(MediaItem.fromUri(link.url))
@@ -368,9 +379,16 @@ class ExoPlayerPlaybackSource(
                 // 每首之间让出一次协程：取消（用户又点了一首）要能及时生效。
                 kotlinx.coroutines.yield()
                 if (playJob !== myJob || player !== p) return@launch
+                // 只有真的追加进了播放列表，队列与候选表才跟着长 ——
+                // 失败时若仍然 `queue + t`，queue 会比播放列表长一节，之后
+                // currentMediaItemIndex → queue[i] 全部错位（显示的是一首、
+                // 放的是另一首）。对齐维护放在这里，两处更新只隔一次成功判定。
                 runCatching { p.addMediaItems(queue.size, listOf(MediaItem.fromUri(next.url))) }
-                    .onFailure { e -> QqLog.w(TAG, "队列追加失败：${e.describe()}") }
-                queue = queue + t
+                    .onFailure { e -> QqLog.w(TAG, "队列追加失败（不入队）：${e.describe()}") }
+                    .onSuccess {
+                        queue = queue + t
+                        queueCandidates += next.candidates
+                    }
             }
             QqLog.i(TAG, "播放列表补全：${queue.size} 首")
         }
@@ -433,14 +451,20 @@ class ExoPlayerPlaybackSource(
         val idx = p.currentMediaItemIndex
         val track = queue.getOrNull(idx)
         QqLog.w(TAG, "播放出错（第 ${idx + 1} 首）：${error.errorCodeName} ${error.describe()}")
-        val next = currentCandidates.getOrNull(candidateCursor + 1)
+        // 候选表与播放列表平行：第 idx 首的候选就在下标 idx。取不到说明队列与候选表
+        // 失同步（不该发生）—— 如实记录，不拿别的曲目的候选来碰运气。
+        val candidates = queueCandidates.getOrNull(idx)
+        val next = candidates?.getOrNull(candidateCursor + 1)
         if (next != null) {
             candidateCursor++
-            QqLog.i(TAG, "换域名重试（候选 ${candidateCursor + 1}/${currentCandidates.size}）")
+            QqLog.i(TAG, "换域名重试（第 ${idx + 1} 首，候选 ${candidateCursor + 1}/${candidates.size}）")
             p.replaceMediaItem(idx, MediaItem.fromUri(next))
             p.prepare()
             p.play()
             return
+        }
+        if (candidates == null) {
+            QqLog.w(TAG, "第 ${idx + 1} 首没有候选域名记录（队列与候选表失同步？）")
         }
         // 候选都试过了。**不放 URL 进日志**（带 vkey= 签名串），只留曲目身份与错误码。
         QqLog.w(TAG, "候选域名全部失败：${track?.name.orEmpty()} ${error.errorCodeName}")
@@ -506,7 +530,7 @@ class ExoPlayerPlaybackSource(
         player?.stop()
         player?.clearMediaItems()
         queue = emptyList()
-        currentCandidates = emptyList()
+        queueCandidates.clear()
         candidateCursor = 0
         _status.value = PlaybackStatus.Idle
         _library.update { it.copy(tracks = emptyList(), playlists = emptyList(), selectedPlaylistId = null, nowPlayingMid = null, resolvingIndex = -1) }
