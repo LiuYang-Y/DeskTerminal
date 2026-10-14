@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  仅 debug 变体：允许局域网明文 HTTP。
+
+  为什么需要它：Android 9（targetSdk 28）起默认禁用明文流量。局域网里的开发服务器
+  （Vite dev server）没有证书，不给这个配置，WebView 只会拿到一个
+  `net::ERR_CLEARTEXT_NOT_PERMITTED`，页面上表现为"白屏"，很容易被误判成"页面挂了"。
+
+  为什么**只**放在 debug 源集：release 构建根本不包含这个文件，也就没有这条放宽。
+  正式版本要加载的页面应当走 https（或随包发布的本地资源），不允许例外。
+
+  另外：本文件允许的是"整个 app 的明文"，比我们真正需要的（开发服务器那一个地址）
+  宽。够用的原因是它进不了 release，且 dev server 只在本机验证期间存在。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

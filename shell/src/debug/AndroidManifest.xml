@@ -11,7 +11,22 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <application>
+    <!--
+      仅 debug：允许明文 HTTP（局域网开发服务器没有证书）。
+      release 变体不包含本文件与这份配置 —— 见同目录下的 res/xml/network_security_config.xml。
+    -->
+    <application android:networkSecurityConfig="@xml/network_security_config">
+
+        <!--
+          folia-major Web 版可行性预览页：用真机 WebView 跑一遍，验渲染 / 帧率 / 播放 /
+          后台 / 文件导入。同样只在 debug 变体里存在，不碰正式界面。
+        -->
+        <activity
+            android:name=".debug.FoliaWebViewPreviewActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboardHidden|uiMode"
+            android:exported="true"
+            android:label="folia Web 预览"
+            android:screenOrientation="sensorLandscape" />
 
         <activity
             android:name=".debug.SidebarLensPreviewActivity"
