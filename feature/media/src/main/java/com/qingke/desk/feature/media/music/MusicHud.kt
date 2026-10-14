@@ -87,6 +87,11 @@ fun MusicHud(
     metrics: MusicMetrics,
     fade: Float,
     interactive: Boolean,
+    /**
+     * 右上角账号入口上的文字。**必须是脱敏的**（"未登录"/"等待扫码"/昵称），
+     * 不允许出现任何 token 片段 —— 它直接画在屏幕上、还会被用户截图。
+     */
+    accountLabel: String,
     driftX: Dp,
     driftY: Dp,
     onPrevious: () -> Unit,
@@ -94,6 +99,7 @@ fun MusicHud(
     onNext: () -> Unit,
     onSeek: (Long) -> Unit,
     onImportLyrics: () -> Unit,
+    onAccountClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -136,18 +142,33 @@ fun MusicHud(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    text = "导入歌词",
-                    fontSize = metrics.chipSize,
-                    lineHeight = metrics.chipSize * MusicLayout.HUD_TEXT_LINE_HEIGHT_EM,
-                    color = HudForeground.copy(alpha = if (interactive) 0.55f else 0f),
-                    maxLines = 1,
-                    modifier = Modifier
-                        .padding(top = metrics.hudTextGap.dp)
-                        .clip(RoundedCornerShape(percent = 50))
-                        .clickable(enabled = interactive, onClick = onImportLyrics)
-                        .padding(horizontal = 6.dp, vertical = 1.dp),
-                )
+                // 第三行是**两颗 chip 并排**，不是两行。
+                //
+                // 为什么不各占一行：`MusicMetrics.hudTextBlockHeight` 有一条不变式 ——
+                // 左下三行文字的总高不许超过封面边长，否则整条 HUD 的预算会被顶上去一截。
+                // 加一行会把它顶破，所以账号入口与"导入歌词"共用这一行。
+                //
+                // 也考虑过把账号入口放到右上角：那里会撞上壳层的设置齿轮
+                // （齿轮跟着侧栏镜像，左/右都可能，详见 MusicPage 里歌词角标的注释），
+                // 而 HUD 内部是唯一确定不与壳层 overlay 争位置的区域。
+                Row(
+                    modifier = Modifier.padding(top = metrics.hudTextGap.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    HudChip(
+                        text = "导入歌词",
+                        metrics = metrics,
+                        interactive = interactive,
+                        onClick = onImportLyrics,
+                    )
+                    HudChip(
+                        text = accountLabel,
+                        metrics = metrics,
+                        interactive = interactive,
+                        onClick = onAccountClick,
+                    )
+                }
             }
         }
 
@@ -216,6 +237,35 @@ fun MusicHud(
 private fun subtitleOf(artist: String, source: String): String {
     val parts = listOf(artist.trim(), source.trim()).filter { it.isNotBlank() }
     return if (parts.isEmpty()) "未知艺术家" else parts.joinToString(" · ")
+}
+
+/**
+ * HUD 左下那颗小圆角文字按钮。
+ *
+ * `interactive = false` 时**既透明也不可点** —— 与 HUD 其它元素同一条约定：
+ * `Modifier.alpha(0f)` 不影响命中测试，所以"看不见"必须同时意味着"点不到"。
+ * 少了 `enabled = interactive`，症状是"看词态里无意点到底下，歌突然跳了 / 弹出登录浮层"。
+ */
+@Composable
+private fun HudChip(
+    text: String,
+    metrics: MusicMetrics,
+    interactive: Boolean,
+    onClick: () -> Unit,
+) {
+    Text(
+        text = text,
+        fontSize = metrics.chipSize,
+        lineHeight = metrics.chipSize * MusicLayout.HUD_TEXT_LINE_HEIGHT_EM,
+        color = HudForeground.copy(alpha = if (interactive) 0.62f else 0f),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .clip(RoundedCornerShape(percent = 50))
+            .background(HudForeground.copy(alpha = if (interactive) 0.10f else 0f))
+            .clickable(enabled = interactive, onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 1.dp),
+    )
 }
 
 @Composable

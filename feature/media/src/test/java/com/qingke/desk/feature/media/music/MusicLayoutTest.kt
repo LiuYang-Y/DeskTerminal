@@ -349,4 +349,122 @@ class MusicLayoutTest {
             }
         }
     }
+
+    // ---------------------------------------------------------------------
+    // 登录浮层（Phase 1，2026-10-14）
+    //
+    // 与上面同一套思路：浮层尺寸也是"可用空间 → 尺寸"的纯函数，所以同样可以被穷举。
+    // 它要保证的关系只有一条：**卡片守得住上下安全区与左右边界**。
+    // ---------------------------------------------------------------------
+
+    private fun LoginPaneMetrics.dump(): String = buildString {
+        append("w=$widthDp h=$heightDp\n")
+        append("  outerY=$outerY padX=$padX padY=$padY\n")
+        append("  cardW=$cardW cardH=$cardH qrSide=$qrSide\n")
+        append("  title=$titleSizeSp status=$statusSizeSp btnH=$buttonHeight\n")
+        append("  chrome=$cardH−$qrSide\n")
+        append("  约束：cardH+2*outerY=${cardH + outerY * 2}（可用 $heightDp）")
+    }
+
+    /**
+     * 矩阵内每个尺寸，浮层都要落在安全区之内。
+     *
+     * 怎么才假：把 [MusicLayout.LOGIN_QR_WIDTH_RATIO] 调小、或把标题/按钮比例调大，
+     * 使 `qrBudget` 触到 [MusicLayout.LOGIN_MIN_QR] 的下限 —— 那时 `cardH + 2*outerY > h`，
+     * 卡片会压到上下边缘。
+     *
+     * 实测这条边界的**位置**：解出 `qrBudget = 0.66h − 48` 可知 `h ≈ 150dp` 时触下限 ——
+     * 远低于矩阵里最矮的 320dp。所以这条断言在现有矩阵上应当全绿，
+     * 而它红的时刻就是"有人把某个比例改大了"。
+     */
+    @Test
+    fun `矩阵内每个尺寸的登录浮层都不越出安全区`() {
+        allPanels.forEach { p ->
+            val m = MusicLayout.loginPane(p.w, p.h)
+            assertTrue(
+                "${p.label} ${p.w}×${p.h} 的登录浮层越界：\n${m.dump()}",
+                m.fitsInside,
+            )
+        }
+    }
+
+    /**
+     * 二维码边长必须**由高度预算决定**，而不是被宽度兜底决定。
+     *
+     * 这是设计意图的断言，不是自明的事实：横屏矮屏上唯一紧的约束是高度，
+     * 若哪天 `w × 0.34` 比 `qrBudget` 还小，说明宽度比例被改小了 ——
+     * 那时二维码会白白变小，而"看起来还行"发现不了。
+     *
+     * 怎么才假：把 [MusicLayout.LOGIN_QR_WIDTH_RATIO] 降到 0.30 以下
+     * （一加 666×361 上 `qrBudget = 191`，`666 × 0.30 = 199.8`，仍大于 191；
+     * 要降到 0.28 才会反过来 —— 0.34 → 0.28 是一次真实可发生的误改）。
+     */
+    @Test
+    fun `在役机器上二维码边长由高度预算决定`() {
+        realDevices.forEach { p ->
+            val m = MusicLayout.loginPane(p.w, p.h)
+            val widthFallback = p.w * MusicLayout.LOGIN_QR_WIDTH_RATIO
+            assertTrue(
+                "${p.label}：qrSide=${m.qrSide} 宽度兜底=$widthFallback，" +
+                    "说明主约束已经变成宽度，二维码被白缩小了\n${m.dump()}",
+                m.qrSide < widthFallback,
+            )
+        }
+    }
+
+    /**
+     * 二维码不得小于可扫性下限。
+     *
+     * 在矩阵里它恒成立（最矮 320dp 时 `qrSide ≈ 164`），这一条守的是**将来**：
+     * 若有人加进来一个 200dp 高的极端尺寸，这条会先红，
+     * 而不是等到真机上出现一个扫不动的二维码。
+     */
+    @Test
+    fun `二维码边长不低于可扫性下限`() {
+        allPanels.forEach { p ->
+            val m = MusicLayout.loginPane(p.w, p.h)
+            assertTrue(
+                "${p.label} 的二维码只有 ${m.qrSide}dp，低于下限 ${MusicLayout.LOGIN_MIN_QR}dp\n${m.dump()}",
+                m.qrSide >= MusicLayout.LOGIN_MIN_QR,
+            )
+        }
+    }
+
+    /**
+     * 按钮高度不得低于触控下限 48dp。
+     *
+     * 这一条防的是一个很具体的坑：矮屏上 `h × 0.115` 会小于 48（361dp 时是 41.5），
+     * 若少了 `maxOf`，按钮会缩到 41.5dp —— 在车上单手点二维码旁边的按钮会变得难受。
+     * 怎么才假：把 [MusicLayout.LOGIN_BUTTON_MIN] 从 `maxOf` 里拿掉。
+     */
+    @Test
+    fun `浮层按钮高度不低于触控下限`() {
+        allPanels.forEach { p ->
+            val m = MusicLayout.loginPane(p.w, p.h)
+            assertTrue(
+                "${p.label} 的按钮只有 ${m.buttonHeight}dp，低于 48dp 触控下限\n${m.dump()}",
+                m.buttonHeight >= 48f,
+            )
+        }
+    }
+
+    /** 浮层也要扛得住 0 / 负约束（首帧、resize），与音乐页同一条兜底。 */
+    @Test
+    fun `零尺寸下浮层不产生 NaN 或负值`() {
+        listOf(0f to 0f, -1f to -1f, 0f to 361f, 666f to 0f).forEach { (w, h) ->
+            val m = MusicLayout.loginPane(w, h)
+            listOf(
+                "outerY" to m.outerY,
+                "padX" to m.padX,
+                "padY" to m.padY,
+                "cardW" to m.cardW,
+                "cardH" to m.cardH,
+                "qrSide" to m.qrSide,
+                "titleSize" to m.titleSizeSp,
+                "buttonHeight" to m.buttonHeight,
+            ).forEach { (name, v) ->
+                assertTrue("$w×$h 的 $name = $v，既不能是 NaN 也不能为负", v.isFinite() && v >= 0f)
+            }
+        }
+    }
 }

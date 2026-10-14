@@ -78,6 +78,7 @@ import com.qingke.desk.feature.media.MediaUiState
 import com.qingke.desk.feature.media.music.MediaSessionPlaybackSource
 import com.qingke.desk.feature.media.music.MusicPage
 import com.qingke.desk.feature.media.music.lyrics.LyricsRepository
+import com.qingke.desk.feature.media.music.online.QqLoginController
 import com.qingke.desk.hosting.ShizukuGate
 import com.qingke.desk.hosting.ShizukuStatus
 import com.qingke.desk.hosting.ShizukuStatusMonitor
@@ -326,6 +327,22 @@ fun DeskRoot(
     val playbackSource = remember(mediaMonitor, mediaScope) {
         MediaSessionPlaybackSource(mediaMonitor, mediaScope)
     }
+
+    // ---- QQ 音乐账号（Phase 1，2026-10-14）----------------------------------
+    //
+    // 扫码是**跨页面**的：用户在等二维码时可能切回首页看一眼导航。而登录流程持有一条
+    // MQTT 长连接，挂在音乐页上就会"一切页就断连" —— 用户回来时码还在屏幕上，
+    // 但它已经是死码了（上游是 clean session + unicast 订阅，订阅期内的事件不重放）。
+    //
+    // 所以按 mediaMonitor 的同一条路走：**壳层持有，页面向下注入**。
+    // 页面对应的接口只有 `StateFlow<QqLoginState>` 与三个意图回调，
+    // 它不认识 MQTT、也不认识 musicu。
+    val loginController = remember(context, mediaScope) {
+        QqLoginController(context, mediaScope)
+    }
+    val loginState by loginController.state.collectAsState()
+    // 读盘 + 判过期。只做一次 —— 之后状态由 controller 自己推。
+    LaunchedEffect(loginController) { loginController.restore() }
 
     // 歌词仓库。它内部只留 `applicationContext`，所以可以放心在组合里活很久；
     // 但**不**把它做成进程级单例 —— 它持有的内存 LRU 装的是解析结果，
@@ -1002,6 +1019,10 @@ fun DeskRoot(
                             DeskScreen.MUSIC -> MusicPage(
                                 source = playbackSource,
                                 lyricsRepository = lyricsRepository,
+                                loginState = loginState,
+                                onStartLogin = { loginController.startLogin() },
+                                onCancelLogin = { loginController.cancelLogin() },
+                                onLogout = { loginController.logout() },
                                 onMessage = onMessage,
                                 modifier = Modifier.fillMaxSize(),
                             )

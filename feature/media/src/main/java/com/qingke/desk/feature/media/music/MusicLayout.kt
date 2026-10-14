@@ -134,6 +134,59 @@ data class MusicMetrics(
 }
 
 /**
+ * 登录浮层的尺寸。与 [MusicMetrics] 同一套写法：**没有一个字段是常量**。
+ *
+ * 推导方向是「**总高预算 → 二维码边长**」，不是反过来 —— 反过来会在矮屏上溢出，
+ * 因为二维码是这张卡片里唯一的弹性项（其它都是行高与触控下限决定的）。
+ */
+data class LoginPaneMetrics(
+    val widthDp: Float,
+    val heightDp: Float,
+
+    /** 浮层距容器上下边缘的安全区。 */
+    val outerY: Float,
+    /** 卡片内的左右留白。 */
+    val padX: Float,
+    /** 卡片内的上下留白。 */
+    val padY: Float,
+    /** 卡片尺寸。 */
+    val cardW: Float,
+    val cardH: Float,
+    /** 二维码正方形边长。 */
+    val qrSide: Float,
+    /** 标题 / 状态文字字号。 */
+    val titleSizeSp: Float,
+    val statusSizeSp: Float,
+    /** 按钮高与按钮文字字号。 */
+    val buttonHeight: Float,
+    val buttonTextSizeSp: Float,
+    /** 卡片内各行之间的间距。 */
+    val gapY: Float,
+) {
+
+    val qrSideDp: Dp get() = qrSide.dp
+    val padXDp: Dp get() = padX.dp
+    val padYDp: Dp get() = padY.dp
+    val outerYDp: Dp get() = outerY.dp
+    val gapYDp: Dp get() = gapY.dp
+    val buttonHeightDp: Dp get() = buttonHeight.dp
+    val titleSize: TextUnit get() = titleSizeSp.sp
+    val statusSize: TextUnit get() = statusSizeSp.sp
+    val buttonTextSize: TextUnit get() = buttonTextSizeSp.sp
+
+    /**
+     * 卡片是否守住了上下安全区与左右边界。
+     *
+     * **判据给单元测试用**，与 [MusicMetrics.lyricClearsHud] 同性质：
+     * 越界应当在开发阶段就红，而不是上线后靠眼睛发现。
+     * 这里刻意不写"超了就压小二维码"的运行时补救 —— 那会让同一台机器上
+     * 二维码大小随状态文案长度变化（"等待扫码"与"已扫码，请在手机上确认"长度不同）。
+     */
+    val fitsInside: Boolean
+        get() = cardH + outerY * 2f <= heightDp + 0.5f && cardW <= widthDp + 0.5f
+}
+
+/**
  * 音乐页的尺寸推导。
  *
  * ---------------------------------------------------------------------------
@@ -361,6 +414,103 @@ object MusicLayout {
             lyricBottomY = lyricBottomY,
             watermarkSizeSp = watermarkSize,
             waveMaxRadius = waveMaxRadius,
+        )
+    }
+
+    // ---- 登录浮层 ------------------------------------------------------------
+
+    /** 浮层距上下边缘的安全区。 */
+    const val LOGIN_OUTER_RATIO = 0.045f
+    const val LOGIN_OUTER_MIN = 8f
+    const val LOGIN_OUTER_MAX = 18f
+
+    /** 卡片内留白。 */
+    const val LOGIN_PAD_Y_RATIO = 0.035f
+    const val LOGIN_PAD_Y_MIN = 8f
+    const val LOGIN_PAD_Y_MAX = 16f
+    const val LOGIN_PAD_X_RATIO = 0.020f
+    const val LOGIN_PAD_X_MIN = 12f
+    const val LOGIN_PAD_X_MAX = 22f
+
+    /** 标题字号及其夹取区间。 */
+    const val LOGIN_TITLE_RATIO = 0.042f
+    const val LOGIN_TITLE_MIN = 12f
+    const val LOGIN_TITLE_MAX = 18f
+
+    /**
+     * 浮层内文字的行高系数。
+     *
+     * 1.55 —— 与首页提示条的 [com.qingke.desk.core.ui] `NoticeLineHeight` 同一个来源：
+     * **中文实测行盒 ≈ 1.56em**（Compose 不写 `lineHeight` 时行高来自字体度量，中文 ascent 大）。
+     * 这里显式传给 `Text`，并且**预算里也用同一个数**，否则就会出现
+     * "预算按 1.25 算、实际行高 1.56" 的两套阈值打架 —— 2026-10-14 真机已经吃过一次。
+     */
+    const val LOGIN_LINE_HEIGHT_EM = 1.55f
+
+    /** 状态行相对标题字号的比例。 */
+    const val LOGIN_STATUS_RATIO = 0.85f
+
+    /** 按钮高（有 48dp 的触控下限）与按钮文字比例。 */
+    const val LOGIN_BUTTON_RATIO = 0.115f
+    const val LOGIN_BUTTON_MIN = 48f
+    const val LOGIN_BUTTON_TEXT_RATIO = 0.36f
+
+    /** 卡片内行间距，相对上下留白。 */
+    const val LOGIN_GAP_RATIO = 0.55f
+
+    /** 二维码宽向兜底比例（防止超宽超高时二维码变成一个巨大的正方形）。 */
+    const val LOGIN_QR_WIDTH_RATIO = 0.34f
+
+    /** 二维码可扫性的绝对下限。**低于这个尺寸就不该画出来了。** */
+    const val LOGIN_MIN_QR = 48f
+
+    /**
+     * 由可用空间推出登录浮层尺寸。
+     *
+     * ```
+     * chrome   = padY*2 + 标题行高 + 状态行高 + 按钮高 + 3×行距
+     * qrBudget = h − outerY*2 − chrome
+     * qrSide   = min(qrBudget, w × 0.34)      ← 主约束是高度，宽度只是兜底
+     * ```
+     *
+     * 代入在役两台机器（详见 `docs/2026-10-14-music-phase1-design.md` §6.2）：
+     * 一加 666×361 → `chrome 137.6 / qrSide 191.0 / 卡 217.6×328.6`；
+     * 小米 786×411 → `chrome 150.1 / qrSide 224.9 / 卡 256.3×375.0`。
+     * **两台的卡高都恰好顶满可用高度的 89%**，说明高度确实是唯一紧的约束。
+     */
+    fun loginPane(widthDp: Float, heightDp: Float): LoginPaneMetrics {
+        val w = widthDp.coerceAtLeast(1f)
+        val h = heightDp.coerceAtLeast(1f)
+
+        val outerY = (h * LOGIN_OUTER_RATIO).coerceIn(LOGIN_OUTER_MIN, LOGIN_OUTER_MAX)
+        val padY = (h * LOGIN_PAD_Y_RATIO).coerceIn(LOGIN_PAD_Y_MIN, LOGIN_PAD_Y_MAX)
+        val padX = (w * LOGIN_PAD_X_RATIO).coerceIn(LOGIN_PAD_X_MIN, LOGIN_PAD_X_MAX)
+
+        val titleSize = (h * LOGIN_TITLE_RATIO).coerceIn(LOGIN_TITLE_MIN, LOGIN_TITLE_MAX)
+        val titleLine = titleSize * LOGIN_LINE_HEIGHT_EM
+        val statusSize = titleSize * LOGIN_STATUS_RATIO
+        val statusLine = statusSize * LOGIN_LINE_HEIGHT_EM
+        val buttonHeight = maxOf(LOGIN_BUTTON_MIN, h * LOGIN_BUTTON_RATIO)
+        val gapY = padY * LOGIN_GAP_RATIO
+
+        val chrome = padY * 2f + titleLine + statusLine + buttonHeight + gapY * 3f
+        val qrBudget = (h - outerY * 2f - chrome).coerceAtLeast(LOGIN_MIN_QR)
+        val qrSide = minOf(qrBudget, w * LOGIN_QR_WIDTH_RATIO).coerceAtLeast(LOGIN_MIN_QR)
+
+        return LoginPaneMetrics(
+            widthDp = w,
+            heightDp = h,
+            outerY = outerY,
+            padX = padX,
+            padY = padY,
+            cardW = qrSide + padX * 2f,
+            cardH = chrome + qrSide,
+            qrSide = qrSide,
+            titleSizeSp = titleSize,
+            statusSizeSp = statusSize,
+            buttonHeight = buttonHeight,
+            buttonTextSizeSp = buttonHeight * LOGIN_BUTTON_TEXT_RATIO,
+            gapY = gapY,
         )
     }
 }

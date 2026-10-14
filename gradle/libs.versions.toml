@@ -78,10 +78,15 @@ amap = "11.3.100_3dmap11.3.100_loc11.3.000_sea9.8.1"
 # 注意 media3 只在 **Google Maven**，不在 Maven Central（在 Central 上查会得到空结果）。
 media3 = "1.11.1"
 
-# TODO(step-2): 以下依赖版本尚未核实，首次 sync 时按 IDE 提示补全后再写入
-# room-runtime + room-ktx + ksp（:core:data 持久化）
-# datastore-preferences（:feature:settings）
-# okhttp/retrofit（:feature:weather）
+# OkHttp。**新增它的唯一理由是 WebSocket** —— musicu 取链接那条路已经实测「无签名、一次普通
+# POST」，`HttpURLConnection` 足够（Phase 0 就是这么做的）。但 QQ 扫码登录的 `qq` 通道是
+# MQTT over WebSocket，而 Android 上 `java.net.http.WebSocket` 要 API 34 才有（本项目 minSdk 26），
+# 自己写 WS 握手 + 帧编解码要 ~250 行且容易在 mask / 分片 / 控制帧上出错。
+#
+# 已核实（2026-10-14 查 repo1.maven.org/maven2/com/squareup/okhttp3/okhttp/maven-metadata.xml）：
+# 最新 release 为 5.5.0（5.x 已 GA，不是 alpha）。要求 minSdk 21，本项目 26 满足。
+# 它只被 :feature:media 的 online/ 用到，不影响其它模块。
+okhttp = "5.5.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -125,6 +130,9 @@ amap-navi = { group = "com.amap.api", name = "navi-3dmap-location-search", versi
 
 # Phase 0 原生播放探针（debug-only）。见上面 [versions] 里 media3 的说明。
 androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
+
+# QQ 扫码登录的 MQTT over WebSocket（:feature:media 的 online/ 子树）。
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

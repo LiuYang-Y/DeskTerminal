@@ -32,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -49,6 +50,9 @@ import com.qingke.desk.feature.media.music.artwork.ArtworkVisual
 import com.qingke.desk.feature.media.music.lyrics.ImportResult
 import com.qingke.desk.feature.media.music.lyrics.LyricsDoc
 import com.qingke.desk.feature.media.music.lyrics.LyricsRepository
+import com.qingke.desk.feature.media.music.online.QqLoginPane
+import com.qingke.desk.feature.media.music.online.QqLoginState
+import com.qingke.desk.feature.media.music.online.QqLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -111,12 +115,30 @@ private const val WATERMARK_ALPHA_OFF = 0.09f
 fun MusicPage(
     source: PlaybackSource,
     lyricsRepository: LyricsRepository,
+    /**
+     * QQ 音乐账号的登录状态。**这一页只读状态，不认识 MQTT / musicu**
+     * —— 与它不认识 `MediaSession` 是同一条边界（见 [PlaybackSource] 的类注释）。
+     */
+    loginState: QqLoginState,
+    onStartLogin: () -> Unit,
+    onCancelLogin: () -> Unit,
+    onLogout: () -> Unit,
     modifier: Modifier = Modifier,
     onMessage: ((String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val tier = LocalEffectTier.current
     val scope = rememberCoroutineScope()
+
+    // 登录浮层是否展开。归页面持有（它是纯 UI 状态），登录流程本身归壳层。
+    //
+    // 开/关各写一条日志：这个布尔是"浮层为什么不见了"这类问题的**唯一直接证据** ——
+    // 状态流（Preparing/QrReady/...）在壳层好好地推着，而浮层由这个本地布尔决定显隐，
+    // 两边对不上时（状态在走、浮层没了），只有这条日志能分清是"谁把它关了"。
+    var showLoginPane by remember { mutableStateOf(false) }
+    LaunchedEffect(showLoginPane, loginState) {
+        QqLog.i("MusicPage", "浮层可见性=$showLoginPane 状态=${loginState::class.simpleName}")
+    }
 
     val status by source.status.collectAsState()
     val track = (status as? PlaybackStatus.Active)?.track
@@ -269,6 +291,11 @@ fun MusicPage(
         val metrics = remember(maxWidth, maxHeight) {
             MusicLayout.metrics(maxWidth.value, maxHeight.value)
         }
+        // 登录浮层的尺寸与音乐页**同源**：都用这个 BoxWithConstraints 的实测约束，
+        // 谁也不去读 DeviceProfile（那是 WindowMetrics.bounds 的上界，小米上会多出 16dp）。
+        val paneMetrics = remember(maxWidth, maxHeight) {
+            MusicLayout.loginPane(maxWidth.value, maxHeight.value)
+        }
 
         MusicBackdrop(
             visual = visual,
@@ -299,10 +326,14 @@ fun MusicPage(
             MusicStatusCard(
                 status = status,
                 metrics = metrics,
+                loginState = loginState,
                 modifier = Modifier.align(Alignment.Center),
                 onOpenSettings = {
                     MediaPermission.openSettings(context) { reason -> onMessage?.invoke(reason) }
                 },
+                // 没在播的时候 HUD 不存在，所以这里是**唯一**的登录入口 ——
+                // 少了它，"还没登录 → 没内容 → 看不到入口"就是一个死循环。
+                onOpenLogin = { showLoginPane = true },
             )
         } else {
             LyricsLayer(
@@ -381,9 +412,44 @@ fun MusicPage(
                 importLauncher.launch(arrayOf("*/*"))
                 wake()
             },
+            accountLabel = hudAccountLabel(loginState),
+            onAccountClick = {
+                showLoginPane = true
+                wake()
+            },
+            )
+        }
+
+        // ---- 登录浮层 ----------------------------------------------------
+        //
+        // 放在**最后**（z 序最高）：它要盖住歌词、HUD 与状态卡。
+        // 遮罩自己消费点击，所以浮层展开时下面那层唤醒层收不到事件。
+        if (showLoginPane) {
+            QqLoginPane(
+                state = loginState,
+                metrics = paneMetrics,
+                onStartLogin = onStartLogin,
+                onCancel = onCancelLogin,
+                onLogout = onLogout,
+                onDismiss = { showLoginPane = false },
             )
         }
     }
+}
+
+/**
+ * HUD 账号 chip 上的文字。
+ *
+ * **脱敏**：只可能是"未登录"或昵称，绝不出现 uin 或 key 的任何片段 ——
+ * 它直接画在屏幕上，用户会截图、也会投屏到车机。
+ */
+private fun hudAccountLabel(state: QqLoginState): String = when (state) {
+    is QqLoginState.LoggedIn -> state.cred.nick.ifEmpty { "已登录" }
+    QqLoginState.LoggedOut -> "未登录"
+    QqLoginState.Preparing -> "登录中"
+    is QqLoginState.QrReady, QqLoginState.Scanned, QqLoginState.Exchanging -> "扫码中"
+    is QqLoginState.Expired -> "登录已过期"
+    is QqLoginState.Failed -> "登录失败"
 }
 
 private const val VISUAL_CACHE_SIZE = 4
@@ -439,8 +505,10 @@ private fun LyricsLayer(
 private fun MusicStatusCard(
     status: PlaybackStatus,
     metrics: MusicMetrics,
+    loginState: QqLoginState,
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit,
+    onOpenLogin: () -> Unit,
 ) {
     val title: String
     val detail: String
@@ -470,8 +538,7 @@ private fun MusicStatusCard(
 
     Column(
         modifier = modifier
-            .padding(PaddingValues(horizontal = metrics.pad.dp))
-            .then(if (clickable != null) Modifier.clickable(onClick = clickable) else Modifier),
+            .padding(PaddingValues(horizontal = metrics.pad.dp)),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(metrics.hudTextGap.dp),
     ) {
@@ -481,6 +548,8 @@ private fun MusicStatusCard(
             lineHeight = (metrics.lyricSizeSp * 0.72f * MusicLayout.LYRIC_LINE_HEIGHT_EM).sp,
             color = Color.White,
             textAlign = TextAlign.Center,
+            // 这一层单独挂点击（而不是整列挂），因为下面还要放一颗**另一个意图**的按钮。
+            modifier = if (clickable != null) Modifier.clickable(onClick = clickable) else Modifier,
         )
         if (detail.isNotBlank()) {
             Text(
@@ -489,6 +558,26 @@ private fun MusicStatusCard(
                 lineHeight = metrics.artistSize * MusicLayout.HUD_TEXT_LINE_HEIGHT_EM,
                 color = Color.White.copy(alpha = 0.62f),
                 textAlign = TextAlign.Center,
+            )
+        }
+        // 只有"需要用户做点什么才能登录"的状态才给这颗按钮。
+        // 已登录时这里不该出现 —— 一个点不动的按钮比没有按钮更让人困惑。
+        if (loginState is QqLoginState.LoggedOut ||
+            loginState is QqLoginState.Expired ||
+            loginState is QqLoginState.Failed
+        ) {
+            Text(
+                text = if (loginState is QqLoginState.LoggedOut) "登录 QQ 音乐" else "重新登录",
+                fontSize = metrics.artistSize,
+                lineHeight = metrics.artistSize * MusicLayout.HUD_TEXT_LINE_HEIGHT_EM,
+                color = Color.White.copy(alpha = 0.88f),
+                maxLines = 1,
+                modifier = Modifier
+                    .padding(top = metrics.hudTextGap.dp)
+                    .clip(RoundedCornerShape(percent = 50))
+                    .background(Color.White.copy(alpha = 0.14f))
+                    .clickable(onClick = onOpenLogin)
+                    .padding(horizontal = metrics.pad.dp, vertical = metrics.hudTextGap.dp),
             )
         }
     }

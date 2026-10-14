@@ -56,4 +56,10 @@ dependencies {
 
     // 歌词解析（纯 JVM/KMP）。理由与已核实的坑见 gradle/libs.versions.toml。
     implementation(libs.accompanist.lyrics.core)
+
+    // OkHttp：**只为 WebSocket**。QQ 扫码登录的 qq 通道是 MQTT over WebSocket
+    // （wss://mu.y.qq.com/ws/handshake，已实测标准握手且不校验 Origin），
+    // 而 Android 的 java.net.http.WebSocket 要 API 34 —— 本项目 minSdk 26。
+    // musicu 的普通 POST 也顺带用它，但那一块用 HttpURLConnection 也可以。
+    implementation(libs.okhttp)
 }
