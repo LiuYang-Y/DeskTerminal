@@ -53,9 +53,11 @@ import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.highlight.Highlight
+import com.qingke.desk.core.platform.EffectTier
 import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.DeskGlass
 import com.qingke.desk.core.ui.LocalDeviceProfile
+import com.qingke.desk.core.ui.LocalEffectTier
 import com.qingke.desk.core.ui.SidebarFit
 import com.qingke.desk.core.ui.SidebarFitLevel
 import com.qingke.desk.core.ui.deskGlassSurface
@@ -96,16 +98,26 @@ private const val LENS_FADE_SPAN: Float = 0.30f
  * 与真透镜"镜内看到邻近像素"的观感接近，代价是没有色散与边缘畸变。
  *
  * ---------------------------------------------------------------------------
- * 自适应分档（用户口径：33 走最高特效，低版本降级）
+ * 自适应分档（2026-10-14 改：档位来源是用户设置，不是 API 等级）
  *
- * | 档位 | 判定（照库的门槛抄，不自己发明） | 镜片玻璃 | 彩色边缘 |
+ * 档位一律来自 [EffectTier]（用户在设置面板选的等级 + EffectGovernor 按温度/掉帧的降级），
+ * 由 [toLensTier] 映射成下面的 [LensTier]；**本文件不再读 `Build.VERSION.SDK_INT` 自己推** ——
+ * 之前读它，于是设置面板切"高/中/低/关"画面完全不变，因为两条线从来不相交。
+ *
+ * | 档位 | 来源 | 镜片玻璃 | 彩色边缘 |
  * |---|---|---|---|
- * | [LensTier.HIGHEST] | `SDK_INT >= 33`（RuntimeShader） | 真折射 + 真模糊 + **真色散** | 由 shader 给出 |
- * | [LensTier.MEDIUM] | `SDK_INT >= 31`（RenderEffect） | 真模糊，无折射 | 渐变描边近似 |
- * | [LensTier.LOWEST] | 其余 | 半透明底 + 高光，无模糊无折射 | 渐变描边近似 |
+ * | [LensTier.HIGHEST] | `EffectTier.HIGH`（RuntimeShader，API 33+ 才可能被 Governor 给到） | 真折射 + 真模糊 + **真色散** | 由 shader 给出 |
+ * | [LensTier.MEDIUM] | `EffectTier.MEDIUM`（RenderEffect，API 31+） | 真模糊，无折射 | 渐变描边近似 |
+ * | [LensTier.LOWEST] | `EffectTier.LOW` / `EffectTier.OFF` | 半透明底 + 高光，无模糊无折射 | 渐变描边近似 |
  *
- * 三档**都能看到**"镜内放大 + 染色 + 镜片比项大"，因为这些是自绘的，不依赖 RuntimeShader。
+ * 前两档**都能看到**"镜内放大 + 染色 + 镜片比项大"，因为这些是自绘的，不依赖 RuntimeShader。
  * 分档只决定"折射/色散/模糊"这层增强有没有。
+ *
+ * [EffectTier.OFF] 更进一步：**放大、染色、描边也一起关掉**（见 [LensSideBar] 里的 `active`）——
+ * 用户明确选了"关"，那就不该看到任何靠玻璃撑起来的效果。此时 backdrop 为 null
+ * （[rememberDeskGlassBackdrop] 在 OFF 档返回 null），`blur()/lens()` 本来也无层可画。
+ * **但侧栏胶囊与选中块本身仍在**（静态纯色底，[deskGlassSurface] 对 OFF/LOW 走同一条路径）——
+ * "关闭"省掉的是采样与合成开销，不该省成"侧栏整条消失"。
  *
  * ---------------------------------------------------------------------------
  * 竖向布局的溢出：**不越界**
@@ -196,11 +208,31 @@ enum class LensTier(val label: String, val detail: String) {
     LOWEST("最低档", "无模糊无折射；放大/染色/描边全部自绘（API < 31）"),
 }
 
-/** 当前设备的档位。 */
+/** 当前设备的档位。**只给调试预览页用** —— 正式链路由 [EffectTier] 下发，见 [toLensTier]。 */
 fun resolveLensTier(): LensTier = when {
     Build.VERSION.SDK_INT >= 33 -> LensTier.HIGHEST
     Build.VERSION.SDK_INT >= 31 -> LensTier.MEDIUM
     else -> LensTier.LOWEST
+}
+
+/**
+ * 全局档位 → 本文件的视觉档位。
+ *
+ * **全局唯一权威是 [EffectTier]**（用户在设置里选的等级 + EffectGovernor 按温度/掉帧的降级），
+ * 本文件不再自己按 `SDK_INT` 推 —— 那正是"用户在设置里切档、画面毫无变化"的根因：
+ * 设置面板改的是 [EffectTier]，而这里读的是 `Build.VERSION.SDK_INT`，两者永不相关。
+ *
+ * 映射口径（与 [EffectTier.minApi] 一一对应）：
+ *   · [EffectTier.HIGH]   → [LensTier.HIGHEST]（RuntimeShader 可用，真折射 + 真色散）
+ *   · [EffectTier.MEDIUM] → [LensTier.MEDIUM]（只有 RenderEffect，真模糊）
+ *   · [EffectTier.LOW]、[EffectTier.OFF] → [LensTier.LOWEST]（自绘，无模糊无折射）
+ *
+ * OFF 额外由调用方关掉"放大 / 染色 / 描边"三项增强，见 [LensSideBar] 里的 `active`。
+ */
+fun EffectTier.toLensTier(): LensTier = when (this) {
+    EffectTier.HIGH -> LensTier.HIGHEST
+    EffectTier.MEDIUM -> LensTier.MEDIUM
+    EffectTier.LOW, EffectTier.OFF -> LensTier.LOWEST
 }
 
 /**
@@ -244,8 +276,8 @@ fun LensSideBar(
     // "5×64 + 4×6 + 2×6 = 356 ≤ 361" —— 只在 361dp 高的机器上成立。
     // 换一台矮一点的机器这列就比屏幕高（第五项被挤掉），换高的又留一大段空。
     //
-    // 现在交给 fitSidebar()：先均分，放不下标签就只留图标，再放不下就缩间距，
-    // **永不低于触控下限**；三级都退完还放不下时它返回 fitting=false，
+    // 现在交给 fitSidebar()：先均分，够不到"带文字"的 64dp 就隐藏文字只留图标，
+    // 连"纯图标"的 54dp 都够不到时它返回 fitting=false，
     // 这里按它给的 suggestedMaxItems 少显示几个入口（历史上 6 项 → 5 项就是这么做的：
     // 宁可少一个入口，也不做点不中的小按钮）。
     // 优先用**量出来的**容器高度（调用方给），没有才退回档案里的窗口上界。
@@ -257,7 +289,7 @@ fun LensSideBar(
             itemCount = items.size,
         )
     }
-    // fitting=false 时按"触控下限能排几个"截掉尾部入口。
+    // fitting=false 时按"纯图标一格（54dp）还能排几个"截掉尾部入口。
     // 被截掉的是最后几项（ newest 优先保留前几个主入口）。
     val shownItems = if (fit.fitting) items else items.take(fit.suggestedMaxItems)
     if (shownItems.isEmpty()) return
@@ -267,7 +299,12 @@ fun LensSideBar(
     val innerPaddingPx = with(density) { DeskDimens.sideBarInnerPadding.toPx() }
     val lastIndex = shownItems.lastIndex
 
-    val selectedIndex = items.indexOfFirst { it.id == selectedId }.let { if (it < 0) 0 else it }
+    // 选中项的位置**必须在 [shownItems] 上找**，不能在完整的 [items] 上找：
+    // 入口被截断时（fitting=false）下标会越界 —— 5 项截成 3 项、而当前屏对应第 5 项时，
+    // 这里会返回 4，接着 `indicator.animateTo(4f)` 把镜片滑到列表外面去。
+    // 找不到（被截掉的那一项正被选中）退回 0：宁可指示块停在第一项，也不要越界。
+    val selectedIndex = shownItems.indexOfFirst { it.id == selectedId }
+        .let { if (it < 0) 0 else it }
 
     // 位置单位是"第几项"的浮点值，与正式侧栏一致：条目尺寸变了也不用重算动画。
     val indicator = remember { Animatable(0f) }
@@ -309,8 +346,14 @@ fun LensSideBar(
         )
     }
 
-    val active = lensEnabled && LensSpec.ENABLED
-    val tier = remember { resolveLensTier() }
+    // 档位由 [LocalEffectTier] 下发，本文件只做一次类型映射（见 [toLensTier]）。
+    val effectTier = LocalEffectTier.current
+    val tier = effectTier.toLensTier()
+
+    // OFF 档：玻璃层根本不建（backdrop 为 null），透镜的三项增强一起关掉 ——
+    // 放大、染色、描边都是"玻璃上的效果"，底下没有玻璃时它们只剩浮夸；
+    // 描边同时还是侧栏胶囊的那条边，也在 `active` 里一并关掉。
+    val active = lensEnabled && LensSpec.ENABLED && effectTier != EffectTier.OFF
 
     // 镜片尺寸：开启时比项大一点，关闭时回到条目尺寸（= 改动前的指示块）。
     //
@@ -325,9 +368,6 @@ fun LensSideBar(
         minOf(maxByWidth, fit.itemSize.value + 4f).dp
     } else {
         fit.itemSize
-    }
-    val lensOverhangPx = with(density) {
-        ((lensSize - DeskDimens.sideBarItemSize) / 2).toPx()
     }
     val lensSizePx = with(density) { lensSize.toPx() }
     val lensCorner = if (active) LensSpec.lensCorner else DeskDimens.sideBarIndicatorCorner
@@ -363,7 +403,10 @@ fun LensSideBar(
                 shape = RoundedCornerShape(DeskDimens.sideBarCorner),
             )
             .padding(DeskDimens.sideBarInnerPadding)
-            .pointerInput(items, stepPx) {
+            // key 里放的是 **shownItems** 而不是 items：截断后条数变了，手势闭包里
+            // 的越界判断（lastIndex）与取项（shownItems[target]）都要跟着重建，
+            // 否则 pointerInput 会一直握着旧列表的那个 lambda。
+            .pointerInput(shownItems, stepPx, lastIndex) {
                 detectVerticalDragGestures(
                     onDragStart = { down ->
                         dragging = true
@@ -381,7 +424,9 @@ fun LensSideBar(
                     onDragEnd = {
                         dragging = false
                         val target = dragRaw.value.roundToInt().coerceIn(0, lastIndex)
-                        onSelect(items[target])
+                        // 取的是**显示出来的**那一项：target 本来就被夹在 shownItems.lastIndex 内，
+                        // 这里再用 items 去取就是拿小下标查大列表 —— 越界在截断时必然发生。
+                        onSelect(shownItems[target])
                         scope.launch { indicator.animateTo(target.toFloat()) }
                     },
                     onVerticalDrag = { change, _ ->
@@ -555,13 +600,19 @@ fun LensSideBar(
  *   两个开关打开 —— `core:ui` 的 [deskGlassSurface] 是统一封装，没开这两个开关，
  *   而"彩色边缘"正是靠色散给的。注意这两个 boolean **只能按位置传**：
  *   jar 里没有形参名（LocalVariableTable 为空），具名参数编译不过。
- * - [LensTier.MEDIUM]：退回 [deskGlassSurface]（真模糊生效、无折射）。
+ * - [LensTier.MEDIUM]：退回 [deskGlassSurface]（真模糊生效、无折射 —— 它内部只开
+ *   `vibrancy + blur`，因为 lens() 在 API 31/32 上本来就 return）。
  * - [LensTier.LOWEST]：**不再多开一层 backdrop**，用普通 Compose 画同款观感
  *   （半透明底 + 下面那层径向柔光）。低版本上 blur()/lens() 会静默 return，
  *   这层玻璃画出来**本来就没有折射也没有模糊**，却要多申请一块 SurfaceControl；
  *   真机实测每帧多这一块就把 hwui 的事务压崩了（见文件头"每帧重组会崩"）。
  *
- * `active=false`（总开关关掉）时只画与改动前一致的指示块玻璃。
+ * `active=false` 有两种来源，两者都只画与改动前一致的指示块玻璃：
+ *   · [LensSpec.ENABLED] / 调用方的透镜开关被关掉；
+ *   · **档位是 [EffectTier.OFF]** —— 此时 [rememberDeskGlassBackdrop] 返回 null，
+ *     [deskGlassSurface] 走 OFF/LOW 的静态路径，画出**一块纯色半透明底**
+ *     （2026-10-14 改；此前 OFF 是"什么都不画"，结果是侧栏与选中块一起隐形）。
+ *     所以 OFF 档看到的是"朴素的侧栏"，而不是"没有侧栏"。
  */
 @Composable
 private fun Modifier.lensGlass(

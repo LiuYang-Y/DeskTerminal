@@ -12,3 +12,7 @@ local.properties
 # 真机验证的证据截图（本地留存，不入库）
 .verify/
 .kotlin/
+
+# 给外部 AI 分析用的一次性导出（生成物，体积 1MB+，不入库）
+deskterminal_context*.txt
+deskterminal_vol*.txt

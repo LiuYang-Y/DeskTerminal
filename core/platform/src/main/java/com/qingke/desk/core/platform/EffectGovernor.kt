@@ -21,7 +21,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
 
@@ -142,7 +141,18 @@ class EffectGovernor(
     private var samplerJob: Job? = null
 
     private val powerManager: PowerManager? get() = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
-    private val thermalExecutor by lazy { Executors.newSingleThreadExecutor() }
+
+    // 温度监听原先挂在一个**自己建的** `Executors.newSingleThreadExecutor()` 上。
+    // 那条路有两个问题，2026-10-14 一起去掉了：
+    //   1. 那个线程池从建出来到进程结束**没有任何地方 shutdown()** —— 常亮的设备上，
+    //      它连同那条常驻线程一直挂着，而这个监听器在 Activity 重建时会被重新注册；
+    //   2. 回调因此在后台线程直接改状态（`_thermal` / `_penalty` / 迟滞计数器），
+    //      和采样协程形成竞争。
+    // 换成 mainExecutor 之后：不拥有任何需要释放的资源（拿到的是主 looper 上的一个
+    // Handler 包装），回调与 Choreographer 采样、以及所有 StateFlow 的读取者都在同一条
+    // 线程上排队，不再有"两个线程同时改 consecutiveBad"这种事。
+    // 主线程上只做一次 StateFlow 赋值 + 一个 `scope.launch`，耗时在微秒级，
+    // 不会影响 16 ms 的帧预算。
     private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
     private var powerSaveReceiver: BroadcastReceiver? = null
 
@@ -360,7 +370,10 @@ class EffectGovernor(
             }
         }
         runCatching {
-            manager.addThermalStatusListener(thermalExecutor, listener)
+            // `mainExecutor` 是 API 28+ 的成员；本分支已被上面的 `SDK_INT < Q`（29）挡住，
+            // 所以这里不会有低版本调用（minSdk 26 用不到这个重载，
+            // `addThermalStatusListener` 本身也是 API 29 才有的）。
+            manager.addThermalStatusListener(context.applicationContext.mainExecutor, listener)
             thermalListener = listener
         }
     }

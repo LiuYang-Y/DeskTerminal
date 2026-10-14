@@ -454,7 +454,7 @@ private fun SimulatedShell() {
             )
             if (!fit.fitting) {
                 Text(
-                    "⚠ 触控下限排不下 ${items.size} 项，实际显示前 ${fit.suggestedMaxItems} 项" +
+                    "⚠ 纯图标下限 54dp 也排不下 ${items.size} 项，实际显示前 ${fit.suggestedMaxItems} 项" +
                         "（超出 ${fit.overflow.value.toInt()}dp）",
                     fontSize = 9.sp,
                     color = Color(0xFFFFB4A2),

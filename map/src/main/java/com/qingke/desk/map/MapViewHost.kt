@@ -214,6 +214,24 @@ class MapViewHost(
     fun destroy() {
         if (destroyed) return
         destroyed = true
+
+        // **先清叠加层，再销毁地图**（2026-10-14 补）。
+        //
+        // [NaviMapOverlay] 是**进程级 object**，它按设计持有 `AMap` 与一串 `Polyline`
+        // （理由见那个类头部：退出导航时用户可能站在地图页上，首页卡的组合早就销毁了，
+        // 折线只有单例拿得到）。这份"刻意不随组合走"的引用在 Activity 销毁时会变成
+        // 一条静态引用链：object → Polyline → AMap → MapView/TextureMapView，
+        // 全部跟着进程活下去。真机上表现为"每重建一次 Activity 就多留一份地图内存"，
+        // 而地图是这条链上最贵的一环（纹理 + 瓦片缓存 + GL 上下文）。
+        //
+        // 必须在 `onDestroy()` **之前**调：clear() 会去 remove 那些折线，
+        // 而 remove 是要走进地图引擎的 —— 引擎已销毁时那是一次空转（被 runCatching 兜住），
+        // 但引用照样清得掉。放在前面则是既清引用、又顺手把覆盖物摘干净。
+        //
+        // 放在 `target == null` 的早退**之前**：即使这个宿主一次都没创建过地图，
+        // 单例里也可能残留着**上一个**宿主留下的引用，一样得清。
+        NaviMapOverlay.clear()
+
         val target = view
         view = null
         observer?.let { lifecycleOwner.lifecycle.removeObserver(it) }

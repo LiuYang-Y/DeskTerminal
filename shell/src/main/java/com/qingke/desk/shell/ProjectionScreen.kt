@@ -3,6 +3,8 @@ package com.qingke.desk.shell
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -32,6 +34,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.qingke.desk.connection.ConnectionPhase
@@ -90,6 +94,7 @@ fun ProjectionScreen(
                 text = phaseLabel(uiState),
                 color = Color.White,
                 fontSize = DeskDimens.cardCaption,
+                lineHeight = NoticeLineHeight,
             )
             uiState.lastError?.let { error ->
                 Spacer(modifier = Modifier.height(6.dp))
@@ -97,6 +102,7 @@ fun ProjectionScreen(
                     text = "${error.code} · ${error.detail}".trim(),
                     color = Color(0xFFFF8A80),
                     fontSize = DeskDimens.cardCaption,
+                    lineHeight = NoticeLineHeight,
                 )
             }
         }
@@ -167,24 +173,83 @@ private fun StatusText(text: String) {
 }
 
 /**
+ * 居中提示卡片上下要避开的"安全区"（2026-10-14 补，修矮屏重叠）。
+ *
+ * 这一页上有两块**位置钉死**的东西，卡片居中时会正好压上去：
+ *   · 左上角那列状态文字 —— [phaseLabel] 一行，出错时下面再压一行 detail；
+ *   · 右下角那排按钮 —— 触控下限 64 dp、外面再套一层 [DeskDimens.screenPadding]。
+ *
+ * 一加横屏只有 361 dp 高，一张"标题 + 两段说明 + 包名"的卡片轻松超过 200 dp，
+ * 上下沿各自伸进这两块里，真机上的样子是「返回首页」被卡片盖掉一半 ——
+ * 用户会以为退不出去。
+ *
+ * 顶部那份**从行高推，且行高是显式声明的**（[NoticeLineHeight]），不再借用
+ * [DeskDimens.TEXT_LINE_HEIGHT_RATIO] —— 真机教训（2026-10-14，小米 11 Ultra）：
+ * 那个 1.25 是**反推字号用的系数**（时钟卡场景），不是 Compose 的行高；
+ * Text 不写 lineHeight 时行高来自**字体度量**，中文 ascent 大，实测 13sp 的
+ * 行盒高达 ~20.3 dp（≈1.56 em），两行下来比 1.25 的假设多出 ~13 dp，
+ * 错误行正好压进卡片顶边 ~4 dp。显式声明后，这里的行高与顶部 Text 用的
+ * 是**同一个值**，不会再随 ROM 字体漂移。
+ * 底部那份就是"一个触控高度 + 上下留白 + 一点间隙"。
+ *
+ * ⚠️ 这两条带是**内边距**，不是"卡片限高"用的数。区别很实在：卡片在整屏里居中时，
+ * 限高只能保证"上下加起来不超标"，控不住**单边** —— 361 dp 屏上按老写法算出的
+ * 210 dp 卡片居中后底边落在 285，而那排按钮从 277 就开始了，照样被压住。
+ * 让出上下两条带之后，"中间这条带"本身就是卡片的可用空间，卡片在带内居中，
+ * **结构上不可能**碰到状态行和按钮。
+ *
+ * 这条带假设顶部状态块不超过两行（[phaseLabel] 一行 + 出错时的 detail 一行）。
+ */
+/** 顶部状态文字的**显式**行高：13sp × 1.55 ≈ 20.2sp，贴近中文默认度量，
+ *  但由我们声明而不是赌 ROM 字体。安全区常量与 Text 用同一个值，不会分叉。 */
+private val NoticeLineHeight: TextUnit = DeskDimens.cardCaption * 1.55f
+
+private val NoticeTopSafeArea: Dp = DeskDimens.screenPadding +
+    (NoticeLineHeight.value * 2f + 6f + 4f).dp
+
+private val NoticeBottomSafeArea: Dp =
+    DeskDimens.screenPadding + DeskDimens.minTouchTarget + 8.dp
+
+/**
  * 拉起被挡住时的提示页。
  *
  * 存在的理由很实在：阶段一依赖外部 DiPlay，没装是常态而不是异常。
  * 这里必须把"缺什么 + 怎么补救"说清楚，**绝不能只是转圈或直接崩掉**。
+ *
+ * 高度：卡片高度由上下两条安全区**给出上界**、文字自己滚。上界存在的意义不是
+ * "卡片就该这么高"，而是**保证它永远压不到状态行和按钮**；内容太多时滚动，
+ * 而不是让最后一段被卡片边缘齐腰切断、或者把按钮挤成 0 高（后者是
+ * [com.qingke.desk.hosting.ui.HostingNotice] 踩过的坑，同一个处置办法）。
  */
 @Composable
 private fun UnavailablePanel(
     unavailable: AvailabilityResult.Unavailable,
     modifier: Modifier = Modifier,
 ) {
-    Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    // 上下两条安全区直接做成本容器的内边距，具体理由见 [NoticeTopSafeArea]。
+    // 让完之后，"中间这条带"的**有界高度**就传给了卡片 ——
+    // 卡片因此天然不会超出这条带，也让下面的 verticalScroll 有了可滚的边界
+    //（verticalScroll 要求可用高度有界，否则它不知道"滚出多少算到头"）。
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(top = NoticeTopSafeArea, bottom = NoticeBottomSafeArea),
+        contentAlignment = Alignment.Center,
+    ) {
         Surface(
             color = Color(0xFF1B1E26),
             shape = RoundedCornerShape(DeskDimens.cardCorner),
             modifier = Modifier.fillMaxWidth(0.72f),
         ) {
             Column(
-                modifier = Modifier.padding(DeskDimens.cardPadding * 1.5f),
+                // padding 写在 verticalScroll **前面**（即更靠外）：留白固定不动，
+                // 滚的是里面的文字。反过来写的话滚动区会顶到卡片圆角上。
+                //
+                // 这个 verticalScroll 是"内容超了不压按钮"的**唯一**出口：
+                // 矮屏上标题 + 两段说明 + 包名会超过可用高度，靠它自己滚。
+                modifier = Modifier
+                    .padding(DeskDimens.cardPadding * 1.5f)
+                    .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.Start,
             ) {
                 Text(
@@ -229,16 +294,27 @@ private fun UnavailablePanel(
  *
  * 这里要把"现在画面是谁在画、怎么回来"讲清楚 —— 用户看到黑屏如果不知道
  * 下一步该按什么，第一反应就是拔线。
+ *
+ * 与 [UnavailablePanel] 同一套处置：让出上下两条安全区（卡片高度因此有界）+ 内部滚动。
+ * 这段文字是这个页面上**最长**的一块（四行说明 + 空行 + 三行操作指引），
+ * 矮屏上不限高必定压到右下角的按钮。
  */
 @Composable
 private fun ExternalProjectionPlaceholder(sessionId: String) {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(top = NoticeTopSafeArea, bottom = NoticeBottomSafeArea),
+        contentAlignment = Alignment.Center,
+    ) {
         Surface(
             color = Color(0xFF1B1E26),
             shape = RoundedCornerShape(DeskDimens.cardCorner),
         ) {
             Column(
-                modifier = Modifier.padding(DeskDimens.cardPadding),
+                modifier = Modifier
+                    .padding(DeskDimens.cardPadding)
+                    .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(

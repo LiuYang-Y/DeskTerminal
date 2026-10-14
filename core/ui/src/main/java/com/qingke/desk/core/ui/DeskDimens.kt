@@ -220,7 +220,10 @@ object DeskDimens {
      * 单个条目：图标 + 文字标签竖向排列，**首选**边长 [sideBarItemSize]。
      *
      * 注意"首选"二字（2026-10-13）：实际边长由 `fitSidebar()` 按可用高度均分，
-     * 矮屏上会更小、高屏上更大（有上限），但**永不低于 [minTouchTarget]**。
+     * 矮屏上会更小、高屏上更大（有上限）。
+     *
+     * 下限分两级（2026-10-14 细化）：**带文字**时不低于 [minTouchTarget]（64dp）；
+     * 掉到 64 以下就走"仅图标"降级，此时可下探到 `SidebarFit.ICON_ONLY_MIN_DP`（54dp）。
      * 也就是说这个值现在是"想给多少"，不再是"一定是多少"。
      */
     val sideBarItemSize: Dp = 64.dp

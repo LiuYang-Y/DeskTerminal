@@ -20,6 +20,7 @@ import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.highlight.Highlight
+import com.qingke.desk.core.platform.EffectTier
 
 /**
  * 液态玻璃效果的封装层：**整个工程只有本文件 import 第三方玻璃库**。
@@ -123,7 +124,31 @@ fun Modifier.deskGlassSource(backdrop: LayerBackdrop?): Modifier =
  * @param alpha 蒙版不透明度。**这是拉出层次的主要手段**：同一块背景层上，
  *              数值越大越"亮"、越像一块实体玻璃。侧栏 0.12、选中指示块 0.26。
  * @param highlight 边缘高光。默认取库的 [Highlight.Default]。
+ *
+ * ---------------------------------------------------------------------------
+ * 档位（2026-10-14 补：以前这里**不读档位**，用户在设置里切"高/中/低/关"画面毫无变化）
+ *
+ * 读的是 [LocalEffectTier]（与侧栏透镜、[rememberDeskGlassBackdrop] 同一个 Local），
+ * 四档这样落：
+ *
+ * | 档位 | 行为 | 依据 |
+ * |---|---|---|
+ * | [EffectTier.OFF] | **不建层**，只铺一层纯色半透明底（与 LOW 同款） | 层是成本所在，底是可读性所在 —— 见下 |
+ * | [EffectTier.LOW] | 同上（不调 `drawBackdrop`） | 低端机上 `drawBackdrop` 连层都不建（见 EffectTier 的注释），调了只是白跑 |
+ * | [EffectTier.MEDIUM] | `vibrancy + blur`，**不开 lens** | RenderEffect（API 31）能模糊，RuntimeShader（API 33）才能折射 |
+ * | [EffectTier.HIGH] | `vibrancy + blur + lens` 全套 | RuntimeShader 可用 |
+ *
+ * **为什么 OFF 和 LOW 画的是同一块底**（2026-10-14 改，此前 OFF 是"一层都不画"）：
+ * OFF 是给用户看的设置项，也是高温/掉帧时的临界降级档。原来它 `return this`，
+ * 实测症状是**侧栏胶囊与选中块一起隐形** —— 用户选"关闭"看到的是"侧栏没了"，
+ * 那是故障的观感，不是一个设置项该有的样子。现在 OFF 保留静态底色
+ * （成本 = 一次 `drawRect`，不建 `LayerBackdrop`、不采样背景），
+ * 与 LOW 的唯一区别挪到别处：**OFF 关掉透镜按压放大与彩色描边**（见 `LensSideBar.active`）。
+ *
+ * 本函数因此是 `@Composable` 的：它要读 CompositionLocal。所有调用点都在组合期，
+ * 不受影响；但**不能再在 `drawBehind {}` 这类绘制期 lambda 里调它**。
  */
+@Composable
 fun Modifier.deskGlassSurface(
     backdrop: LayerBackdrop?,
     shape: () -> Shape,
@@ -131,7 +156,21 @@ fun Modifier.deskGlassSurface(
     alpha: Float = DeskGlass.surfaceAlpha,
     highlight: () -> Highlight = { Highlight.Default },
 ): Modifier {
+    val tier = LocalEffectTier.current
+
+    // 总开关关掉时"一层都不画"，方便同一台机器上做有/无玻璃的 A/B 对比。
+    // 这一条与档位无关，所以放在最前面 —— 它必须能盖过下面所有档位，
+    // 否则"切到低档再看 A/B"会得到一块底，对比就失效了。
+    if (!DeskGlass.ENABLED) return this
+
+    // OFF 与 LOW 共用这条**静态**路径：不采样背景、不建层，只铺一层纯色半透明底。
+    // 两块地（侧栏胶囊 0.12 / 选中块 0.26）因此都还看得见，只是不再有模糊与折射。
+    if (tier == EffectTier.OFF || tier == EffectTier.LOW) {
+        return this.background(surfaceColor.copy(alpha = alpha), shape())
+    }
+
     if (backdrop == null) return this
+
     return this.drawBackdrop(
         backdrop = backdrop,
         shape = shape,
@@ -139,7 +178,13 @@ fun Modifier.deskGlassSurface(
             // 顺序照官方教程：先提饱和，再模糊，最后是边缘折射。
             vibrancy()
             blur(DeskGlass.blurRadius.toPx())
-            lens(DeskGlass.refractionHeight.toPx(), DeskGlass.refractionAmount.toPx())
+            // lens() 内部第一行就是 `if (!isRuntimeShaderSupported()) return`，
+            // MEDIUM 档（API 31/32 只有 RenderEffect）调它等于白跑一趟。
+            // 跳过它还有个附带好处：调用方不用去猜"折射到底生效了没有"——
+            // 这一档本来就没有折射，直接不声明。
+            if (tier == EffectTier.HIGH) {
+                lens(DeskGlass.refractionHeight.toPx(), DeskGlass.refractionAmount.toPx())
+            }
         },
         highlight = highlight,
         onDrawSurface = { drawRect(surfaceColor.copy(alpha = alpha)) },

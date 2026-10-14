@@ -1,5 +1,6 @@
 package com.qingke.desk.connection
 
+import android.util.Log
 import com.qingke.desk.core.model.DisplayInfo
 import com.qingke.desk.projection.api.AvailabilityResult
 import com.qingke.desk.projection.api.ProjectionConfig
@@ -99,7 +100,7 @@ class ConnectionOrchestrator(
         val availability = factory.checkAvailability()
         if (availability !is AvailabilityResult.Ready) {
             stopReconnect()
-            teardownSession()
+            teardownSession(StopReason.SUPERSEDED)
             fail(
                 kind = kind,
                 code = (availability as AvailabilityResult.Unavailable).code,
@@ -110,7 +111,7 @@ class ConnectionOrchestrator(
         }
 
         stopReconnect()
-        teardownSession()
+        teardownSession(StopReason.SUPERSEDED)
 
         val created: ProjectionSession = factory.create()
         _activeSession.value = created
@@ -188,16 +189,26 @@ class ConnectionOrchestrator(
 
     fun disconnect(reason: StopReason = StopReason.USER_EXPLICIT_EXIT) {
         stopReconnect()
-        val current = _activeSession.value ?: return
-        scope.launch {
-            current.stop(reason)
-            current.release()
-            _activeSession.value = null
-            _uiState.value = ConnectionUiState(
-                phase = ConnectionPhase.DISCONNECTED,
-                sessionState = ProjectionState.STOPPED,
-            )
-        }
+
+        // 顺序是这次修的核心，两件事都必须是**同步**的（2026-10-14）：
+        //
+        //   1. 先把会话从 `_activeSession` 上摘下来并取消 observer；
+        //   2. 再把界面状态置成"未连接"。
+        //
+        // 原来的写法把这两件事都放进了 `scope.launch`，排在 `stop()`/`release()` 这两个
+        // **挂起**调用之后。于是从"用户点了退出"到"引用被清空"之间隔着一个对端应答的时间，
+        // 用户在这段时间里重连，旧协程跑完最后一行 `_activeSession.value = null`，
+        // 正好把**刚建好的新会话**置空 —— 现象是"重连成功了一瞬间又自己断了"，
+        // 没有任何报错，也没有任何日志，只有画面退回未连接。
+        //
+        // 摘引用与清状态都不需要等待，本来就该同步做完；等待的只有 stop/release 本身。
+        val prev = detachActiveSession() ?: return
+        _uiState.value = ConnectionUiState(
+            phase = ConnectionPhase.DISCONNECTED,
+            sessionState = ProjectionState.STOPPED,
+        )
+
+        scope.launch { stopAndRelease(prev, reason) }
     }
 
     fun retryNow() {
@@ -263,10 +274,42 @@ class ConnectionOrchestrator(
         reconnect = null
     }
 
-    private fun teardownSession() {
+    /**
+     * 同步把当前会话**摘下来**：取消观察者、清空引用，并把被摘下的那个返回给调用方。
+     *
+     * 为什么要单独抽一个、而且必须是同步的：`stop()` / `release()` 是挂起函数，
+     * 而"同一时刻只允许一个会话"这条不变式**不能等它们跑完才成立**。见 [disconnect]
+     * 里那段关于重连被旧协程置空的说明。
+     */
+    private fun detachActiveSession(): ProjectionSession? {
         observer?.cancel()
         observer = null
+        val prev = _activeSession.value
         _activeSession.value = null
+        return prev
+    }
+
+    /**
+     * 收掉一个已经**不再挂在** [_activeSession] 上的旧会话。
+     *
+     * 旧会话自己那个 `CoroutineScope` 由 [ProjectionSession.release] 负责取消 ——
+     * 以前这里只 cancel 了 observer（那只是**我们**这边的收集协程），
+     * 会话内部的 scope 一直活着，于是每重连一次就多泄漏一份。
+     *
+     * 全部包在 runCatching 里：这是 `scope.launch` 的顶层，抛出去会走
+     * 作用域的异常处理器，最坏情况是整个进程挂掉 —— 而"收尾时出点错"绝不值这个代价。
+     */
+    private suspend fun stopAndRelease(session: ProjectionSession, reason: StopReason) {
+        runCatching { session.stop(reason) }
+            .onFailure { Log.w(TAG, "stop($reason) failed: ${it.javaClass.simpleName}", it) }
+        runCatching { session.release() }
+            .onFailure { Log.w(TAG, "release failed: ${it.javaClass.simpleName}", it) }
+    }
+
+    /** 清场：把当前会话摘下来并在后台收掉。由 [connect] 在拉起新会话之前调用。 */
+    private fun teardownSession(reason: StopReason) {
+        val prev = detachActiveSession() ?: return
+        scope.launch { stopAndRelease(prev, reason) }
     }
 
     private fun buildConfig(): ProjectionConfig {
@@ -277,5 +320,9 @@ class ConnectionOrchestrator(
             displayDensityDpi = info.densityDpi,
             nightMode = info.nightMode,
         )
+    }
+
+    private companion object {
+        const val TAG = "DeskConn"
     }
 }

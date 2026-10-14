@@ -66,8 +66,10 @@ import com.qingke.desk.core.platform.EffectLevel
 import com.qingke.desk.core.platform.EffectTier
 import com.qingke.desk.core.platform.RemedyIntents
 import com.qingke.desk.core.ui.DeskDimens
+import com.qingke.desk.core.ui.DeskGlass
 import com.qingke.desk.core.ui.DeskTheme
 import com.qingke.desk.core.ui.deskGlassOverlay
+import com.qingke.desk.core.ui.glassLayerEnabled
 import com.qingke.desk.core.ui.rememberDeskGlassBackdrop
 import com.qingke.desk.feature.media.MediaPermission
 import com.qingke.desk.feature.media.MediaSessionMonitor
@@ -98,21 +100,27 @@ import kotlinx.coroutines.delay
 private const val SHELL_TAG = "DeskShell"
 
 /**
- * 导航页那颗「结束」按钮相对内容区中心的水平偏移。
+ * 导航页那颗「结束」按钮相对内容区中心往左偏的**比例**。
  *
  * SDK 底部那排「退出/暂停」**不在内容区正中** —— 它紧挨着左侧那块全高信息面板，
  * 因此比内容区中心偏左。要把我们的按钮放到它们原来的位置，就得跟着偏。
  *
  * 3200×1440、1 dp = 3.5 px，取自同一张改动前的真机截图（.verify/reg/W1-current.png）：
  * ```
- *   NaviCanvas 内容区   x  445..3200            中心 1822
+ *   NaviCanvas 内容区   x  445..3200            中心 1822，宽 2755 px = 786 dp
  *   SDK 底栏两颗药丸    x 1129..1512            中心 1320
  *   差值                1822 - 1320 = 502 px ÷ 3.5 = 143.4 dp
+ *   比例                143.4 / 786 = 18.2% → 取 0.18
  * ```
+ *
+ * **必须是比例而不是 dp 常量**（2026-10-14 修）：`(-143).dp` 只在 786 dp 宽的内容区上成立，
+ * 换到 666 dp 宽的内容区就偏了 24 dp（正好压住左侧那块信息面板），换到更宽的屏又偏右。
+ * 现在按当前内容区 `maxWidth` 的比例算，偏的是**同一个相对位置**，两端都不会跑。
+ *
  * 用"相对中心偏移"而不是"左对齐 + 左边距"：偏移对齐的是**中心**，
  * 以后换标签（2 字 ↔ 4 字）位置不会跑。
  */
-private val NAVI_EXIT_CHIP_X_OFFSET = (-143).dp
+private const val NAVI_EXIT_CHIP_X_RATIO: Float = 0.18f
 
 enum class DeskScreen {
     HOME,
@@ -390,8 +398,14 @@ fun DeskRoot(
     DeskTheme {
         // 玻璃背景层必须在"内容区"和"侧栏"共同的父层创建：
         // 它录的是内容、画在侧栏上，两头都要用同一个句柄。
-        // ENABLED=false 时它返回 null，两个 Modifier 自动退化为空操作。
+        // ENABLED=false 或**运行时档位是 OFF** 时它返回 null，两个 Modifier 自动退化为空操作。
+        //
+        // 档位这一项是 2026-10-14 补的：以前这里只认 [DeskGlass.ENABLED]，于是用户在设置里
+        // 选"关闭"（或者 Governor 因高温降级）之后，背景层照旧每帧被录一遍、侧栏照旧采样 ——
+        // 档位改了，画面一分不变。[EffectTier.glassLayerEnabled] 的定义就是"这一档要不要建层"：
+        // OFF 不建（建了不画仍然有合成开销），其余三档建。
         val glassBackdrop = rememberDeskGlassBackdrop(
+            enabled = DeskGlass.ENABLED && effectTier.glassLayerEnabled,
             background = MaterialTheme.colorScheme.background,
         )
 
@@ -744,11 +758,21 @@ fun DeskRoot(
                                     // 这里的画面在我们的进程里，所以这个手势**收得到触摸**。
                                     // 它走**同一颗确认框**：退出导航是唯一会结束导航的动作，
                                     // 值得多问一句。
-                                    Box(
+                                    BoxWithConstraints(
                                         modifier = Modifier
                                             .fillMaxSize()
                                             .edgeSwipeUp(enabled = true, onSwipeUp = ::askExitNavi),
                                     ) {
+                                        // 「结束」按钮的水平偏移**按当前内容宽算**，不是常量。
+                                        //
+                                        // 它对齐的是 SDK 底栏那两颗药丸原来的中心：那一排紧挨着
+                                        // 左侧那块全高信息面板，所以比内容区中心偏左 ——
+                                        // 比例 18% 的来历（786dp 内容宽、偏 143.4dp）见
+                                        // [NAVI_EXIT_CHIP_X_RATIO] 的注释。
+                                        //
+                                        // 这里量的是**本分支自己的容器**（= 内容区），
+                                        // 所以换机型时比例不变、落点一致；写死 dp 会随内容宽漂移。
+                                        val exitChipXOffset = -maxWidth * NAVI_EXIT_CHIP_X_RATIO
                                         NaviCanvas(
                                             host = naviViewHost,
                                             // 夜间样式用我们自己的昼夜判断（天气 API 的
@@ -789,9 +813,10 @@ fun DeskRoot(
                                         //   SDK「暂停」药丸       x 1339..1512
                                         //   两颗成对              x 1129..1512   → 中心 1320，y 1174..1348
                                         //
-                                        // 内容区中心是 1822，SDK 底栏中心是 1320，**差 502 px = 143 dp**。
+                                        // 内容区中心是 1822，SDK 底栏中心是 1320，**差 502 px = 143 dp**，
+                                        // 即内容宽的 **18%**（786 dp × 0.18 = 141.5 ≈ 143）。
                                         // 所以这里不是 `BottomCenter`，而是 `BottomCenter` 再往左偏
-                                        // [NAVI_EXIT_CHIP_X_OFFSET]。
+                                        // [NAVI_EXIT_CHIP_X_RATIO] × 当前内容宽（见上面 [exitChipXOffset]）。
                                         //
                                         // 纵向是量出来对上的，不是凑的：药丸底边 1348、屏底 1440，
                                         // 留白 92 px ÷ 3.5 = 26 dp（下面那个 `padding(bottom = 26.dp)`）。
@@ -819,7 +844,7 @@ fun DeskRoot(
                                         Box(
                                             modifier = Modifier
                                                 .align(Alignment.BottomCenter)
-                                                .offset(x = NAVI_EXIT_CHIP_X_OFFSET)
+                                                .offset(x = exitChipXOffset)
                                                 .padding(bottom = 26.dp)
                                                 .shadow(6.dp, exitShape)
                                                 .deskGlassOverlay(exitShape)

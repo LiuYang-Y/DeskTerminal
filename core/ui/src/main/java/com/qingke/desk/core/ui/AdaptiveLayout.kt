@@ -32,14 +32,25 @@ import kotlin.math.roundToInt
 /**
  * 侧栏的排布方案。
  *
- * 三级降级，顺序是**先均分、再减内容、最后才缩间距**（用户口径）：
- *   1. [level] = [SidebarFitLevel.FULL]      每项够高 → 图标 + 文字标签都显示；
- *   2. [level] = [SidebarFitLevel.ICON_ONLY] 每项不够放标签 → 只显示图标；
- *   3. 间距从 [SidebarFit.PREFERRED_GAP] 往下退到 [SidebarFit.MIN_GAP]，把省下的高度还给条目。
+ * **三级降级**（2026-10-14 理顺：此前第 2 级是死代码，跑不到）：
+ *   1. [level] = [SidebarFitLevel.FULL]      条目 ≥ [SidebarFit.LABEL_MIN_ITEM_DP]（64dp）
+ *                                            → 图标 + 文字标签都显示；
+ *   2. [level] = [SidebarFitLevel.ICON_ONLY] 条目够不到 64 但 ≥
+ *                                            [SidebarFit.ICON_ONLY_MIN_DP]（54dp）
+ *                                            → 隐藏文字只留图标，**保住触控**；
+ *   3. 连 54dp 都排不下 → [fitting] = false，**不再缩小触控区**，改把
+ *      [suggestedMaxItems] 报给调用方减少入口（历史上 6 项 → 5 项就是这么做的：
+ *      宁可少一个入口，也不做点不中的小按钮）。
  *
- * **条目的高度永不低于 [SidebarFit.MIN_TOUCH_DP]**。三级都退完还放不下时
- * [fitting] 为 false —— 这时不缩小触控区，而是把 [suggestedMaxItems] 报给调用方，
- * 让它减少入口数（历史上 6 项 → 5 项就是这么做的：宁可少一个入口，也不做小按钮）。
+ * 两级各有自己的底线，别混：
+ *   · **带文字时**的下限 [SidebarFit.MIN_TOUCH_DP] = 64dp（[DeskDimens.minTouchTarget] 同值：
+ *     桌面终端在手臂距离外操作，48dp 的 Material 基线不够用）；
+ *   · **纯图标时**可以下探到 [SidebarFit.ICON_ONLY_MIN_DP] = 54dp —— 去掉那行标签本身
+ *     就省下约 10dp，54dp 仍在 Material 48dp 之上。
+ *
+ * 间距的意图是"最后才缩"：只在"缩间距**能换来带文字的 64dp**"时才退它；
+ * 退到 [SidebarFit.MIN_GAP_DP] 仍够不到 64，就接受当下高度走 ICON_ONLY，
+ * 不为凑数继续动间距（2dp 已经是"两条不看成一块"的极限）。
  */
 enum class SidebarFitLevel(val label: String) {
     FULL("图标 + 文字"),
@@ -59,21 +70,28 @@ data class SidebarFit(
     /** 整列实际占的高度（dp）。 */
     val totalHeight: Dp,
     /**
-     * 是否真的放得下。false = 连 [MIN_TOUCH_DP] 都排不下，
-     * 此时 [itemSize] **被夹在** [MIN_TOUCH_DP]（不再往下缩），[overflow] 是超出量。
+     * 是否真的放得下。false = 连 [ICON_ONLY_MIN_DP]（54dp）都排不下，
+     * 此时 [itemSize] **被夹在** [ICON_ONLY_MIN_DP]（不再往下缩），[overflow] 是超出量。
+     *
+     * 判据是"**纯图标**下限"而不是 [MIN_TOUCH_DP]：去掉文字标签就已经放得下了，
+     * 不该为此砍入口 —— 砍入口留到连 54dp 都不够的时候（见 [SidebarFitLevel]）。
      */
     val fitting: Boolean,
     /** 放不下时超出可用高度多少（dp）。放得下时为 0。 */
     val overflow: Dp,
-    /** 放不下时，按触控下限最多能排几个条目。调用方据此减少入口。 */
+    /** 放不下时，按纯图标下限（54dp）最多能排几个条目。调用方据此减少入口。 */
     val suggestedMaxItems: Int,
 ) {
     val showLabel: Boolean get() = level == SidebarFitLevel.FULL
 
     companion object {
         /**
-         * 触控下限。**这是底线，不是可以再让的余量**（[DeskDimens.minTouchTarget] 同值）。
-         * 桌面终端在手臂距离外操作，48dp 的 Material 基线不够用。
+         * **带文字标签时**的条目下限，也是本工程常规的触控下限
+         * （[DeskDimens.minTouchTarget] 同值：这是底线，不是可以再让的余量）。
+         *
+         * 桌面终端在手臂距离外操作，48dp 的 Material 基线不够用，所以定 64dp。
+         * 允许下探到更小的只有 [ICON_ONLY_MIN_DP] 那一种情况 —— **去掉文字**之后
+         * 条目里只剩图标，再小一点仍然点得中。
          */
         const val MIN_TOUCH_DP: Float = 64f
 
@@ -86,8 +104,35 @@ data class SidebarFit(
         /** 条目边长的上限。屏幕很高时也不把图标做成巨无霸，多出来的高度留白居中。 */
         const val MAX_ITEM_DP: Float = 76f
 
-        /** 要显示文字标签，条目至少要多高：图标 30 + 间距 4 + 标签行 ~16 = 50，取 54 留余量。 */
-        const val LABEL_MIN_ITEM_DP: Float = 54f
+        /**
+         * 要显示文字标签，条目至少要多高。**取值等于 [MIN_TOUCH_DP]（64dp）**。
+         *
+         * 尺寸依据：图标 30 + 间距 3 + 标签行 ~16 ≈ 49，64dp 放得下且有余量。
+         * 361dp 屏上 5 项的条目正好 **65dp**，必须落在 FULL 一侧 —— 这正是
+         * `docs/2026-10-11-sidebar-plan.md` 方案 D 的初衷（5 × 64dp **且带文字标签**）。
+         *
+         * 曾经取 68f：那时条目下限被夹在 64，阈值 > 64 确实让 ICON_ONLY
+         * 活了过来，代价却是 361dp 那台机器（条目 65dp）**文字标签全被吞掉**。
+         * 现在换了个改法：阈值回到 64，把"排不下"的判据从 [MIN_TOUCH_DP] 挪到
+         * [ICON_ONLY_MIN_DP]（54）。三级降级照样跑通，361dp 也保住了文字。
+         *
+         * **不变式：本值必须严格大于 [ICON_ONLY_MIN_DP]**，否则
+         * [SidebarFitLevel.ICON_ONLY] 又会变回死代码。
+         */
+        const val LABEL_MIN_ITEM_DP: Float = MIN_TOUCH_DP
+
+        /**
+         * **纯图标**条目允许下探到的绝对下限。
+         *
+         * 54dp 的来源：去掉文字标签后条目里只剩图标 30 + 上下留白，54dp 够用；
+         * 同时它仍在 Material 48dp 基线**之上**，手臂距离外依然点得中。
+         *
+         * 它同时充当两个角色（原来这两个角色都挂在 [MIN_TOUCH_DP] 上，是 ICON_ONLY
+         * 变死代码的根源）：
+         *   · [fitting] 的判据 —— 条目 ≥ 54 就继续排（隐藏文字），< 54 才算排不下；
+         *   · [suggestedMaxItems] 的分母 —— 砍入口时按 54dp 一格算能留几个。
+         */
+        const val ICON_ONLY_MIN_DP: Float = 54f
 
         /** 只显示图标时，图标在条目里占的比例。 */
         const val ICON_RATIO: Float = 0.47f
@@ -109,7 +154,10 @@ fun fitSidebar(
     val count = itemCount.coerceAtLeast(1)
     val usable = (availableHeightDp - innerPadding.value * 2f).coerceAtLeast(0f)
 
-    // 间距从大到小试：每退一档就把省下的高度还给条目，直到条目能到触控下限。
+    // 间距从大到小试：每退一档就把省下的高度还给条目。
+    // 目标只有一个 —— 把条目撑到**能显示文字**的 [SidebarFit.LABEL_MIN_ITEM_DP]（64）。
+    // 退到 [SidebarFit.MIN_GAP_DP] 仍够不到 64，就接受这一档的高度走 ICON_ONLY
+    // （不为了凑 64 再去动间距，2dp 已经是极限）。
     var chosenGap = SidebarFit.MIN_GAP_DP
     var item = 0f
     for (gap in listOf(
@@ -119,15 +167,19 @@ fun fitSidebar(
     )) {
         item = if (count == 1) usable else (usable - (count - 1) * gap) / count
         chosenGap = gap
-        if (item >= SidebarFit.MIN_TOUCH_DP) break
+        if (item >= SidebarFit.LABEL_MIN_ITEM_DP) break
     }
 
     val rawItem = item
     // 屏幕很高时封顶，多出来的高度由外层居中消化。
     val capped = rawItem.coerceAtMost(SidebarFit.MAX_ITEM_DP)
 
-    val fitting = rawItem >= SidebarFit.MIN_TOUCH_DP
-    val finalItem = if (fitting) capped else SidebarFit.MIN_TOUCH_DP
+    // **"排不下"的判据是纯图标下限（54），不是 MIN_TOUCH_DP（64）**（2026-10-14 改）。
+    // 差别就是 64..54 这一段：以前这一段被判成"排不下"→ 直接砍入口，
+    // 于是"隐藏文字只留图标"这条降级永远轮不到；现在这一段归 [SidebarFitLevel.ICON_ONLY]，
+    // 砍入口留到连 54 都够不到的时候。
+    val fitting = rawItem >= SidebarFit.ICON_ONLY_MIN_DP
+    val finalItem = if (fitting) capped else SidebarFit.ICON_ONLY_MIN_DP
 
     val total = count * finalItem + (count - 1) * chosenGap + innerPadding.value * 2f
     val overflow = (total - availableHeightDp).coerceAtLeast(0f)
@@ -141,9 +193,10 @@ fun fitSidebar(
     val icon = (finalItem * SidebarFit.ICON_RATIO)
         .coerceAtMost(if (level == SidebarFitLevel.FULL) 30f else finalItem * 0.6f)
 
+    // 砍入口时按**纯图标**一格算（54 + 最小间距），这是唯一还能保住触控的排法。
     val suggested = floor(
         (usable + SidebarFit.MIN_GAP_DP) /
-            (SidebarFit.MIN_TOUCH_DP + SidebarFit.MIN_GAP_DP),
+            (SidebarFit.ICON_ONLY_MIN_DP + SidebarFit.MIN_GAP_DP),
     ).toInt().coerceAtLeast(1)
 
     return SidebarFit(

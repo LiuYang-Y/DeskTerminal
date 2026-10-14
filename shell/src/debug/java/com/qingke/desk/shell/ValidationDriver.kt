@@ -101,6 +101,18 @@ object ValidationDriver {
 
     fun register(context: Context) {
         if (receiver != null) return
+
+        // 注册在 **applicationContext** 上，而不是传进来的那个 context（2026-10-14 修）。
+        //
+        // 调用方给的是 Activity。系统在 `registerReceiver` 之后会**持有这个接收器**，
+        // 而接收器是匿名内部类、隐式捕获了它的外部实例 → 整条链把 Activity 钉在内存里。
+        // 加上下面"注册一次就不再注册"的闸门，第一次注册拿到的那个 Activity 会被
+        // 一直记着 —— 之后每次 Activity 重建都多一份，而且永远不会自己松手。
+        //
+        // 换成应用上下文之后，接收器与**进程**同寿命。这也正是这个驱动器想要的语义：
+        // 它是常驻的调试开关，本来就该跟着进程走，而不是跟着某一个 Activity 走。
+        // （所以这里没有、也不需要 `unregister` —— 生命周期终点就是进程退出。）
+        val app = context.applicationContext
         val target = object : BroadcastReceiver() {
             override fun onReceive(receiverContext: Context, intent: Intent) {
                 val cmd = intent.getStringExtra("cmd") ?: return
@@ -112,12 +124,12 @@ object ValidationDriver {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             // 必须 EXPORTED：命令是 `adb shell am broadcast` 发来的，属于外部 uid。
             // 这只存在于 debug 构建 —— release 变体里没有这个接收器可以注册。
-            context.registerReceiver(target, filter, Context.RECEIVER_EXPORTED)
+            app.registerReceiver(target, filter, Context.RECEIVER_EXPORTED)
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
-            context.registerReceiver(target, filter)
+            app.registerReceiver(target, filter)
         }
         receiver = target
-        Log.i(TAG, "validation driver registered")
+        Log.i(TAG, "validation driver registered (app context)")
     }
 }

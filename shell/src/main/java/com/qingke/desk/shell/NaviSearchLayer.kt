@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -58,7 +59,6 @@ import com.qingke.desk.core.data.ShellSettings
 import com.qingke.desk.core.ui.AdaptiveDimens
 import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.DeskGlass
-import com.qingke.desk.core.ui.LocalDeviceProfile
 import com.qingke.desk.core.ui.deskGlassOverlay
 // 扩展属性要单独 import：`import DeskGlass` 只把那个 object 带进来，
 // 挂在它上面的 `val DeskGlass.xxx` 仍在 core:ui 包里（SideBar.kt 同样是显式导入的）。
@@ -157,8 +157,6 @@ fun NaviSearchLayer(
 ) {
     val context = LocalContext.current
     val searcher = remember { PlaceSearch(context) }
-    // 会被屏幕尺寸影响的尺寸，全部在这里算一次，再往下传。
-    val metrics = rememberNaviMetrics()
     val routeState by NaviSession.route.collectAsState()
     // 策略是**会话**的状态而不是界面的：换策略会触发重算，界面只负责"点哪个"。
     val strategy by NaviSession.strategy.collectAsState()
@@ -190,7 +188,22 @@ fun NaviSearchLayer(
         )
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    // 尺寸**从这个容器量到的真实约束**反推，不再读设备档案（2026-10-14 修）。
+    //
+    // 档案里的宽高是 `WindowMetrics.bounds` 的**上界**（DeviceProfile 自己写着这一点）：
+    // 基准机 411 dp vs 真正能画的 395 dp、`wm size` 模拟 360 dp 时 360 vs 344 dp。
+    // 按上界算出来的预览卡限高，换到矮屏上会把动作行（"开始导航"）顶出屏幕 ——
+    // 那正是这个文件被重写过一次的原因，只是上一次把来源从"写死的数字"换成了"档案"，
+    // 换汤不换药。现在改成量自己拿到的约束：**唯一不会错的来源**。
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        // 会被屏幕尺寸影响的尺寸，全部在这里算一次，再往下传。
+        // 键盘弹起时窗口会收缩（横屏 411 dp 里 Gboard 吃掉约 300 dp），
+        // 这里的 maxHeight 跟着收缩正是我们要的：面板与列表的高度上限自动让位。
+        val metrics = rememberNaviMetrics(
+            contentWidthDp = maxWidth.value,
+            contentHeightDp = maxHeight.value,
+        )
+
         // ---- 0. 地图压暗遮罩 ----
         //
         // 只在"需要读小字号数字"的时刻压暗：展开搜索面板、或者路线卡在屏上。
@@ -986,11 +999,13 @@ private val STRATEGY_CHIP_HEIGHT = 30.dp
 /**
  * 会被屏幕尺寸影响的那一批尺寸。
  *
- * 由 [rememberNaviMetrics] 从**设备档案**（[LocalDeviceProfile]）算出来，
- * 不再引用任何一台具体机器的宽度或高度。
+ * 由 [rememberNaviMetrics] 从**调用方容器量到的真实约束**算出（[BoxWithConstraints] 给的
+ * `maxWidth` / `maxHeight`），既不引用任何一台具体机器的宽高，也不读设备档案 ——
+ * 档案里的宽高是可用空间的**上界**（见 [com.qingke.desk.core.platform.DeviceProfile]
+ * 的 readContentSize），按上界算出来的限高会把动作行顶出屏幕。
  *
- * 内容区 = 整屏 − 挖孔 − 侧栏。侧栏宽度用 [DeskDimens.sideBarItemSize] 的上限估，
- * 差几个 dp 不影响这里的结论（每个值都有上下限夹取）。
+ * 传进来的宽高就是这一层的可用宽高（调用方的容器已经扣掉了侧栏与挖孔），
+ * 所以这里不再减任何东西。
  */
 private data class NaviMetrics(
     val panelMaxWidth: Dp,
@@ -1001,28 +1016,26 @@ private data class NaviMetrics(
     val routeListMaxHeight: Dp,
 )
 
-@Composable
-private fun rememberNaviMetrics(): NaviMetrics {
-    val profile = LocalDeviceProfile.current
-    val contentWidthDp = (
-        profile.widthDp -
-            (DeskDimens.sideBarItemSize.value + DeskDimens.sideBarInnerPadding.value * 2f)
-        ).coerceAtLeast(240f)
-    // 内容区宽高都由 [DeviceProfile] 给出（系统栏与挖孔已扣），这里不再减挖孔。
-    val contentHeightDp = profile.heightDp.toFloat().coerceAtLeast(200f)
+private fun rememberNaviMetrics(
+    contentWidthDp: Float,
+    contentHeightDp: Float,
+): NaviMetrics {
+    val widthDp = contentWidthDp.coerceAtLeast(240f)
+    val heightDp = contentHeightDp.coerceAtLeast(200f)
 
     // 预览卡限高之后，剩下的才是路线列表能用的高度。
     // 先按"预览卡内固定占掉的部分"估一个列表可用高：
     // 28(内边距) + 19(目的地) + 15(副标题) + 8 + 30(策略行) + 8 + 8 + 1 + 4 + 40(动作行)
     // = 161 dp 是卡片里不随列表变化的那一段。
-    val previewHeight = AdaptiveDimens.previewMaxHeight(contentHeightDp)
-    val routeListBudget = (previewHeight.value - PREVIEW_FIXED_PART_DP).coerceAtLeast(ROUTE_ROW_HEIGHT.value)
+    val previewHeight = AdaptiveDimens.previewMaxHeight(heightDp)
+    val routeListBudget = (previewHeight.value - PREVIEW_FIXED_PART_DP)
+        .coerceAtLeast(ROUTE_ROW_HEIGHT.value)
 
     return NaviMetrics(
-        panelMaxWidth = AdaptiveDimens.searchPanelWidth(contentWidthDp),
-        listMaxHeight = AdaptiveDimens.searchListHeight(contentHeightDp),
-        searchBarMaxWidth = AdaptiveDimens.searchBarWidth(contentWidthDp),
-        previewMaxWidth = AdaptiveDimens.previewWidth(contentWidthDp),
+        panelMaxWidth = AdaptiveDimens.searchPanelWidth(widthDp),
+        listMaxHeight = AdaptiveDimens.searchListHeight(heightDp),
+        searchBarMaxWidth = AdaptiveDimens.searchBarWidth(widthDp),
+        previewMaxWidth = AdaptiveDimens.previewWidth(widthDp),
         previewMaxHeight = previewHeight,
         routeListMaxHeight = AdaptiveDimens.routeListHeight(
             availableHeightDp = routeListBudget,

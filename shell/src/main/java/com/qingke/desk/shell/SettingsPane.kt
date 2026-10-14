@@ -1,6 +1,7 @@
 package com.qingke.desk.shell
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -38,7 +39,6 @@ import com.qingke.desk.core.platform.EffectLevel
 import com.qingke.desk.core.platform.EffectTier
 import com.qingke.desk.core.ui.AdaptiveDimens
 import com.qingke.desk.core.ui.DeskDimens
-import com.qingke.desk.core.ui.LocalDeviceProfile
 import com.qingke.desk.hosting.ShizukuStatus
 import com.qingke.desk.hosting.ui.statusLabel
 
@@ -100,158 +100,159 @@ fun SettingsPane(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // 高度上限 = 屏幕高 - 上下两条留白。
+    // 面板的可用宽高**必须量出来**，不能拿设备档案算（2026-10-14 修）。
     //
-    // 面板现在与齿轮**并列**（见 DeskRoot 里的定位），所以不再减齿轮那一行 ——
-    // 这也是四项设置能一屏放下的原因（之前减掉 60 dp，最后一项被挤出屏幕）。
+    // 原来读 `LocalDeviceProfile` 的 widthDp / heightDp，注释里写着"已经是内容区宽高、
+    // 系统栏与挖孔都扣过了"—— 那个说法是错的（DeviceProfile 自己的文档就写着它是
+    // **可用空间的上界**）：基准机上档案报 411 dp，而真正能画的是 395 dp；
+    // `wm size` 模拟 360 dp 时档案报 360、实际只有 344。多出来的那一圈不是"看着挤"，
+    // 而是**排到画不到的地方** —— 高度上限按上界算，面板会以为下面还有地方，
+    // 最后一项被排到屏幕之外；宽度按上界算，窄屏上浮层会宽出一截压到侧栏上。
     //
-    // 这个上限不是"设计成这么高"，而是**兜底**：横屏只有 361 dp，一旦系统字号被调大、
-    // 或者以后加第五项，没有上限就会从屏幕下沿漏出去（实测过，见
-    // .verify/settings/15-pane-3items.png）。有了它，内容再高也只是面板内部滚动，
-    // 不会顶穿屏幕。
-    //
-    // 高度用**设备档案**反推而不是读 LocalConfiguration：后者在"应用内模拟尺寸"
-    // （调试页）时不跟着变，会出现"面板按真机高度算、内容按模拟尺寸排"的错位。
-    val profile = LocalDeviceProfile.current
-    val maxPaneHeight = profile.heightDp.dp -
-        DeskDimens.statusChipTopPadding -
-        DeskDimens.statusChipSidePadding
+    // 量容器是唯一不会错的来源：传进来的 modifier 里已经含"顶部留白 + 让开齿轮那一列"
+    // 的 padding，所以下面 maxWidth / maxHeight **就是浮层真正拿到的约束**。
+    BoxWithConstraints(modifier = modifier) {
 
-    // 宽度由内容区反推（替代写死的 380.dp）：内容区 = 整屏 − 侧栏。
-    //
-    // **不再减挖孔**：`DeviceProfile.widthDp` 已经是"内容区"宽（系统栏与挖孔都扣过了，
-    // 见 DeviceProfile 的 readContentSize）。这里再减一次就是扣两遍。
-    //
-    // 侧栏那一项按最宽的情况估（[DeskDimens.sideBarItemSize] 的上限 76dp + 内边距），
-    // 这里只需要一个"够用的保守值" —— 浮层宽度本来就有上下限夹取，
-    // 差几个 dp 不会让"切到左侧/右侧"两个按钮换行。
-    val contentWidthDp = (
-        profile.widthDp -
-            (DeskDimens.sideBarItemSize.value + DeskDimens.sideBarInnerPadding.value * 2f)
-        ).coerceAtLeast(240f)
+        // 再扣一次侧栏（它就是浮层旁边那块常驻玻璃）才是"内容区"宽 ——
+        // 与 [AdaptiveDimens.settingsPaneWidth] 的口径、以及调试页里的算法保持一致。
+        // 侧栏按最宽的情况估（[DeskDimens.sideBarItemSize] 的上限 76dp + 内边距），
+        // 这里只需要一个"够用的保守值"：浮层宽度本来就有上下限夹取，
+        // 差几个 dp 不会让"切到左侧/右侧"两个按钮换行。
+        val railDp = DeskDimens.sideBarItemSize.value + DeskDimens.sideBarInnerPadding.value * 2f
+        val contentWidthDp = (maxWidth.value - railDp).coerceAtLeast(240f)
 
-    Card(
-        modifier = modifier
-            .width(AdaptiveDimens.settingsPaneWidth(contentWidthDp))
-            .heightIn(max = maxPaneHeight),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface,
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
-    ) {
-        // 内边距与行距都按"横屏 361 dp 要装下齿轮 + 三项设置"反推过：
-        // 把"完成"挪到标题行省下 48 dp，这里再压一档，真机验证见 .verify/settings/。
-        Column(
+        // 高度上限**不是"设计成这么高"，而是兜底**：横屏只有 361 dp，一旦系统字号被调大、
+        // 或者以后加第五项，没有上限就会从屏幕下沿漏出去（实测过，见
+        // .verify/settings/15-pane-3items.png）。有了它，内容再高也只是面板内部滚动，
+        // 不会顶穿屏幕。底部再留一条与侧边等宽的呼吸空间：面板与屏幕下沿贴死会看不出边界。
+        val maxPaneHeight = maxHeight - DeskDimens.statusChipSidePadding
+
+        Card(
+            // 注意不是 `modifier = modifier` —— 上层的 align / padding 已经挂在
+            // BoxWithConstraints 上了，这里再套一遍就是扣两遍（面板会被二次缩进、
+            // 还会多出一个 align 父数据）。卡片自己的尺寸由下面两行决定。
             modifier = Modifier
-                .padding(DeskDimens.settingsPanePadding)
-                .verticalScroll(rememberScrollState()),
+                .width(AdaptiveDimens.settingsPaneWidth(contentWidthDp))
+                .heightIn(max = maxPaneHeight),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface,
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
         ) {
-            // "完成"放在标题这一行，而不是底部单独一行。
-            //
-            // 原因很实在：这台机器横屏只有 361 dp 高。三项设置 + 各自两行说明 +
-            // 底部一个按钮，实测会把按钮挤出屏幕下沿（真机截图 15-pane-3items.png）。
-            // 挪到标题行右侧等于白捡 48 dp 高度，而且出口就在眼睛最先看到的地方。
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "设置",
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = onDismiss) {
-                    Text("完成", fontSize = 14.sp)
-                }
-            }
-
-            SettingsItem(
-                title = "侧栏位置",
-                help = "卡片与状态角标跟着镜像。",
+            // 内边距与行距都按"横屏 361 dp 要装下齿轮 + 三项设置"反推过：
+            // 把"完成"挪到标题行省下 48 dp，这里再压一档，真机验证见 .verify/settings/。
+            Column(
+                modifier = Modifier
+                    .padding(DeskDimens.settingsPanePadding)
+                    .verticalScroll(rememberScrollState()),
             ) {
-                SidePicker(
-                    current = sidebarSide,
-                    onPick = onSidebarSideChange,
-                )
-            }
-
-            Spacer(modifier = Modifier.height(DeskDimens.settingsItemGap))
-
-            SettingsItem(
-                title = "屏幕常亮",
-                help = "关闭后跟随系统熄灭，更省电。",
-            ) {
-                Switch(
-                    checked = keepScreenOn,
-                    onCheckedChange = onKeepScreenOnChange,
-                )
-            }
-
-            Spacer(modifier = Modifier.height(DeskDimens.settingsItemGap))
-
-            // 效果等级（2026-10-13 加）。
-            //
-            // 放"自动/高/中/低/关"五档而不是只给一个开关：同一台机器上"效果好不好看"
-            // 和"机器扛不扛得住"是两件事，有人愿意为了省电直接锁到低档，
-            // 也有人机器够强想一直锁高档。AUTO 是默认 —— 设备能力 + 运行时温度/掉帧
-            // 自己决定，用户不介入也能用。
-            //
-            // help 里显示的是**当前实际生效的档位**（不是用户选的等级）：
-            // 选了 AUTO 但机器正热的时候，用户需要看到"现在是中档、为什么是中档"，
-            // 否则会以为自己选的没生效。
-            SettingsItemStacked(
-                title = "效果等级",
-                help = effectStatusLine.ifBlank { "当前：${effectTier.label}" },
-            ) {
-                EffectLevelPicker(
-                    current = effectLevel,
-                    onPick = onEffectLevelChange,
-                )
-            }
-
-            Spacer(modifier = Modifier.height(DeskDimens.settingsItemGap))
-
-            // 地图隐私的撤回入口。放在这里的理由是"每个对外发数据的东西都得有一个
-            // 用户能按到的关掉它的地方"（README 的"如何关闭"一节承诺了这件事）。
-            SettingsItem(
-                title = "地图隐私",
-                help = if (amapAgreed) {
-                    "已同意高德隐私政策。"
-                } else {
-                    "尚未同意，地图未启用。"
-                },
-            ) {
-                if (amapAgreed) {
-                    TextButton(onClick = onRevokeAmapConsent) {
-                        Text("撤回同意", fontSize = 14.sp)
-                    }
-                } else {
+                // "完成"放在标题这一行，而不是底部单独一行。
+                //
+                // 原因很实在：这台机器横屏只有 361 dp 高。三项设置 + 各自两行说明 +
+                // 底部一个按钮，实测会把按钮挤出屏幕下沿（真机截图 15-pane-3items.png）。
+                // 挪到标题行右侧等于白捡 48 dp 高度，而且出口就在眼睛最先看到的地方。
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = "已停用",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                        text = "设置",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onDismiss) {
+                        Text("完成", fontSize = 14.sp)
+                    }
+                }
+
+                SettingsItem(
+                    title = "侧栏位置",
+                    help = "卡片与状态角标跟着镜像。",
+                ) {
+                    SidePicker(
+                        current = sidebarSide,
+                        onPick = onSidebarSideChange,
                     )
                 }
-            }
 
-            Spacer(modifier = Modifier.height(DeskDimens.settingsItemGap))
+                Spacer(modifier = Modifier.height(DeskDimens.settingsItemGap))
 
-            // Shizuku 状态。2026-10-12 从右上角悬浮角标搬到这里（理由见类注释）。
-            //
-            // 右侧的按钮**显示状态本身**（"未运行" / "运行中"），而不是写"查看"：
-            // 用户点开面板是为了看它现在行不行，状态放在按钮上等于一眼看到答案，
-            // 想处理再点进去。引导页里才是那一步步的动作。
-            SettingsItem(
-                title = "Shizuku",
-                help = shizukuHelp(shizukuStatus),
-            ) {
-                TextButton(onClick = onOpenShizukuGuide) {
-                    Text(text = statusLabel(shizukuStatus), fontSize = 13.sp)
+                SettingsItem(
+                    title = "屏幕常亮",
+                    help = "关闭后跟随系统熄灭，更省电。",
+                ) {
+                    Switch(
+                        checked = keepScreenOn,
+                        onCheckedChange = onKeepScreenOnChange,
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(DeskDimens.settingsItemGap))
+
+                // 效果等级（2026-10-13 加）。
+                //
+                // 放"自动/高/中/低/关"五档而不是只给一个开关：同一台机器上"效果好不好看"
+                // 和"机器扛不扛得住"是两件事，有人愿意为了省电直接锁到低档，
+                // 也有人机器够强想一直锁高档。AUTO 是默认 —— 设备能力 + 运行时温度/掉帧
+                // 自己决定，用户不介入也能用。
+                //
+                // help 里显示的是**当前实际生效的档位**（不是用户选的等级）：
+                // 选了 AUTO 但机器正热的时候，用户需要看到"现在是中档、为什么是中档"，
+                // 否则会以为自己选的没生效。
+                SettingsItemStacked(
+                    title = "效果等级",
+                    help = effectStatusLine.ifBlank { "当前：${effectTier.label}" },
+                ) {
+                    EffectLevelPicker(
+                        current = effectLevel,
+                        onPick = onEffectLevelChange,
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(DeskDimens.settingsItemGap))
+
+                // 地图隐私的撤回入口。放在这里的理由是"每个对外发数据的东西都得有一个
+                // 用户能按到的关掉它的地方"（README 的"如何关闭"一节承诺了这件事）。
+                SettingsItem(
+                    title = "地图隐私",
+                    help = if (amapAgreed) {
+                        "已同意高德隐私政策。"
+                    } else {
+                        "尚未同意，地图未启用。"
+                    },
+                ) {
+                    if (amapAgreed) {
+                        TextButton(onClick = onRevokeAmapConsent) {
+                            Text("撤回同意", fontSize = 14.sp)
+                        }
+                    } else {
+                        Text(
+                            text = "已停用",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(DeskDimens.settingsItemGap))
+
+                // Shizuku 状态。2026-10-12 从右上角悬浮角标搬到这里（理由见类注释）。
+                //
+                // 右侧的按钮**显示状态本身**（"未运行" / "运行中"），而不是写"查看"：
+                // 用户点开面板是为了看它现在行不行，状态放在按钮上等于一眼看到答案，
+                // 想处理再点进去。引导页里才是那一步步的动作。
+                SettingsItem(
+                    title = "Shizuku",
+                    help = shizukuHelp(shizukuStatus),
+                ) {
+                    TextButton(onClick = onOpenShizukuGuide) {
+                        Text(text = statusLabel(shizukuStatus), fontSize = 13.sp)
+                    }
                 }
             }
         }
     }
-}
+    }
 
 /**
  * Shizuku 那一项的说明：只写"这个状态意味着什么"，不重复状态本身
