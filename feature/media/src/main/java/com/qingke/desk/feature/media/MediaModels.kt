@@ -28,6 +28,14 @@ data class MediaTrack(
     val canSkipPrevious: Boolean = false,
     val canSkipNext: Boolean = false,
     val canPlayPause: Boolean = false,
+    /**
+     * 会话是否支持**跳转进度**（`PlaybackState.ACTION_SEEK_TO`）。
+     *
+     * 音乐页的可拖动进度条要读它：不支持跳转的会话上把进度条画成可拖的，
+     * 用户拖完松手、位置又弹回去 —— 那看起来像"拖坏了"，不像"这个应用不支持"。
+     * 这类会话（直播流、部分播客）的进度条应当退化为只读。
+     */
+    val canSeek: Boolean = false,
 ) {
 
     /** 有效时长。第三方常填 -1 或 0 表示"未知"。 */

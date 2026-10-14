@@ -25,6 +25,28 @@ backdrop = "2.0.0"
 # 已核实（2026-10-11 查 repo1.maven.org/maven2 metadata）：dev.rikka.shizuku:{api,provider} 最新为 13.1.5
 shizuku = "13.1.5"
 
+# LRC / 逐字歌词解析。**不是 Google 官方 Accompanist** ——
+# 是第三方 MochaRealm（github.com/6xingyv/Accompanist）的 KMP 库，Apache-2.0。
+#
+# 已核实（2026-10-14 直接读 Maven Central 的 .module / sources.jar，不是看网页转述）：
+#   · 只有 `lyrics-core` 可用；**`lyrics-ui` 已否决**（AAR minSdk=29 > 本项目 26，
+#     且 POM 里挂 8 个 org.jetbrains.compose.* —— 会重开 :core:ui 排除过的那个坑）。
+#   · `lyrics-core` 是**纯解析库**：无 Android 依赖、无 Compose 依赖，
+#     只带 kotlin-stdlib + kotlinx-serialization-json（后者是 runtime 作用域）。
+#   · **它没有 android 变体**（lyrics-core-android → 404）。元数据里只有
+#     common / jvm / native / js / wasm；Android 侧解析到的是 `jvm` 变体
+#     （org.gradle.jvm.environment=standard-jvm）。这一点已用实际构建验证过。
+#   · 公开 API 很小：`AutoParser().parse(text): SyncedLyrics`，
+#     `SyncedLyrics.lines: List<ISyncedLine>`（start/end/duration，毫秒），
+#     具体行是 `SyncedLine`（普通行）或 `KaraokeLine`（带 syllables 的逐字行）。
+#
+# ⚠️ 已知短板（在 LyricsParser 里补掉，不要指望库自己挡）：
+#   `EnhancedLrcParser.canParse` 的正则是 `\[\d{2}:\d{2}\.\d{2,3}\]` ——
+#   **只认 `[mm:ss.xx]` 这一种写法**。`[mm:ss]`、`[mm:ss:x]`（冒号当百分秒）、
+#   `[m:ss.xx]`（1 位分钟）都会被判成"不认识"，AutoParser 于是返回空集
+#   （不报错）。所以喂给它之前先过一层 `LrcTextNormalizer`。
+accompanistLyrics = "0.5.0"
+
 # 高德 —— **导航合包**，已整体替换掉原来的纯地图包（2026-10-12）。
 #
 # 为什么必须整体换、不能并存：导航 SDK 自带 3D 地图 SDK（官方"相关下载"页原文列明
@@ -71,12 +93,21 @@ androidx-compose-material-icons-extended = { group = "androidx.compose.material"
 
 kyant-backdrop = { group = "io.github.kyant0", name = "backdrop", version.ref = "backdrop" }
 
+# 歌词解析（纯 JVM/KMP，解析 LRC / Enhanced LRC / TTML / KRC）。
+# 用它的**唯一**理由是 Enhanced LRC 的**逐字**（音节级）解析 —— 那部分自己写不划算。
+# 界面上不出现它的任何类型：全部在 LyricsParser 里转成本项目的 LyricsDoc。
+accompanist-lyrics-core = { group = "com.mocharealm.accompanist", name = "lyrics-core", version.ref = "accompanistLyrics" }
+
 # 仪器化测试（androidTest）。版本取的是 2024 年就存在的稳定版 ——
 # 这台机器的场景只需要"能跑 Compose UI 测试"，不需要最新特性。
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version = "1.2.1" }
 androidx-test-runner = { group = "androidx.test", name = "runner", version = "1.6.2" }
 androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
 androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
+
+# JVM 单元测试（test/ 源码集）。用于盯着纯函数的推导 —— 比如音乐页的
+# "歌词块与 HUD 不重叠"不变式，以及 LRC 时间戳归一化的各种方言。
+junit = { group = "junit", name = "junit", version = "4.13.2" }
 
 rikka-shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
 rikka-shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }

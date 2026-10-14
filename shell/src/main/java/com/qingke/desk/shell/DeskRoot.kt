@@ -32,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.material3.Surface
@@ -74,6 +75,9 @@ import com.qingke.desk.core.ui.rememberDeskGlassBackdrop
 import com.qingke.desk.feature.media.MediaPermission
 import com.qingke.desk.feature.media.MediaSessionMonitor
 import com.qingke.desk.feature.media.MediaUiState
+import com.qingke.desk.feature.media.music.MediaSessionPlaybackSource
+import com.qingke.desk.feature.media.music.MusicPage
+import com.qingke.desk.feature.media.music.lyrics.LyricsRepository
 import com.qingke.desk.hosting.ShizukuGate
 import com.qingke.desk.hosting.ShizukuStatus
 import com.qingke.desk.hosting.ShizukuStatusMonitor
@@ -140,6 +144,17 @@ enum class DeskScreen {
      * 于是"点侧栏地图 = 回到导航"这件事自然成立，不需要额外的状态搬运。
      */
     MAP,
+    /**
+     * 音乐页（路线 D 第一版）。
+     *
+     * 它的数据全部来自 [PlaybackSource] —— 当前实现是"读系统媒体会话"，
+     * 也就是**不自己播放**，只跟着别的音乐 App 显示。所以这一屏没有任何
+     * 音频权限、没有前台 Service，也不会与播放器抢音频焦点。
+     *
+     * 页面本身在 `:feature:media`（[com.qingke.desk.feature.media.music.MusicPage]），
+     * 壳层只负责"给它一个内容区"，以及把 monitor 的生命周期管起来。
+     */
+    MUSIC,
     /** Shizuku 的引导页。从右上角的悬浮状态角标进来。 */
     SHIZUKU_GUIDE,
 }
@@ -296,6 +311,35 @@ fun DeskRoot(
     DisposableEffect(mediaMonitor) {
         mediaMonitor.start()
         onDispose { mediaMonitor.stop() }
+    }
+
+    // ---- 音乐页的数据源（路线 D，2026-10-14）--------------------------------
+    //
+    // 与上面那张媒体卡**共用同一个 monitor**。各建一个的话，同一台设备上会挂
+    // 两份会话回调、两次 `getActiveSessions` —— 数据一模一样，白白多一层 binder 往返，
+    // 而且两份的刷新时机还可能不一致（首页卡更新了、音乐页没更新）。理由写在
+    // [MediaSessionPlaybackSource] 的类注释里。
+    //
+    // 分工：monitor 的 start/stop 归**壳层**（上面那个 DisposableEffect），
+    // 播放源只负责"开始/停止观察它"。
+    val mediaScope = rememberCoroutineScope()
+    val playbackSource = remember(mediaMonitor, mediaScope) {
+        MediaSessionPlaybackSource(mediaMonitor, mediaScope)
+    }
+
+    // 歌词仓库。它内部只留 `applicationContext`，所以可以放心在组合里活很久；
+    // 但**不**把它做成进程级单例 —— 它持有的内存 LRU 装的是解析结果，
+    // 挂在组合上，页面一走就跟着走（与本项目的原生对象约束同一条理由）。
+    val lyricsRepository = remember(context) { LyricsRepository(context) }
+
+    // 只在音乐页观察播放状态。离开就停。
+    //
+    // 这不是省电的小优化：不停的话，人不在音乐页时每个媒体会话回调照样穿过 collect
+    // 灌进状态流，而那份状态**没有任何消费者**。同时，`:feature:media` 的
+    // [MediaSessionPlaybackSource.stop] 语义就是"停止观察"，语义与实现一致。
+    DisposableEffect(screen, playbackSource) {
+        if (screen == DeskScreen.MUSIC) playbackSource.start()
+        onDispose { playbackSource.stop() }
     }
 
     // 会话一旦销毁（用户点了返回首页 / 链路断开），待判定状态一律清零。
@@ -585,7 +629,14 @@ fun DeskRoot(
         // **导航中也把齿轮收起来**（2026-10-12，与重构前一致）：齿轮和"退出导航"
         // 都在右上角，同时出现会叠在一起；而导航时真正要紧的那颗按钮是退出。
         // 侧栏本身照旧常驻（用户口径），所以入口并没有被拿走。
+        //
+        // **音乐页带壳**（2026-10-14）：齿轮是唯一能改效果档位的地方，
+        // 而"在音乐页上验证四档差别"正是这一版的验收项之一 —— 把齿轮藏起来
+        // 就得退出去改档再进来，验证过程本身会变成一圈来回切屏。
+        // 音乐页也已经让开这一条：歌词来源角标放在**顶部居中**而不是左上/右上
+        // （齿轮会跟着侧栏镜像到任一侧，放两侧总有一边撞上）。
         val chromeScreen = screen == DeskScreen.HOME ||
+            screen == DeskScreen.MUSIC ||
             (screen == DeskScreen.MAP && !naviActive)
 
         // 侧栏**常驻不隐藏**（用户口径，2026-10-12）：导航时也保留。
@@ -940,6 +991,21 @@ fun DeskRoot(
                                 }
                             }
 
+                            // 音乐页（路线 D 第一版，2026-10-14）。全屏沉浸，铺满内容区 ——
+                            // 不吃侧栏（侧栏是这台终端唯一稳定的入口，任何时候都不让位），
+                            // 也不吃挖孔区（那一块归外层底色）。
+                            //
+                            // 它只认 `PlaybackSource` + `LyricsRepository` 两个抽象，
+                            // 不认识 `MediaSession`、也不认识歌词解析库 —— 壳层在这里
+                            // 注入的是"读系统媒体会话"的实现，以后换成 ExoPlayer 或本地曲库，
+                            // 这一屏和 :feature:media 的页面代码都不用改。
+                            DeskScreen.MUSIC -> MusicPage(
+                                source = playbackSource,
+                                lyricsRepository = lyricsRepository,
+                                onMessage = onMessage,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+
                             DeskScreen.SHIZUKU_GUIDE -> ShizukuGuideScreen(
                                 status = shizukuStatus,
                                 onRefresh = { shizukuMonitor.refresh() },
@@ -1216,6 +1282,15 @@ private fun handleShellSelect(
     // 这里只是切屏，不做任何启动动作。
     ShellIds.MAP -> DeskScreen.MAP
 
+    // 音乐页。它自己也可能是"从投屏态切过来"的，所以和 HOME 一样顺手收掉会话 ——
+    // 否则 Session 还活着、状态机停在 STREAMING，下次再点投屏就是连一个已存在的会话。
+    ShellIds.MUSIC -> {
+        if (current == DeskScreen.PROJECTION) {
+            orchestrator.disconnect(StopReason.USER_EXPLICIT_EXIT)
+        }
+        DeskScreen.MUSIC
+    }
+
     ShellIds.PROJECTION -> {
         orchestrator.connect(ProjectionKind.CARPLAY)
         DeskScreen.PROJECTION
@@ -1241,6 +1316,7 @@ private fun selectedShellId(screen: DeskScreen): String = when (screen) {
     DeskScreen.HOME, DeskScreen.SHIZUKU_GUIDE -> ShellIds.HOME
     // 导航画面也长在地图屏里（见 DeskScreen.MAP 的注释），所以这里天然就是它。
     DeskScreen.MAP -> ShellIds.MAP
+    DeskScreen.MUSIC -> ShellIds.MUSIC
     DeskScreen.PROJECTION -> ShellIds.PROJECTION
 }
 

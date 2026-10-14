@@ -19,3 +19,7 @@ deskterminal_vol*.txt
 # 上述导出脚本与提示词模板（一次性工具，非源码）
 export_context.py
 gemini_prompt.md
+
+# 歌词探针时从 sources.jar 解出的第三方库源码副本（Apache-2.0，只作离线阅读，
+# 可随时从 lyrics-core-0.5.0-sources.jar 重新解出，不进版本库）
+tools/lyrics-probe/_lib/

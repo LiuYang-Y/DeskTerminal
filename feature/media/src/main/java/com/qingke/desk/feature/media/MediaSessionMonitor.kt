@@ -239,6 +239,9 @@ class MediaSessionMonitor(context: Context) {
                     PlaybackState.ACTION_PAUSE or
                     PlaybackState.ACTION_PLAY_PAUSE
                 ) != 0L,
+            // 跳转进度的能力位。注意它是 ACTION_SEEK_TO 而不是 ACTION_PLAY_FROM_*
+            // —— 后者是"从头/从某条媒体项播"，与拖进度条不是一回事。
+            canSeek = actions and PlaybackState.ACTION_SEEK_TO != 0L,
         )
     }
 
@@ -315,5 +318,30 @@ class MediaSessionMonitor(context: Context) {
             }
         }.onFailure { Log.w(TAG, "command $command failed: ${it.javaClass.simpleName}") }
         Log.d(TAG, "command $command -> ${controller.packageName}")
+    }
+
+    /**
+     * 跳转进度。给音乐页的可拖动进度条用。
+     *
+     * 与 [command] 同一套防护：会话可能已失效（`DeadObjectException`），
+     * 整段包 runCatching，不让它冒到 UI 线程外面。
+     *
+     * **不做能力位二次判断** —— 判断在读取侧（[MediaTrack.canSeek]）做，界面据此决定
+     * 进度条可不可拖。这里再判一次的话，遇到"能力位没填但实际能跳"的播放器
+     * （实测常见）就会白白丢掉一个能用得上的功能。
+     *
+     * 负数/超过时长由系统侧自己夹取，这里只挡住明显的非法值。
+     */
+    fun seekTo(positionMs: Long) {
+        if (positionMs < 0L) return
+        val controller = activeController
+        if (controller == null) {
+            Log.w(TAG, "seekTo dropped: no active session")
+            return
+        }
+        val controls = runCatching { controller.transportControls }.getOrNull() ?: return
+        runCatching { controls.seekTo(positionMs) }
+            .onFailure { Log.w(TAG, "seekTo($positionMs) failed: ${it.javaClass.simpleName}") }
+        Log.d(TAG, "seekTo $positionMs -> ${controller.packageName}")
     }
 }
