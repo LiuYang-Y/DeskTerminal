@@ -1,12 +1,14 @@
 package com.qingke.desk.feature.media.music.online
 
 import android.util.Base64
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -22,6 +24,31 @@ class QqProtocolException(
     val globalCode: Int,
     val httpStatus: Int,
 ) : Exception("$phase：上游拒绝（http=$httpStatus global=$globalCode upstream=$upstreamCode）")
+
+/**
+ * 一首歌的播放直链。
+ *
+ * @param url 首选地址（https 兜底域名 + `purl`）。
+ * @param candidates 全部候选地址（`sip` 在前、https 兜底域名在后），取链失败换域名时用。
+ *                    **只含 https 条目** —— `targetSdk 36` 下明文被系统直接拒
+ *                    （Phase 0 §4.2 实测 `Cleartext HTTP traffic ... not permitted`），
+ *                    而同一 `purl` 在四个 https 域名上全部 206。
+ * @param declaredSize 上游声明的字节数。Phase 0 的"完整曲目"判据拿它对照 CDN 的 Content-Range。
+ */
+data class QqPlayLink(
+    val url: String,
+    val candidates: List<String>,
+    val declaredSize: Long,
+    val filename: String,
+)
+
+/** 一页歌单歌曲。 */
+data class QqSongPage(
+    val tracks: List<QqTrack>,
+    val title: String,
+    val total: Int,
+    val hasMore: Boolean,
+)
 
 /**
  * `musicu.fcg` 客户端。
@@ -196,6 +223,226 @@ class QqMusicuApi(private val client: OkHttpClient) {
         credential = credential,
     )
 
+    // ---- 曲库（第 2 步）-----------------------------------------------------
+
+    /**
+     * 取一首歌的播放直链。`music.vkey.GetVkey / UrlGetVkey`。
+     *
+     * 这是 Phase 0 探针（`app/src/debug/.../Phase0ProbeActivity.kt#requestVkey`）的**逐字段移植**：
+     * 同一个 module/method、同一组 param、同一个 Cookie 头。两处必须同时改 —— 改一头就会漂开。
+     *
+     * **与探针的一处刻意差异：不做 Range 预探。** 探针对每个候选域名都发一次
+     * `Range: bytes=0-0` 是为了**取证**（"拿到的是不是完整曲目"要逐字节对照）；产品路径上
+     * 这件事由 ExoPlayer 自己做（打不开会以 PlaybackException 冒出来），再预探一次只是把
+     * 延迟翻倍。Phase 0 实测四个 https 域名 6/6 全部 206，所以直接取第一个 https 兜底域名。
+     *
+     * @param quality 音质档位。见 [QqQuality] —— 本期只有 128k 对外可选。
+     */
+    suspend fun getPlayLink(
+        profile: QqDeviceProfile,
+        credential: QqCredential,
+        track: QqTrack,
+        quality: QqQuality = QqQuality.DEFAULT,
+    ): QqPlayLink {
+        val guid = UUID.randomUUID().toString().replace("-", "")
+        val filename = "${quality.prefix}${track.mid}${track.mediaIdOrMid}${quality.ext}"
+        val data = call(
+            phase = "get-play-link",
+            module = "music.vkey.GetVkey",
+            method = "UrlGetVkey",
+            param = JSONObject().apply {
+                // 单元素数组是上游写死的形状（ Phase 0 实测，不是风格选择）。
+                put("filename", JSONArray(listOf(filename)))
+                put("guid", guid)
+                put("songmid", JSONArray(listOf(track.mid)))
+                put("songtype", JSONArray(listOf(0)))
+                put("uin", credential.musicId)
+                put("ctx", 0)
+            },
+            profile = profile,
+            credential = credential,
+        )
+        val info = data.optJSONArray("midurlinfo")?.optJSONObject(0) ?: JSONObject()
+        val purl = info.optString("purl")
+        if (purl.isEmpty()) {
+            // 空链接**不猜原因**：上游把"会员不足 / 地区限制 / 下架 / 无该音质"压成同一个形状，
+            // 客户端编一套解释只会造出"看起来懂了其实猜错了"的日志。如实带出 result/errtype。
+            throw QqProtocolException(
+                phase = "get-play-link",
+                upstreamCode = info.optInt("result", -1),
+                globalCode = 0,
+                httpStatus = 200,
+            )
+        }
+        return QqPlayLink(
+            url = HTTPS_FALLBACK_DOMAINS.first() + purl,
+            candidates = buildList {
+                addAll(readSip(data))
+                addAll(HTTPS_FALLBACK_DOMAINS)
+            }.distinct().map { it + purl },
+            declaredSize = info.optLong("size", track.size128),
+            filename = info.optString("filename"),
+        )
+    }
+
+    /**
+     * "我喜欢"歌曲。`music.srfDissInfo.DissInfo / CgiGetDiss`，`disstid=0 / dirid=201`。
+     *
+     * 这一对常量是上游的硬编码：**"我喜欢"不是普通歌单，是目录 201**（`dirid` 固定 201，
+     * 同一接口还能加歌/删歌）。参数形状与分页字段经两个独立来源交叉核对
+     * （L-1124/QQMusicApi 的 `user.get_fav_song` 与 simple-music 的 API 梳理文档）。
+     *
+     * 布尔参数必须是 JSON boolean，不能序列化成 0/1 —— `tag`/`userinfo`/`orderlist` 都是。
+     */
+    suspend fun favoriteSongs(
+        profile: QqDeviceProfile,
+        credential: QqCredential,
+        begin: Int = 0,
+        num: Int = FAV_PAGE_SIZE,
+    ): QqSongPage = dissSongs(
+        profile = profile,
+        credential = credential,
+        disstid = 0,
+        dirid = FAV_DIRID,
+        begin = begin,
+        num = num,
+        phase = "favorite-songs",
+    )
+
+    /**
+     * 一个歌单的歌曲。与 [favoriteSongs] 同一个接口，换成 `disstid` 为目标歌单。
+     *
+     * @param dissId 歌单 id（[QqPlaylistSummary.id]）。
+     */
+    suspend fun playlistSongs(
+        profile: QqDeviceProfile,
+        credential: QqCredential,
+        dissId: String,
+        begin: Int = 0,
+        num: Int = FAV_PAGE_SIZE,
+    ): QqSongPage = dissSongs(
+        profile = profile,
+        credential = credential,
+        disstid = dissId.toLongOrNull() ?: 0L,
+        dirid = 0,
+        begin = begin,
+        num = num,
+        phase = "playlist-songs",
+    )
+
+    private suspend fun dissSongs(
+        profile: QqDeviceProfile,
+        credential: QqCredential,
+        disstid: Long,
+        dirid: Long,
+        begin: Int,
+        num: Int,
+        phase: String,
+    ): QqSongPage {
+        val data = call(
+            phase = phase,
+            module = "music.srfDissInfo.DissInfo",
+            method = "CgiGetDiss",
+            param = JSONObject().apply {
+                put("disstid", disstid)
+                put("dirid", dirid)
+                put("tag", true)
+                put("song_begin", begin)
+                put("song_num", num)
+                put("userinfo", true)
+                put("orderlist", true)
+            },
+            profile = profile,
+            credential = credential,
+        )
+        return QqSongPage(
+            tracks = parseQqSongList(data),
+            title = data.optJSONObject("dirinfo")?.optString("title").orEmpty(),
+            total = data.optInt("total_song_num", 0),
+            hasMore = data.optBoolean("hasmore", false),
+        )
+    }
+
+    /**
+     * 用户**自建**歌单列表。`music.musicasset.PlaylistBaseRead / GetPlaylistByUin`。
+     *
+     * 数组在 `data.v_playlist`（上游的 `v_` 前缀是历史包袱，不是笔误）。
+     * 失败（凭证失效 / 上游改形状）时返回空表并在日志里留下阶段名 —— **不抛**：
+     * 抽屉的"我喜欢" tab 与这份列表是并列的两个来源，少一个不该让另一个也不可用。
+     */
+    suspend fun createdPlaylists(
+        profile: QqDeviceProfile,
+        credential: QqCredential,
+    ): List<QqPlaylistSummary> {
+        val data = call(
+            phase = "created-playlists",
+            module = "music.musicasset.PlaylistBaseRead",
+            method = "GetPlaylistByUin",
+            param = JSONObject().apply { put("uin", credential.musicId) },
+            profile = profile,
+            credential = credential,
+        )
+        return parsePlaylistArray(data.optJSONArray("v_playlist"))
+    }
+
+    /**
+     * 用户**收藏**的歌单列表。`music.musicasset.PlaylistFavRead / CgiGetPlaylistFavInfo`。
+     * 数组在 `data.v_list`。与 [createdPlaylists] 同样的降级策略。
+     *
+     * ⚠️ 上游文档里这个接口要的是**加密 uin**（`euin`），我们只有明文 musicId。
+     * 先按明文试；拿不到就如实降级（记 W 日志、返回空表），不猜、不重试。
+     */
+    suspend fun favPlaylists(
+        profile: QqDeviceProfile,
+        credential: QqCredential,
+        size: Int = PLAYLIST_PAGE_SIZE,
+    ): List<QqPlaylistSummary> {
+        val data = call(
+            phase = "fav-playlists",
+            module = "music.musicasset.PlaylistFavRead",
+            method = "CgiGetPlaylistFavInfo",
+            param = JSONObject().apply {
+                put("uin", credential.musicId)
+                put("offset", 0)
+                put("size", size)
+            },
+            profile = profile,
+            credential = credential,
+        )
+        return parsePlaylistArray(data.optJSONArray("v_list"))
+    }
+
+    /** `v_playlist` / `v_list` 两个数组的形状相同：`id / title / picurl / songnum`。 */
+    private fun parsePlaylistArray(arr: JSONArray?): List<QqPlaylistSummary> {
+        if (arr == null) return emptyList()
+        return buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val id = o.optString("id")
+                val title = o.optString("title")
+                if (id.isEmpty() || title.isEmpty()) continue
+                add(
+                    QqPlaylistSummary(
+                        id = id,
+                        name = title,
+                        coverUrl = o.optString("picurl"),
+                        songCount = o.optInt("songnum", 0),
+                    ),
+                )
+            }
+        }
+    }
+
+    /** `sip` 数组。**实测恒为空**（Phase 0 §4.1，6/6），所以它只是锦上添花，不是依赖。 */
+    private fun readSip(data: JSONObject): List<String> {
+        val arr = data.optJSONArray("sip") ?: return emptyList()
+        return buildList {
+            for (i in 0 until arr.length()) {
+                arr.optString(i).takeIf { it.isNotEmpty() }?.let(::add)
+            }
+        }
+    }
+
     // ---- 内部 ---------------------------------------------------------------
 
     private fun cookieHeader(cred: QqCredential): String = listOf(
@@ -247,6 +494,32 @@ class QqMusicuApi(private val client: OkHttpClient) {
     private companion object {
         const val MUSICU_URL = "https://u.y.qq.com/cgi-bin/musicu.fcg"
         const val QR_DEFAULT_TTL_SEC = 180
+
+        /**
+         * https 兜底域名，**按 Phase 0 实测的可用顺序**排列。
+         *
+         * `UrlGetVkey` 返回的 `sip` 恒为空数组（实测 6/6），所以域名必须自备。
+         * 这四个域名对同一个 `purl` 全部返回 206（同一次运行、同一设备），
+         * 顺序只是偏好（ws 是 QQ 自己的 CDN 主域名），没有"哪个更快"的实测数据。
+         *
+         * ⚠️ **不要加 http 条目**：targetSdk 36 下明文被系统直接拒，加了只会让
+         * "候选域名逐个试"的第一跳白等一次超时。本项目不开 `usesCleartextTraffic`。
+         */
+        val HTTPS_FALLBACK_DOMAINS = listOf(
+            "https://ws.stream.qqmusic.qq.com/",
+            "https://dl.stream.qqmusic.qq.com/",
+            "https://isure.stream.qqmusic.qq.com/",
+            "https://sjy6.stream.qqmusic.qq.com/",
+        )
+
+        /** "我喜欢"的目录 id。上游硬编码：它不是普通歌单，是目录 201。 */
+        const val FAV_DIRID = 201L
+
+        /** 歌单歌曲每页大小。抽屉一期只拉一页，翻页属后续。 */
+        const val FAV_PAGE_SIZE = 100
+
+        /** 歌单列表每页大小。 */
+        const val PLAYLIST_PAGE_SIZE = 30
 
         /** PNG 文件头。用来挡"返回了一个坏图但流程继续等"的假成功。 */
         val PNG_MAGIC = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)

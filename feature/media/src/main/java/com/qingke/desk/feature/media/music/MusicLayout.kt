@@ -187,6 +187,70 @@ data class LoginPaneMetrics(
 }
 
 /**
+ * 选歌抽屉的尺寸。与 [MusicMetrics] / [LoginPaneMetrics] 同一套写法：**没有一个字段是常量**。
+ *
+ * 推导方向与登录浮层相反：浮层是「总高预算 → 二维码边长」（二维码是弹性项），
+ * 而抽屉的行高由**触控下限**决定（48dp 是地板，不是天花板），所以这里是从
+ * `rowH` 往下推所有行内元素。设计定稿见 `docs/2026-10-14-music-phase1-design.md` §6.3：
+ *
+ * ```
+ * drawerW   = clamp(W × 0.42, 220, 420)
+ * rowH      = max(48, H × 0.13)
+ * rowGap    = rowH × 0.10
+ * coverSide = rowH × 0.72
+ * titleSize = rowH × 0.30
+ * artistSize= titleSize × 0.78
+ * visibleRows = ((H − outerY×2) / (rowH + rowGap)).toInt()，下限 3
+ * ```
+ *
+ * 代入在役两台：一加 `drawerW=279.7 / rowH=48.0 / cover=34.6`，
+ * 小米 `drawerW=330.1 / rowH=53.4 / cover=38.5`（文档 §6.3 原值，测试里逐项钉住）。
+ */
+data class DrawerMetrics(
+    val widthDp: Float,
+    val heightDp: Float,
+
+    /** 抽屉距容器上下边缘的安全区。**与登录浮层同一个值**（同一个 BoxWithConstraints）。 */
+    val outerY: Float,
+    /** 抽屉宽（从右缘往左推这么宽）。 */
+    val drawerW: Float,
+    /** 行高。48dp 触控下限与 H×0.13 取大。 */
+    val rowH: Float,
+    /** 行间距。 */
+    val rowGap: Float,
+    /** 行内封面边长。 */
+    val coverSide: Float,
+    /** 行内标题 / 副标题字号。 */
+    val titleSizeSp: Float,
+    val artistSizeSp: Float,
+    /** 一屏放得下的行数。UI 上列表自己滚动，这个数用于"每屏约 N 行"的提示与测试。 */
+    val visibleRows: Int,
+) {
+
+    val outerYDp: Dp get() = outerY.dp
+    val drawerWDp: Dp get() = drawerW.dp
+    val rowHDp: Dp get() = rowH.dp
+    val rowGapDp: Dp get() = rowGap.dp
+    val coverSideDp: Dp get() = coverSide.dp
+    val titleSize: TextUnit get() = titleSizeSp.sp
+    val artistSize: TextUnit get() = artistSizeSp.sp
+
+    /**
+     * 抽屉不超宽、行内元素不自相矛盾。
+     *
+     * 判据给单元测试用（与 [LoginPaneMetrics.fitsInside] 同性质）。`drawerW ≤ w` 由
+     * `coerceIn` 上限 420 与在役宽度（666/786）共同保证；`coverSide < rowH` 防的是
+     * "封面比行还高"——那会把两行文字挤出触控区。
+     */
+    val fitsInside: Boolean
+        get() = drawerW <= widthDp + 0.5f &&
+            coverSide < rowH &&
+            titleSizeSp < rowH &&
+            artistSizeSp < titleSizeSp &&
+            visibleRows >= 3
+}
+
+/**
  * 音乐页的尺寸推导。
  *
  * ---------------------------------------------------------------------------
@@ -450,9 +514,15 @@ object MusicLayout {
     /** 状态行相对标题字号的比例。 */
     const val LOGIN_STATUS_RATIO = 0.85f
 
+    /**
+     * 触控下限（dp）。Material 的 48dp —— 登录浮层的按钮与选歌抽屉的行高共用它。
+     * 单独取名而不是散着写 `48f`：两处引用同一个常量，改下限时不会只改一头。
+     */
+    const val MIN_TOUCH_DP = 48f
+
     /** 按钮高（有 48dp 的触控下限）与按钮文字比例。 */
     const val LOGIN_BUTTON_RATIO = 0.115f
-    const val LOGIN_BUTTON_MIN = 48f
+    const val LOGIN_BUTTON_MIN = MIN_TOUCH_DP
     const val LOGIN_BUTTON_TEXT_RATIO = 0.36f
 
     /** 卡片内行间距，相对上下留白。 */
@@ -511,6 +581,74 @@ object MusicLayout {
             buttonHeight = buttonHeight,
             buttonTextSizeSp = buttonHeight * LOGIN_BUTTON_TEXT_RATIO,
             gapY = gapY,
+        )
+    }
+
+    // ---- 选歌抽屉（第 2 步，2026-10-14）-------------------------------------
+
+    /** 抽屉宽相对内容区宽的比例。 */
+    const val DRAWER_WIDTH_RATIO = 0.42f
+
+    /**
+     * 抽屉宽的夹取区间。
+     *
+     * 下限 220 是"一行放得下封面 + 两行文字"的最小宽度；上限 420 与在役宽度
+     * （666/786）共同保证 `drawerW ≤ w − 侧栏`（侧栏约 76dp + 间距 12dp）。
+     */
+    const val DRAWER_WIDTH_MIN = 220f
+    const val DRAWER_WIDTH_MAX = 420f
+
+    /** 行高相对可用高的比例（与 [MIN_TOUCH_DP] 取大）。 */
+    const val DRAWER_ROW_RATIO = 0.13f
+
+    /** 行间距相对行高。 */
+    const val DRAWER_ROW_GAP_RATIO = 0.10f
+
+    /** 行内封面相对行高。0.72 —— 封面必须明显小于行高，否则两行文字被挤出触控区。 */
+    const val DRAWER_COVER_RATIO = 0.72f
+
+    /** 行内标题相对行高。 */
+    const val DRAWER_TITLE_RATIO = 0.30f
+
+    /** 行内副标题（歌手）相对标题。 */
+    const val DRAWER_ARTIST_RATIO = 0.78f
+
+    /** 一屏最少放得下的行数。矮屏兜底，正常在役机器上是 6。 */
+    const val DRAWER_MIN_VISIBLE_ROWS = 3
+
+    /**
+     * 由可用空间推出选歌抽屉尺寸。公式与逐项代入见 [DrawerMetrics] 的类注释
+     * （设计文档 §6.3 定稿）。
+     *
+     * 安全区**复用登录浮层的 [LOGIN_OUTER_RATIO]**：两个浮层共享同一个
+     * `BoxWithConstraints`，安全区不一致会让它们在页面上的"呼吸感"不同。
+     */
+    fun trackDrawer(widthDp: Float, heightDp: Float): DrawerMetrics {
+        val w = widthDp.coerceAtLeast(1f)
+        val h = heightDp.coerceAtLeast(1f)
+
+        val outerY = (h * LOGIN_OUTER_RATIO).coerceIn(LOGIN_OUTER_MIN, LOGIN_OUTER_MAX)
+        val drawerW = (w * DRAWER_WIDTH_RATIO).coerceIn(DRAWER_WIDTH_MIN, DRAWER_WIDTH_MAX)
+        val rowH = maxOf(MIN_TOUCH_DP, h * DRAWER_ROW_RATIO)
+        val rowGap = rowH * DRAWER_ROW_GAP_RATIO
+        val coverSide = rowH * DRAWER_COVER_RATIO
+        val titleSize = rowH * DRAWER_TITLE_RATIO
+        val artistSize = titleSize * DRAWER_ARTIST_RATIO
+        val visibleRows = ((h - outerY * 2f) / (rowH + rowGap))
+            .toInt()
+            .coerceAtLeast(DRAWER_MIN_VISIBLE_ROWS)
+
+        return DrawerMetrics(
+            widthDp = w,
+            heightDp = h,
+            outerY = outerY,
+            drawerW = drawerW,
+            rowH = rowH,
+            rowGap = rowGap,
+            coverSide = coverSide,
+            titleSizeSp = titleSize,
+            artistSizeSp = artistSize,
+            visibleRows = visibleRows,
         )
     }
 }

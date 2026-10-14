@@ -14,6 +14,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationManagerCompat
+import com.qingke.desk.feature.media.music.online.QqLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -47,6 +48,18 @@ class MediaSessionMonitor(context: Context) {
     private val manager: MediaSessionManager =
         appContext.getSystemService(MediaSessionManager::class.java)
     private val listenerComponent = ComponentName(appContext, MediaNotificationListener::class.java)
+
+    /**
+     * 本应用的包名。**会话列表里见到它就过滤掉**，理由见 [pick]。
+     *
+     * 今天 ExoPlayer 不发布 MediaSession（我们没有引 media3-session），所以这条过滤
+     * 实际上抓不到东西；它是给"将来引入 media3-session"留的结构性防线 ——
+     * 到那天，没有这条过滤就会立刻形成"卡片显示我自己在播我自己"的自激。
+     */
+    private val selfPackage: String = appContext.packageName
+
+    /** 上一次会话列表的落盘快照（只在变化时写日志，避免每次回调都刷一行）。 */
+    private var lastSessionsDump: String = ""
 
     /**
      * MediaSession 的回调全部走主线程 Handler。
@@ -116,6 +129,14 @@ class MediaSessionMonitor(context: Context) {
     // ---------------------------------------------------------------- 会话同步
 
     private fun syncControllers(list: List<MediaController>) {
+        // 会话列表变化时落一份文件日志。**这是自激（self-excitation）的证伪判据**：
+        // ExoPlayer 播放中这份列表里不允许出现本包名。真出现了，说明有别的东西在发会话
+        // （或 [pick] 的过滤被改坏）—— 那是回归，不是噪声。
+        val dump = list.map { runCatching { it.packageName }.getOrDefault("?") }.toString()
+        if (dump != lastSessionsDump) {
+            lastSessionsDump = dump
+            QqLog.i(TAG, "会话列表变化：$dump")
+        }
         val incoming = list.associateBy { it.sessionToken }
         // 先摘掉已经不存在的
         val gone = active.keys.filter { it.sessionToken !in incoming }
@@ -183,9 +204,17 @@ class MediaSessionMonitor(context: Context) {
      * 把"有标题"放在最前面，是因为实测到某些 App（例如短视频）会挂着
      * 一条 STATE_PLAYING 但完全没有元数据的会话 —— 若只按 playing 挑，
      * 卡片会显示一条空曲目，把真正在放音乐的那条压掉。
+     *
+     * **先过滤本应用包名**（[selfPackage]）：我们自己发的 MediaSession 会被
+     * `getActiveSessions` 原样读回来。不过滤的话，一旦将来引入 media3-session
+     * （第 2 步刻意没有引，见双源组合器的注释），卡片就会显示"我自己在播我自己" ——
+     * 而音乐页那条路走的是 [RoutingPlaybackSource] 的 QQ 源，两边互相印证反而更像真的。
+     * 过滤的证伪用例：QQ 播放中，[syncControllers] 落盘的会话列表里不得出现本包名。
      */
     private fun pick(): MediaController? {
-        val all = active.keys.toList()
+        val all = active.keys.filter { controller ->
+            runCatching { controller.packageName }.getOrDefault("") != selfPackage
+        }
         return all
             .mapIndexed { index, controller -> index to controller }
             .sortedWith(

@@ -75,8 +75,10 @@ import com.qingke.desk.core.ui.rememberDeskGlassBackdrop
 import com.qingke.desk.feature.media.MediaPermission
 import com.qingke.desk.feature.media.MediaSessionMonitor
 import com.qingke.desk.feature.media.MediaUiState
+import com.qingke.desk.feature.media.music.ExoPlayerPlaybackSource
 import com.qingke.desk.feature.media.music.MediaSessionPlaybackSource
 import com.qingke.desk.feature.media.music.MusicPage
+import com.qingke.desk.feature.media.music.RoutingPlaybackSource
 import com.qingke.desk.feature.media.music.lyrics.LyricsRepository
 import com.qingke.desk.feature.media.music.online.QqLoginController
 import com.qingke.desk.hosting.ShizukuGate
@@ -307,8 +309,10 @@ fun DeskRoot(
     // 应用没法替用户开，也没法用运行时权限弹窗申请。所以除了 start/stop，
     // 还要在**每次回到前台时重新查一次**：用户从设置页勾完回来，
     // 卡片要立刻从"需要授权"切成真实曲目，而不是等下次冷启动。
+    //
+    // 注意这里**不再**有 `mediaState` 的 collect：卡片与音乐页的状态改由下面的
+    // [RoutingPlaybackSource] 统一供给（双源择优后的一份），monitor 只当传感器用。
     val mediaMonitor = remember(context) { MediaSessionMonitor(context) }
-    val mediaState by mediaMonitor.state.collectAsState()
     DisposableEffect(mediaMonitor) {
         mediaMonitor.start()
         onDispose { mediaMonitor.stop() }
@@ -324,7 +328,7 @@ fun DeskRoot(
     // 分工：monitor 的 start/stop 归**壳层**（上面那个 DisposableEffect），
     // 播放源只负责"开始/停止观察它"。
     val mediaScope = rememberCoroutineScope()
-    val playbackSource = remember(mediaMonitor, mediaScope) {
+    val sessionSource = remember(mediaMonitor, mediaScope) {
         MediaSessionPlaybackSource(mediaMonitor, mediaScope)
     }
 
@@ -344,19 +348,41 @@ fun DeskRoot(
     // 读盘 + 判过期。只做一次 —— 之后状态由 controller 自己推。
     LaunchedEffect(loginController) { loginController.restore() }
 
+    // ---- 播放源（Phase 1 第 2 步，2026-10-15）-------------------------------
+    //
+    // 现在有**两个**播放源，而页面只认 [PlaybackSource] 一个抽象。"该显示谁"是一条
+    // **跨源**的判断 —— 既要知 QQ 在不在播，也要知别的 App 在不在播 —— 所以由
+    // [RoutingPlaybackSource] 收口：QQ 自播源活跃时跟随它，否则回退系统会话源。
+    // 音乐页与首页卡拿到的是同一次择优的结果，不存在两张界面各判一次。
+    //
+    // 两个源都归**壳层**持有、切页不停播：用户从抽屉点了歌切回首页看导航，歌还在放
+    // —— 原先"只在音乐页 start"的写法会把用户刚点的歌当场掐掉。
+    val exoSource = remember(context, loginController, mediaScope) {
+        ExoPlayerPlaybackSource(context, loginController, mediaScope)
+    }
+    val playbackSource = remember(sessionSource, exoSource, mediaScope) {
+        RoutingPlaybackSource(exoSource, sessionSource, mediaScope)
+    }
+    // 首页音乐卡的状态。与音乐页的 `source.status` 同源（同一次择优的两种契约）。
+    val mediaState by playbackSource.mediaUiState.collectAsState()
+
     // 歌词仓库。它内部只留 `applicationContext`，所以可以放心在组合里活很久；
     // 但**不**把它做成进程级单例 —— 它持有的内存 LRU 装的是解析结果，
     // 挂在组合上，页面一走就跟着走（与本项目的原生对象约束同一条理由）。
     val lyricsRepository = remember(context) { LyricsRepository(context) }
 
-    // 只在音乐页观察播放状态。离开就停。
+    // 播放源的生命周期归**壳层**（2026-10-15 改：原先挂在 `screen == MUSIC` 上，
+    // "离开音乐页就停"）。放在壳上的理由与 mediaMonitor / loginController 一样：
+    // 放歌与扫码都是**跨页面**的，人切到首页时它们不能停。
     //
-    // 这不是省电的小优化：不停的话，人不在音乐页时每个媒体会话回调照样穿过 collect
-    // 灌进状态流，而那份状态**没有任何消费者**。同时，`:feature:media` 的
-    // [MediaSessionPlaybackSource.stop] 语义就是"停止观察"，语义与实现一致。
-    DisposableEffect(screen, playbackSource) {
-        if (screen == DeskScreen.MUSIC) playbackSource.start()
-        onDispose { playbackSource.stop() }
+    // onDispose 里额外 `exoSource.release()` —— 它是唯一持有原生 ExoPlayer 实例的
+    // 东西，壳层销毁（退出应用）时才放。sessionSource 只管观察，无需释放。
+    DisposableEffect(playbackSource) {
+        playbackSource.start()
+        onDispose {
+            playbackSource.stop()
+            exoSource.release()
+        }
     }
 
     // 会话一旦销毁（用户点了返回首页 / 链路断开），待判定状态一律清零。
@@ -754,7 +780,9 @@ fun DeskRoot(
                                 naviGuidance = naviGuidance,
                                 pageRequest = pageRequest,
                                 mediaState = mediaState,
-                                onMediaCommand = mediaMonitor::command,
+                                // 三键控制发给**当前胜者**（RoutingPlaybackSource
+                                // 内部按 qq/monitor 择优分发），不固定发某一个源。
+                                onMediaCommand = playbackSource::command,
                                 onMediaRequestPermission = {
                                     MediaPermission.openSettings(context, onFailure = { reason ->
                                         onMessage?.invoke(reason)
@@ -1018,6 +1046,9 @@ fun DeskRoot(
                             // 这一屏和 :feature:media 的页面代码都不用改。
                             DeskScreen.MUSIC -> MusicPage(
                                 source = playbackSource,
+                                // QQ 曲库（我喜欢 / 歌单 / 选歌抽屉）。null 时页面
+                                // 不渲染抽屉入口 —— 桌面上的历史实现就是 null。
+                                library = playbackSource,
                                 lyricsRepository = lyricsRepository,
                                 loginState = loginState,
                                 onStartLogin = { loginController.startLogin() },

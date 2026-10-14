@@ -100,6 +100,11 @@ fun MusicHud(
     onSeek: (Long) -> Unit,
     onImportLyrics: () -> Unit,
     onAccountClick: () -> Unit,
+    /**
+     * "选歌"入口。null = 不渲染这颗 chip（未登录 / 壳层没有 QQ 曲库源）。
+     * 用可空回调而不是布尔：布尔会把"为什么没有这颗 chip"的答案拆成两处判断。
+     */
+    onPickTrack: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -151,6 +156,9 @@ fun MusicHud(
                 // 也考虑过把账号入口放到右上角：那里会撞上壳层的设置齿轮
                 // （齿轮跟着侧栏镜像，左/右都可能，详见 MusicPage 里歌词角标的注释），
                 // 而 HUD 内部是唯一确定不与壳层 overlay 争位置的区域。
+                //
+                // 已登录时这颗行里最多有三颗 chip（导入歌词 / 选歌 / 账号）——
+                // 超宽由 TextOverflow.Ellipsis 各自截断，行数不变，不变式仍成立。
                 Row(
                     modifier = Modifier.padding(top = metrics.hudTextGap.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -162,6 +170,14 @@ fun MusicHud(
                         interactive = interactive,
                         onClick = onImportLyrics,
                     )
+                    if (onPickTrack != null) {
+                        HudChip(
+                            text = "选歌",
+                            metrics = metrics,
+                            interactive = interactive,
+                            onClick = onPickTrack,
+                        )
+                    }
                     HudChip(
                         text = accountLabel,
                         metrics = metrics,

@@ -467,4 +467,113 @@ class MusicLayoutTest {
             }
         }
     }
+
+    // ---------------------------------------------------------------------
+    // 选歌抽屉（Phase 1 第 2 步，2026-10-14）
+    //
+    // 与上面同一套思路：抽屉尺寸也是"可用空间 → 尺寸"的纯函数，同样可以被穷举。
+    // 它要保证的关系是：**抽屉不超宽、行内元素不自相矛盾、每屏至少 3 行**。
+    // ---------------------------------------------------------------------
+
+    private fun DrawerMetrics.dump(): String = buildString {
+        append("w=$widthDp h=$heightDp\n")
+        append("  outerY=$outerY drawerW=$drawerW\n")
+        append("  rowH=$rowH rowGap=$rowGap cover=$coverSide\n")
+        append("  title=$titleSizeSp artist=$artistSizeSp visibleRows=$visibleRows")
+    }
+
+    /**
+     * 矩阵内每个尺寸，抽屉都要守得住边界。
+     *
+     * 怎么才假：把 [MusicLayout.DRAWER_COVER_RATIO] 调到 ≥1（封面超过行高），
+     * 或把 [MusicLayout.DRAWER_TITLE_RATIO] 调到超过行高。
+     * 注意 `drawerW ≤ w` 在**极窄**（w < 约 523dp）时会假 —— 那是 220dp 下限本身
+     * 大于内容区宽。矩阵里最窄的 420dp 仍然成立；更窄的屏（< 523dp 内容区）
+     * 需要的是把侧栏收起来，不是把抽屉压成一条线。这条断言红的时刻就是提示那句话。
+     */
+    @Test
+    fun `矩阵内每个尺寸的抽屉都不越界`() {
+        allPanels.forEach { p ->
+            val m = MusicLayout.trackDrawer(p.w, p.h)
+            assertTrue("${p.label} ${p.w}×${p.h} 的抽屉越界：\n${m.dump()}", m.fitsInside)
+        }
+    }
+
+    /**
+     * 在役两台机器上的**逐项精确值**（设计文档 §6.3 代入原值）。
+     *
+     * 怎么才假：任何人改了 §6.3 的任一项比例。改比例本身不是 bug，
+     * 但"文档表格与实现漂开"是 —— 这个测试就是钉住"文档里的数必须还能算出来"。
+     */
+    @Test
+    fun `在役机器上抽屉尺寸与设计文档逐项相等`() {
+        val onePlus = MusicLayout.trackDrawer(666f, 361f)
+        assertEquals("一加 drawerW", 279.72f, onePlus.drawerW, 1e-2f)
+        assertEquals("一加 rowH（被 48 下限托住）", 48f, onePlus.rowH, 1e-3f)
+        assertEquals("一加 cover", 34.56f, onePlus.coverSide, 1e-2f)
+        assertEquals("一加 title", 14.4f, onePlus.titleSizeSp, 1e-2f)
+        assertEquals("一加 artist", 11.232f, onePlus.artistSizeSp, 1e-2f)
+        assertEquals("一加 每屏行数", 6, onePlus.visibleRows)
+
+        val xiaomi = MusicLayout.trackDrawer(786f, 411f)
+        assertEquals("小米 drawerW", 330.12f, xiaomi.drawerW, 1e-2f)
+        assertEquals("小米 rowH", 53.43f, xiaomi.rowH, 1e-2f)
+        assertEquals("小米 cover", 38.4696f, xiaomi.coverSide, 1e-2f)
+        assertEquals("小米 title", 16.029f, xiaomi.titleSizeSp, 1e-2f)
+        assertEquals("小米 artist", 12.50262f, xiaomi.artistSizeSp, 1e-2f)
+        assertEquals("小米 每屏行数", 6, xiaomi.visibleRows)
+    }
+
+    /**
+     * 行高必须被 48dp 触控下限托住。
+     *
+     * 矮屏（361dp）上 `h × 0.13 = 46.93` 本来低于下限 —— 没有 `maxOf` 的话
+     * 行高会变成 46.93，封面 33.8dp、标题 14.1sp：**眼睛看不出来，但手指头知道**。
+     * 怎么才假：把 `maxOf(MIN_TOUCH_DP, …)` 里的下限拿掉。
+     */
+    @Test
+    fun `矮屏上行高不低于触控下限`() {
+        listOf(666f to 361f, 666f to 320f, 786f to 300f).forEach { (w, h) ->
+            val m = MusicLayout.trackDrawer(w, h)
+            assertTrue("$w×$h 的 rowH=${m.rowH} 低于 ${MusicLayout.MIN_TOUCH_DP}dp", m.rowH >= MusicLayout.MIN_TOUCH_DP)
+        }
+        // 高屏上反过来：比例接管，行高随高度长（不能永远钉在 48）。
+        val tall = MusicLayout.trackDrawer(786f, 600f)
+        assertTrue("600dp 高时 rowH 仍是下限：${tall.rowH}", tall.rowH > MusicLayout.MIN_TOUCH_DP)
+    }
+
+    /**
+     * 每屏行数的下限兜底。
+     *
+     * 怎么才假：把 `coerceAtLeast(DRAWER_MIN_VISIBLE_ROWS)` 拿掉，
+     * 且构造一个 `outerY×2` 几乎吃掉整块高度的尺寸（矮屏 + 大 outerY 不可能，
+     * 但退化输入可以 —— 见下一条）。
+     */
+    @Test
+    fun `每屏行数不低于 3`() {
+        allPanels.forEach { p ->
+            val m = MusicLayout.trackDrawer(p.w, p.h)
+            assertTrue("${p.label} 每屏只有 ${m.visibleRows} 行", m.visibleRows >= MusicLayout.DRAWER_MIN_VISIBLE_ROWS)
+        }
+    }
+
+    /** 抽屉也要扛得住 0 / 负约束（首帧、resize），与浮层同一条兜底。 */
+    @Test
+    fun `零尺寸下抽屉不产生 NaN 或负值`() {
+        listOf(0f to 0f, -1f to -1f, 0f to 361f, 666f to 0f).forEach { (w, h) ->
+            val m = MusicLayout.trackDrawer(w, h)
+            listOf(
+                "outerY" to m.outerY,
+                "drawerW" to m.drawerW,
+                "rowH" to m.rowH,
+                "rowGap" to m.rowGap,
+                "cover" to m.coverSide,
+                "title" to m.titleSizeSp,
+                "artist" to m.artistSizeSp,
+            ).forEach { (name, v) ->
+                assertTrue("$w×$h 的 $name = $v，既不能是 NaN 也不能为负", v.isFinite() && v >= 0f)
+            }
+            assertTrue("$w×$h 的 visibleRows=${m.visibleRows} 低于下限", m.visibleRows >= 3)
+        }
+    }
 }

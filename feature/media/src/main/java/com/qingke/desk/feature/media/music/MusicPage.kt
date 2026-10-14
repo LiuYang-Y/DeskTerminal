@@ -45,6 +45,7 @@ import com.qingke.desk.core.platform.EffectTier
 import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.LocalEffectTier
 import com.qingke.desk.feature.media.MediaPermission
+import com.qingke.desk.feature.media.mediaSourceLabel
 import com.qingke.desk.feature.media.music.artwork.ArtworkBackdrop
 import com.qingke.desk.feature.media.music.artwork.ArtworkVisual
 import com.qingke.desk.feature.media.music.lyrics.ImportResult
@@ -52,7 +53,9 @@ import com.qingke.desk.feature.media.music.lyrics.LyricsDoc
 import com.qingke.desk.feature.media.music.lyrics.LyricsRepository
 import com.qingke.desk.feature.media.music.online.QqLoginPane
 import com.qingke.desk.feature.media.music.online.QqLoginState
+import com.qingke.desk.feature.media.music.online.QqLibraryState
 import com.qingke.desk.feature.media.music.online.QqLog
+import com.qingke.desk.feature.media.music.online.isUsableCredential
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -125,6 +128,11 @@ fun MusicPage(
     onLogout: () -> Unit,
     modifier: Modifier = Modifier,
     onMessage: ((String) -> Unit)? = null,
+    /**
+     * 选歌抽屉的数据源。**null = 当前没有 QQ 自播源**（例如壳层只挂了 MediaSession 源），
+     * 此时"选歌"入口不出现 —— 页面不认识 ExoPlayer，只认识这个抽象。
+     */
+    library: QqMusicLibrary? = null,
 ) {
     val context = LocalContext.current
     val tier = LocalEffectTier.current
@@ -140,8 +148,20 @@ fun MusicPage(
         QqLog.i("MusicPage", "浮层可见性=$showLoginPane 状态=${loginState::class.simpleName}")
     }
 
+    // 选歌抽屉的可见性。与登录浮层同一条理由留日志：这个布尔是"抽屉为什么点不开"
+    // 这类问题的唯一直接证据（library 为 null 时入口根本不出现，是另一条路径）。
+    var showDrawer by remember { mutableStateOf(false) }
+    LaunchedEffect(showDrawer, library != null) {
+        QqLog.i("MusicPage", "抽屉可见性=$showDrawer 有曲库源=${library != null}")
+    }
+
     val status by source.status.collectAsState()
     val track = (status as? PlaybackStatus.Active)?.track
+
+    // 抽屉的曲库状态。**无条件 collect**（library 为 null 时结果是 null）——
+    // 放进 if 分支里 collect 会让状态收集的生命周期跟着可见性走，
+    // 而"后台拉歌单"必须在抽屉不可见时也活着（用户点了播放会跳回页面）。
+    val libraryState: State<QqLibraryState>? = library?.state?.collectAsState()
 
     // ---- 位置心跳 ----------------------------------------------------------
     val nowMs = remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
@@ -296,6 +316,10 @@ fun MusicPage(
         val paneMetrics = remember(maxWidth, maxHeight) {
             MusicLayout.loginPane(maxWidth.value, maxHeight.value)
         }
+        // 选歌抽屉同理（公式见 MusicLayout.trackDrawer / 设计文档 §6.3）。
+        val drawerMetrics = remember(maxWidth, maxHeight) {
+            MusicLayout.trackDrawer(maxWidth.value, maxHeight.value)
+        }
 
         MusicBackdrop(
             visual = visual,
@@ -334,6 +358,16 @@ fun MusicPage(
                 // 没在播的时候 HUD 不存在，所以这里是**唯一**的登录入口 ——
                 // 少了它，"还没登录 → 没内容 → 看不到入口"就是一个死循环。
                 onOpenLogin = { showLoginPane = true },
+                // 已登录时同一位置换成"选歌"：状态卡是空态页面的主操作区，
+                // 登录过的人到这里要的是"放一首"，不是"再登录一次"。
+                onOpenDrawer = if (loginState.isUsableCredential && library != null) {
+                    {
+                        showDrawer = true
+                        wake()
+                    }
+                } else {
+                    null
+                },
             )
         } else {
             LyricsLayer(
@@ -417,6 +451,15 @@ fun MusicPage(
                 showLoginPane = true
                 wake()
             },
+            // 已登录且壳层提供了曲库源时才给这颗 chip（null = 不渲染）。
+            onPickTrack = if (loginState.isUsableCredential && library != null) {
+                {
+                    showDrawer = true
+                    wake()
+                }
+            } else {
+                null
+            },
             )
         }
 
@@ -432,6 +475,25 @@ fun MusicPage(
                 onCancel = onCancelLogin,
                 onLogout = onLogout,
                 onDismiss = { showLoginPane = false },
+            )
+        }
+
+        // ---- 选歌抽屉（第 2 步）-------------------------------------------
+        //
+        // 与登录浮层并列的最高层。**library 为 null 时整个分支不出现** ——
+        // 页面对"能不能选歌"的唯一判断依据就是这个抽象在不在。
+        if (showDrawer && library != null && libraryState != null) {
+            TrackDrawer(
+                state = libraryState.value,
+                metrics = drawerMetrics,
+                onSelectTrack = { index -> library.playTrackAt(index) },
+                onRefresh = { library.refresh() },
+                onOpenFavorites = { library.openFavorites() },
+                onOpenPlaylist = { id -> library.openPlaylist(id) },
+                onDismiss = {
+                    showDrawer = false
+                    wake()
+                },
             )
         }
     }
@@ -466,14 +528,12 @@ private fun lyricsSourceLabel(doc: LyricsDoc, loading: Boolean): String {
     return "歌词 · ${doc.source.label} · $timing · ${doc.lines.size} 行"
 }
 
-/** 包名 → 短标签。与媒体卡片用的是同一套叫法。 */
-private fun sourceLabelOf(packageName: String): String = when (packageName) {
-    "com.tencent.qqmusic" -> "QQ音乐"
-    "com.netease.cloudmusic" -> "网易云音乐"
-    "com.kugou.android" -> "酷狗"
-    "com.tencent.qqmusicpad" -> "QQ音乐 HD"
-    else -> packageName.substringAfterLast('.').takeIf { it.isNotBlank() } ?: ""
-}
+/**
+ * 包名 → 短标签。**与首页媒体卡共用同一个函数**（[mediaSourceLabel]）——
+ * 同一首歌在两张界面上的来源名必须一致，而"QQ音乐"这个映射
+ * （含我们自己的 ExoPlayer 源，其 sourcePackage 是本包名）只有一处定义。
+ */
+private fun sourceLabelOf(packageName: String): String = mediaSourceLabel(packageName)
 
 /**
  * 歌词层。
@@ -509,6 +569,8 @@ private fun MusicStatusCard(
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit,
     onOpenLogin: () -> Unit,
+    /** 已登录时的"选歌"入口。null = 不渲染（没登录或没有曲库源）。 */
+    onOpenDrawer: (() -> Unit)? = null,
 ) {
     val title: String
     val detail: String
@@ -577,6 +639,23 @@ private fun MusicStatusCard(
                     .clip(RoundedCornerShape(percent = 50))
                     .background(Color.White.copy(alpha = 0.14f))
                     .clickable(onClick = onOpenLogin)
+                    .padding(horizontal = metrics.pad.dp, vertical = metrics.hudTextGap.dp),
+            )
+        }
+        // 已登录 → 同一位置的主操作变成"选歌"。
+        // 与上面那颗按钮**互斥**（登录态二选一），所以两条 if 不会同时成立。
+        if (onOpenDrawer != null && loginState.isUsableCredential) {
+            Text(
+                text = "选歌",
+                fontSize = metrics.artistSize,
+                lineHeight = metrics.artistSize * MusicLayout.HUD_TEXT_LINE_HEIGHT_EM,
+                color = Color.White.copy(alpha = 0.88f),
+                maxLines = 1,
+                modifier = Modifier
+                    .padding(top = metrics.hudTextGap.dp)
+                    .clip(RoundedCornerShape(percent = 50))
+                    .background(Color.White.copy(alpha = 0.14f))
+                    .clickable(onClick = onOpenDrawer)
                     .padding(horizontal = metrics.pad.dp, vertical = metrics.hudTextGap.dp),
             )
         }

@@ -57,9 +57,15 @@ dependencies {
     // 歌词解析（纯 JVM/KMP）。理由与已核实的坑见 gradle/libs.versions.toml。
     implementation(libs.accompanist.lyrics.core)
 
-    // OkHttp：**只为 WebSocket**。QQ 扫码登录的 qq 通道是 MQTT over WebSocket
-    // （wss://mu.y.qq.com/ws/handshake，已实测标准握手且不校验 Origin），
-    // 而 Android 的 java.net.http.WebSocket 要 API 34 —— 本项目 minSdk 26。
-    // musicu 的普通 POST 也顺带用它，但那一块用 HttpURLConnection 也可以。
+    // QQ 扫码登录的 MQTT over WebSocket（:feature:media 的 online/ 子树）。
     implementation(libs.okhttp)
+
+    // ExoPlayer：**路线 B 的播放实现**（ExoPlayerPlaybackSource）。2026-10-14 之前它只以
+    // debugImplementation 挂在 :app 上服务 Phase 0 探针；第 2 步起它是产品代码，随 main 源码集
+    // 进正式构建（media3 只在 Google Maven，仓库声明里必须有 google()）。
+    //
+    // 只引 exoplayer 一个 artifact：AudioProcessor 的注入路径（DefaultRenderersFactory →
+    // DefaultAudioSink.setAudioProcessors）在 media3-exoplayer 里就齐了，不需要 session /
+    // ui / dashboard 那一串。第 3 步的 TeeAudioProcessor 同样只依赖这一个包。
+    implementation(libs.androidx.media3.exoplayer)
 }

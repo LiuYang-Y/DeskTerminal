@@ -72,3 +72,31 @@ enum class MediaCommand {
     PLAY_PAUSE,
     NEXT,
 }
+
+/**
+ * 本应用的包名，作为**媒体来源**出现时的取值。
+ *
+ * [com.qingke.desk.feature.media.music.ExoPlayerPlaybackSource] 自己播 QQ 音乐时，
+ * `sourcePackage` 填的就是它 —— 于是 [mediaSourceLabel] 把它显示成"QQ音乐"。
+ * 用真包名而不是一个虚构标记，是为了让 [com.qingke.desk.feature.media.MediaSessionMonitor]
+ * 的"过滤本包会话"与这里的"标注本包来源"指向同一个字符串：自激的证伪用例
+ * （会话列表里不得出现本包名）和界面上的来源标签永远是同一回事。
+ */
+const val SELF_MEDIA_PACKAGE = "com.qingke.desk"
+
+/**
+ * 包名 → 短标签。认得的给中文名，认不得的退成包名最后一段。
+ *
+ * 首页卡（`MediaCard`）与音乐页（`MusicPage`）共用这一个函数 —— 两张界面显示
+ * "谁在播"时必须用同一套叫法，否则同一首歌在两个页面有两个来源名。
+ */
+fun mediaSourceLabel(packageName: String): String = when (packageName) {
+    SELF_MEDIA_PACKAGE -> "QQ音乐"
+    "com.tencent.qqmusic" -> "QQ音乐"
+    "com.netease.cloudmusic" -> "网易云音乐"
+    "com.kugou.android" -> "酷狗"
+    "com.tencent.qqmusicpad" -> "QQ音乐 HD"
+    "com.ss.android.ugc.aweme" -> "抖音"
+    "com.ximalaya.ting.android" -> "喜马拉雅"
+    else -> packageName.substringAfterLast('.').takeIf { it.isNotBlank() } ?: packageName
+}

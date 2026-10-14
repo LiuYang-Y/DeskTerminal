@@ -369,7 +369,7 @@ private fun Controls(
 private fun subtitleOf(track: MediaTrack): String {
     val parts = buildList {
         if (track.artist.isNotBlank()) add(track.artist)
-        sourceLabel(track.sourcePackage).takeIf { it.isNotBlank() }?.let(::add)
+        mediaSourceLabel(track.sourcePackage).takeIf { it.isNotBlank() }?.let(::add)
         val album = track.album.orEmpty()
         if (album.isNotBlank() && album != track.artist && album != track.title) add(album)
     }
@@ -436,13 +436,4 @@ private fun Placeholder(
     }
 }
 
-/** 把包名压成一个短标签。认得的给中文名，认不得的退成包名最后一段。 */
-private fun sourceLabel(packageName: String): String = when (packageName) {
-    "com.tencent.qqmusic" -> "QQ音乐"
-    "com.netease.cloudmusic" -> "网易云音乐"
-    "com.kugou.android" -> "酷狗"
-    "com.tencent.qqmusicpad" -> "QQ音乐 HD"
-    "com.ss.android.ugc.aweme" -> "抖音"
-    "com.ximalaya.ting.android" -> "喜马拉雅"
-    else -> packageName.substringAfterLast('.').takeIf { it.isNotBlank() } ?: packageName
-}
+/** 来源标签走 [mediaSourceLabel]（与音乐页共用一套叫法，定义在 MediaModels.kt）。 */
