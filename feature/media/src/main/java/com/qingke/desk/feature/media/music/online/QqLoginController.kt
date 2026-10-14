@@ -216,8 +216,28 @@ class QqLoginController(
             throw cancellation     // 取消不是失败，别把它变成 Failed
         } catch (t: Throwable) {
             QqLog.w(TAG, "登录失败于 [$stage]：${t.javaClass.simpleName}: ${t.message}")
-            _state.value = QqLoginState.Failed(stage, t.message ?: t.javaClass.simpleName)
+            _state.value = QqLoginState.Failed(stage, friendlyReason(stage, t))
         }
+    }
+
+    /**
+     * 失败原因给界面看的文案。**原始消息照旧进日志**（上面那行 W 脱敏检查过），
+     * 这里只替换用户读到的那一句。
+     *
+     * 唯一需要特殊映射的是 [UPSTREAM_DEVICE_LIMIT]（登录设备数超限，码的出处见
+     * [QqDeviceFactory] 的类注释）：原始串"上游拒绝（… upstream=20279）"对用户
+     * 没有任何可行动性，而这个错**只能**用户在手机 QQ 音乐的登录设备管理里
+     * 踢掉一个设备才能解 —— 文案必须把动作说到位。
+     */
+    private fun friendlyReason(stage: String, t: Throwable): String {
+        if (stage == QqLoginStage.EXCHANGE &&
+            t is QqProtocolException &&
+            t.upstreamCode == UPSTREAM_DEVICE_LIMIT
+        ) {
+            return "登录设备数超限：请在手机 QQ 音乐「设置 → 登录设备管理」中" +
+                "移除不常用的设备，然后重试"
+        }
+        return t.message ?: t.javaClass.simpleName
     }
 
     private fun ensureProfile() {
@@ -276,5 +296,11 @@ class QqLoginController(
 
     private companion object {
         const val TAG = "QqLogin"
+
+        /**
+         * 上游拒绝码：登录设备数超限。见 [friendlyReason] 与 [QqDeviceFactory] 类注释
+         * （设备指纹每次会话重造 → 同一个账号被当成一台又一台新设备 → 攒到这个码）。
+         */
+        const val UPSTREAM_DEVICE_LIMIT = 20279
     }
 }
