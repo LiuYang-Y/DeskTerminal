@@ -7,7 +7,6 @@ import android.text.Layout
 import android.text.SpannableStringBuilder
 import android.text.StaticLayout
 import android.text.TextPaint
-import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
@@ -34,6 +33,7 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -42,6 +42,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.qingke.desk.feature.media.music.artwork.ArtworkBackdrop
 import com.qingke.desk.feature.media.music.lyrics.LyricLine
 import com.qingke.desk.feature.media.music.lyrics.LyricsDoc
@@ -91,6 +92,16 @@ import com.qingke.desk.feature.media.music.lyrics.LyricsDoc
  *
  * 外部契约不变：仍然是 `fillMaxWidth` + `offset(driftX, driftY)`，尺寸由 [size] 定
  * （行高 = size × [MusicLayout.LYRIC_LINE_HEIGHT_EM]，与 [LyricLineText] 同一算法）。
+ *
+ * ---------------------------------------------------------------------------
+ * 长词**缩字号**，不裁词（2026-10-15，与 `OneRepublic → OneR` 同一批修）
+ *
+ * 水印现在取的是**一个完整的词**（见 [watermarkTextOf]），长度不再有 4 字的保证：
+ * `Dreaming` / `OneRepublic` 都可能来。这一层的"永不裁词"由两件事保证：
+ *   1. 取词层不按字数裁英文（那是给汉字定的规则）；
+ *   2. 绘制层在组合期用 [fitTextSize] 量一次宽度：超过盒宽 ×[WATERMARK_WIDTH_FILL]
+ *      就按比例缩字号（下限 [WATERMARK_MIN_SIZE_SP] sp），再用**缩后的字号**建布局。
+ * 于是"长词"的代价是"字小一点"，不是"少半截"。
  */
 @Composable
 fun Watermark(
@@ -112,6 +123,7 @@ fun Watermark(
         (size * MusicLayout.LYRIC_LINE_HEIGHT_EM).toPx() / size.toPx()
     }
     val blurPx = with(density) { WATERMARK_BLUR_DP.dp.toPx() }
+    val minSizePx = with(density) { WATERMARK_MIN_SIZE_SP.sp.toPx() }
     val textColor = color.toArgb()
 
     // Paint 复用（与 [LyricLineText] 同一条理由）：每帧新建 Paint 会让交叉期每帧都分配。
@@ -121,6 +133,13 @@ fun Watermark(
             typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
             // 常驻模糊 —— 这一层的字永远是这个化开的样子，不是过渡效果。
             maskFilter = BlurMaskFilter(blurPx, BlurMaskFilter.Blur.NORMAL)
+        }
+    }
+    // 量字用的 scratch Paint：**必须与 [paint] 同一个 typeface**，否则量出来的宽不是画出来的宽。
+    // 单独一个而不是借 [paint]：量字发生在**组合期**，不该顺手改掉绘制用的那个对象。
+    val measurePaint = remember {
+        TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
         }
     }
 
@@ -136,10 +155,40 @@ fun Watermark(
     }
     val crossValue = cross.value.coerceIn(0f, 1f)
 
+    // 盒宽。绘制期本来能直接从 `DrawScope.size` 拿到，但"按宽度缩字号"要在**组合期**算好
+    // （见下面两个 remember），所以用 onSizeChanged 把布局宽同步成状态 ——
+    // 一次布局只写一次，且宽度不变就不会再触发。首帧它还是 0，
+    // [fitTextSize] 对"可用宽未知"的处理是**不缩**（宁可那一帧按原字号被裁，
+    // 也不要整帧不画 —— 那种一闪更难看）。
+    var boxWidthPx by remember { mutableStateOf(0f) }
+    val fitWidthPx = boxWidthPx * WATERMARK_WIDTH_FILL
+
+    // 交叉的两层**各按自己的文字算字号**：旧词 `OneRepublic`、新词 `Yeah`，
+    // 用同一个字号会让其中一个明显不合适。
+    val fitSizePx = remember(text, fitWidthPx, textSizePx) {
+        fitTextSize(measurePaint, text, textSizePx, fitWidthPx, minSizePx)
+    }
+    val prevFitSizePx = remember(prev, fitWidthPx, textSizePx) {
+        fitTextSize(measurePaint, prev, textSizePx, fitWidthPx, minSizePx)
+    }
+
+    // 旧词先画、新词后画（新词压在上面）：交叉期才像"换"，不像"叠"。
+    // 稳态时只画一层 —— 不留一层 alpha=0 的空绘制。
+    val layers: List<Triple<String, Float, Float>> = if (prev == text || crossValue >= 1f) {
+        listOf(Triple(text, 1f, fitSizePx))
+    } else {
+        listOf(
+            Triple(prev, 1f - crossValue, prevFitSizePx),
+            Triple(text, crossValue, fitSizePx),
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxWidth()
             .height(lineHeightDp)
+            // 布局宽 → 状态（见上面 boxWidthPx 的注释）。
+            .onSizeChanged { boxWidthPx = it.width.toFloat() }
             // 防烧屏微位移用 offset 而不是 padding：偏移量是正负 6 dp，
             // `Modifier.padding` 不接受负值，而水印一半时间会往左/往上走。
             .offset(x = driftX, y = driftY)
@@ -153,15 +202,8 @@ fun Watermark(
                 drawIntoCanvas { canvas ->
                     val native = canvas.nativeCanvas
                     val layoutW = boxW.toInt().coerceAtLeast(1)
-                    // 旧词先画、新词后画（新词压在上面）：交叉期才像"换"，不像"叠"。
-                    // 稳态时只画一层 —— 不留一层 alpha=0 的空绘制。
-                    val layers: List<Pair<String, Float>> = if (prev == text || crossValue >= 1f) {
-                        listOf(text to 1f)
-                    } else {
-                        listOf(prev to 1f - crossValue, text to crossValue)
-                    }
-                    layers.forEach { (content, layerAlpha) ->
-                        paint.textSize = textSizePx
+                    layers.forEach { (content, layerAlpha, fitPx) ->
+                        paint.textSize = fitPx
                         paint.color = textColor
                         paint.alpha = (layerAlpha.coerceIn(0f, 1f) * 255f).toInt()
                         val layout = StaticLayout.Builder
@@ -171,7 +213,8 @@ fun Watermark(
                             .setIncludePad(false)
                             // 单行 + 不省略：与旧版 `Text(maxLines = 1, softWrap = false,
                             // overflow = Clip)` 一致 —— 超宽裁掉，不折行
-                            // （三成大字的折行会盖住中央歌词）。
+                            // （三成大字的折行会盖住中央歌词）。超宽的前提已经被
+                            // [fitTextSize] 缩掉了，走到这里还超宽只剩"字号已到下限"这一种。
                             .setMaxLines(1)
                             .setEllipsize(null)
                             .build()
@@ -186,6 +229,36 @@ fun Watermark(
             },
     )
 }
+
+/**
+ * 把一段文字装进 [maxWidthPx]：超宽就**按比例缩字号**，下限 [minSizePx]。
+ *
+ * 为什么是"缩字"而不是"裁字"：水印是**一个词**（见 [watermarkTextOf]），
+ * 裁掉尾巴就是个坏掉的词（`Dreaming` → `Dream`）；而字号小一档只是"没那么霸气"。
+ * 两者不对称，所以宁可缩。
+ *
+ * `maxWidthPx <= 0` 表示"可用宽还不知道"（首帧，见 [Watermark] 里 boxWidthPx 的注释）——
+ * 此时**原样返回**，不做任何猜测。
+ */
+private fun fitTextSize(
+    paint: Paint,
+    content: String,
+    desiredPx: Float,
+    maxWidthPx: Float,
+    minSizePx: Float,
+): Float {
+    if (content.isEmpty() || desiredPx <= 0f || maxWidthPx <= 0f) return desiredPx
+    paint.textSize = desiredPx
+    val measured = paint.measureText(content)
+    if (measured <= maxWidthPx) return desiredPx
+    return (desiredPx * maxWidthPx / measured).coerceAtLeast(minSizePx)
+}
+
+/** 水印可用宽占盒宽的比例。留出 8% —— 参考图里大字两侧始终有一线暗场，贴边会显得挤。 */
+private const val WATERMARK_WIDTH_FILL = 0.92f
+
+/** 水印缩字号的下限（sp）。再小就压不住场了，"背景大字"的意义没了。 */
+private const val WATERMARK_MIN_SIZE_SP = 24f
 
 /** 水印的常驻模糊半径（dp）。见 [Watermark] 的类注释：它是这层字的固有属性。 */
 private const val WATERMARK_BLUR_DP = 6f
@@ -414,8 +487,23 @@ private const val UPCOMING_SYLLABLE_ALPHA = 0.45f
  * 半径 ≤ 0.5dp 时 **maskFilter 置 null**（不是设个 0 半径的滤镜）——
  * 稳态下不该有一个"模糊半径为 0"的滤镜对象挂在 Paint 上。
  *
+ * ---------------------------------------------------------------------------
+ * 歌词舞台**永远不出现省略号**（2026-10-15 修 `...`）
+ *
+ * 旧版给 `StaticLayout` 设了 `setMaxLines(2) + setEllipsize(END)` —— 放不下的句子
+ * 尾巴就变成 `…`（用户看到的就是"歌词末尾一个省略号"）。省略一段歌词比什么都严重：
+ * 这一屏**只有**歌词，读的人要靠它把这一句唱完。
+ *
+ * 现在的规则是**先缩字号、缩不下去就多给一行**：
+ *   · 用 [fitLyricSizePx] 从基准字号往下试（每轮 ×[LYRIC_SHRINK_STEP]），
+ *     直到排出来不超过 [LYRIC_MAX_LINES] 行；
+ *   · 到 [LYRIC_MIN_SIZE_SP] 还是三行，就**完整画三行**（不裁、不省略）——
+ *     块高是两行的预算，三行会对称地溢出去一点，那也比少半句强。
+ *
  * @param maxWidth 折行的宽度上限。`min(这个, 槽位宽)` 才是 StaticLayout 的排版宽度 ——
  *   排版块再整体水平居中，所以折行后两行的中心仍在屏幕中线上。
+ *   **试排（求字号）只用这个上限**：槽位宽在组合期拿不到（它是 `DrawScope` 的），
+ *   而调用方保证 `maxLineWidth ≤ 槽位宽`（`MusicPage` 按安全宽 × 比例算出来）。
  * @param scaleX 横向缩放。**只缩横向**：纵向一起缩会让两行折句整块"呼吸"，
  *   那是布局变化不是过渡（见 [LyricStage] 的类注释）。
  * @param blurDp 模糊半径（dp），由调用方按过渡进度算好传进来。
@@ -436,9 +524,11 @@ private fun LyricLineText(
     // StaticLayout 的行距用倍数表达：显式行高 ÷ 字号。Compose 的 lineHeight 是精确值，
     // 这里是"同一意图的最近近似"—— 布局整体在块高内居中，行距差只影响组内微偏心，
     // 不会溢出（块高就是两行预算，见 LyricStage）。
+    // **缩字号时这个比例不变**：行高跟着字号一起缩，视觉上还是"同一套行距"。
     val lineSpacingMult = with(density) { lineHeight.toPx() / fontSize.toPx() }
     val maxWidthPx = with(density) { maxWidth.toPx() }
     val blurPx = with(density) { blurDp.dp.toPx() }
+    val minSizePx = with(density) { LYRIC_MIN_SIZE_SP.sp.toPx() }
 
     // Paint 复用：每帧新建一个 Paint 会让过渡期每帧都分配；
     // remember 住、每帧只改三个字段（maskFilter / textSize / color）。
@@ -447,6 +537,28 @@ private fun LyricLineText(
         TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
         }
+    }
+    // 试排用的 scratch Paint：求字号要建好几个临时布局，不能顺手改绘制那个对象
+    // （它的 textSize 在绘制期被设成最终字号，两者交错会互相踩）。
+    val measurePaint = remember {
+        TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
+        }
+    }
+
+    // 逐字高亮的 span 只在文本变了才需要重算 —— 原来是每帧在绘制里翻一次。
+    val spannable = remember(text) { toSpannable(text) }
+    val tryLayoutW = maxWidthPx.toInt().coerceAtLeast(1)
+    // 求字号：**组合期算一次**（里面要建好几个 StaticLayout）。见类注释。
+    val fitSizePx = remember(spannable, tryLayoutW, textSizePx, lineSpacingMult) {
+        fitLyricSizePx(
+            paint = measurePaint,
+            content = spannable,
+            layoutW = tryLayoutW,
+            desiredPx = textSizePx,
+            minSizePx = minSizePx,
+            lineSpacingMult = lineSpacingMult,
+        )
     }
 
     Box(
@@ -462,23 +574,22 @@ private fun LyricLineText(
                 drawIntoCanvas { canvas ->
                     paint.maskFilter =
                         if (blurPx > 0.5f) BlurMaskFilter(blurPx, BlurMaskFilter.Blur.NORMAL) else null
-                    paint.textSize = textSizePx
+                    paint.textSize = fitSizePx
                     paint.color = color.toArgb()
 
                     // 排版宽度取"槽位宽"与"折行上限"的较小者。
                     val layoutW = minOf(size.width, maxWidthPx).coerceAtLeast(1f)
-                    val spannable = toSpannable(text)
+                    // **不设 maxLines、不设 ellipsize**：完整排版，多出来的行照画（见类注释）。
                     val layout = StaticLayout.Builder
                         .obtain(spannable, 0, spannable.length, paint, layoutW.toInt())
                         .setAlignment(Layout.Alignment.ALIGN_CENTER)
                         .setLineSpacing(0f, lineSpacingMult)
                         .setIncludePad(false)
-                        .setMaxLines(2)
-                        .setEllipsize(TextUtils.TruncateAt.END)
                         .build()
 
                     val native = canvas.nativeCanvas
-                    // 整块在槽位内垂直居中：单句不折行时不会贴顶，两行时作为一组居中。
+                    // 整块在槽位内垂直居中：单句不折行时不会贴顶，两行时作为一组居中；
+                    // 三行时上下对称地溢出去一点（[top] 为负）。
                     val top = (size.height - layout.height) / 2f
                     native.save()
                     // 排版块比槽位窄时，把**块**摆到中间 —— ALIGN_CENTER 管的是块内居中，
@@ -490,6 +601,48 @@ private fun LyricLineText(
             },
     )
 }
+
+/**
+ * 求出"排出来不超过 [LYRIC_MAX_LINES] 行"的那个字号（从 [desiredPx] 往下试）。
+ *
+ * 每轮都要**真的建一个 StaticLayout**才能问行数 —— 这是唯一准的判据：
+ * 用 `measureText / 行宽` 估算会把中英混排、标点禁则的断行算错，而这正是
+ * "到底两行还是三行"的边界情形。试排次数是 log 级的（32sp → 18sp 约 6 轮），
+ * 而且只在文本/宽度/基准字号变化时跑一次（见调用点的 `remember`）。
+ *
+ * 到 [minSizePx] 还放不下就返回下限：调用方会**完整画三行**，不裁不省略。
+ */
+private fun fitLyricSizePx(
+    paint: TextPaint,
+    content: CharSequence,
+    layoutW: Int,
+    desiredPx: Float,
+    minSizePx: Float,
+    lineSpacingMult: Float,
+): Float {
+    if (content.isEmpty() || layoutW <= 0 || desiredPx <= 0f) return desiredPx
+    var size = desiredPx
+    while (true) {
+        paint.textSize = size
+        val lineCount = StaticLayout.Builder
+            .obtain(content, 0, content.length, paint, layoutW)
+            .setLineSpacing(0f, lineSpacingMult)
+            .setIncludePad(false)
+            .build()
+            .lineCount
+        if (lineCount <= LYRIC_MAX_LINES || size <= minSizePx) return size
+        size = (size * LYRIC_SHRINK_STEP).coerceAtLeast(minSizePx)
+    }
+}
+
+/** 歌词最多排几行。"两行"是版式的上限，超过就缩字号（见 [fitLyricSizePx]）。 */
+private const val LYRIC_MAX_LINES = 2
+
+/** 一次缩字号的比例。0.90 是"看得出来小了一档但不觉得换了个尺寸"的位置。 */
+private const val LYRIC_SHRINK_STEP = 0.90f
+
+/** 歌词缩字号的下限（sp）。到这儿还放不下就多给一行，不再缩。 */
+private const val LYRIC_MIN_SIZE_SP = 18f
 
 /**
  * AnnotatedString → Spannable：把逐字高亮的 [SpanStyle.color] 翻成
@@ -520,48 +673,77 @@ private fun toSpannable(text: AnnotatedString): CharSequence {
  *      （`G.E.M. 邓紫棋` 取 `邓紫棋`），没有中文取第一个词（`The Weeknd` 取 `The`）。
  *   3. 歌手名也没有时回退到**歌名** —— 总有东西可衬。
  *
+ * ---------------------------------------------------------------------------
+ * 英文**不许按字数截断**（2026-10-15 修 "OneRepublic → OneR"）
+ *
+ * 旧版这里对回退分支统一 `.take(WATERMARK_MAX_CHARS)`（= 4），而那个 4 是**给汉字定的**
+ * （105sp 一行放得下四个汉字）。英文撞上它就成了半个词：`OneRepublic` → `OneR`。
+ * 现在汉字与英文走两条口径（见 [firstTokenOf]）：汉字按字数裁，英文取**整个词**。
+ * 字数失控由绘制层兜住 —— [Watermark] 会按盒宽自动缩字号，而不是去砍词。
+ *
  * 抽成纯函数是为了能单测：分支多，而真机上要凑齐得换好几首歌。
  */
 internal fun watermarkTextOf(artist: String, fallback: String?, currentLine: String?): String {
     if (!currentLine.isNullOrBlank()) return firstWordOf(currentLine)
     val source = artist.trim().ifBlank { fallback.orEmpty().trim() }
     if (source.isEmpty()) return ""
+    return firstTokenOf(source)
+}
+
+/**
+ * 歌手名 / 歌名这类**短串**的第一个词。
+ *
+ * 先按分隔符切成候选，**优先取含中文的那一段**（`G.E.M. 邓紫棋` → `邓紫棋`；
+ * 歌手名里中英文混排时，中文那段才是用户认得出来的"名字"），再交给 [wordOf] 取词。
+ * 一个候选都没有（整串都是分隔符）时退回"整串裁到 [WATERMARK_MAX_CHARS] 个字"。
+ */
+private fun firstTokenOf(source: String): String {
     val tokens = source
         .split(' ', '\u3000', '·', '/', ',', '、', '-')
         .filter { it.isNotBlank() }
     if (tokens.isEmpty()) return source.take(WATERMARK_MAX_CHARS)
-    val cjkToken = tokens.firstOrNull { token -> token.any { it.code in CJK_RANGE } }
-    return (cjkToken ?: tokens.first()).take(WATERMARK_MAX_CHARS).trim()
+    val picked = tokens.firstOrNull { token -> token.any { it.code in CJK_RANGE } } ?: tokens.first()
+    return wordOf(picked, WATERMARK_MAX_CHARS)
 }
 
 /**
- * 一句歌词的首词：**中文前 2 字，英文第一个单词**。
+ * 从一个片段里取"词"：**中文取汉字前缀、英文取第一个完整单词**。
  *
- * 英文按空白与连字符切（`Oh-oh-oh` 取 `Oh`），撇号算词的一部分（`I'll` 不拆）——
- * 参考视频里英文大字就是 `I'll` / `Oh` / `Can't` 这种单个词。
- * 行首的标点/引号先剥掉：`"Yeah"` 取 `Yeah`，不是 `"Y`。
+ * 两条分支的裁剪口径不同，所以 `cjkMax` 是参数：
+ *   · 歌词句（[firstWordOf]）：中文前 2 字 —— 一行大字要的是"词"，不是半句话；
+ *   · 歌手名/歌名（[firstTokenOf]）：中文最多 [WATERMARK_MAX_CHARS] 字 —— 整段名字本身
+ *     就是那个"核心词"（`光年之外` 四个字才完整）。
+ * 英文两处同一口径：**整个单词**，只留 [ENGLISH_WORD_MAX_CHARS] 的防失控帽
+ * （那是给"没有空格的长串"兜底的，`Can't` / `Dreaming` 都不会碰到它）。
+ *
+ * 词首词尾的标点先剥掉：`"Yeah"` 取 `Yeah`，不是 `"Y`；`No"` 取 `No`，不是 `No"`。
+ * 撇号算词的一部分（`I'll` / `Can't` 不拆）—— 参考视频里英文大字就是这种单个词。
  */
-internal fun firstWordOf(line: String): String {
-    val trimmed = line.trim().trimStart { ch -> !ch.isLetter() && ch.code !in CJK_RANGE }
+private fun wordOf(token: String, cjkMax: Int): String {
+    val trimmed = token.trim().trimStart { ch -> !ch.isLetter() && ch.code !in CJK_RANGE }
     if (trimmed.isEmpty()) return ""
     val cjk = trimmed.takeWhile { it.code in CJK_RANGE }
-    if (cjk.isNotEmpty()) return cjk.take(2)
-    // 英文：第一个空白/连字符分隔的词。撇号属于词的一部分（I'll / Can't 不拆）。
-    // 词尾的引号/逗号等标点再剥掉（"No" → No，不是 No"）。
-    //
-    // **不套 [WATERMARK_MAX_CHARS] 那个 4 字帽**：那是给汉字定的（105sp 一行放得下
-    // 四个汉字），而英文单词按参考视频的口径是**整个词** —— "Can't" 五个字母，
-    // 截成 "Can'" 是个坏掉的词。只留一个 12 字符的防失控帽（没有空格的长串）。
-    val word = trimmed
-        .takeWhile { it != ' ' && it != '\t' && it != '\u3000' && it != '-' }
+    if (cjk.isNotEmpty()) return cjk.take(cjkMax)
+    // 英文：第一个空白/连字符/间隔号分隔的词。**不套汉字那个字数帽**（见 [watermarkTextOf]）。
+    return trimmed
+        .takeWhile { it != ' ' && it != '\t' && it != '\u3000' && it != '-' && it != '·' }
         .trimEnd { ch -> !ch.isLetter() && ch.code !in CJK_RANGE }
-    return word.take(ENGLISH_WORD_MAX_CHARS).trim()
+        .take(ENGLISH_WORD_MAX_CHARS)
+        .trim()
 }
 
-/** 英文首词的防失控帽。参考视频口径是"整个词"（Can't 五个字母也不截），这里是兜底。 */
-private const val ENGLISH_WORD_MAX_CHARS = 12
+/**
+ * 一句歌词的首词：**中文前 2 字，英文第一个单词**。见 [wordOf]。
+ */
+internal fun firstWordOf(line: String): String = wordOf(line, CJK_LINE_CHARS)
 
-/** 水印最多几个字。多了在 666 dp 宽的屏上会溢出（105sp × 4 ≈ 420dp，还留有余量）。 */
+/** 歌词行里取几个汉字。"前 2 字"才像一个"词"，整句会更像漏抄了半句话。 */
+private const val CJK_LINE_CHARS = 2
+
+/** 英文首词的防失控帽。参考视频口径是"整个词"（`Can't` 五个字母也不截），这里是兜底。 */
+private const val ENGLISH_WORD_MAX_CHARS = 14
+
+/** 水印最多几个字。**只作用在汉字上**（英文走整词，见 [watermarkTextOf]）。 */
 private const val WATERMARK_MAX_CHARS = 4
 
 /** CJK 统一表意文字。只用来判"这一段是不是中文"，不涉及任何渲染细节。 */

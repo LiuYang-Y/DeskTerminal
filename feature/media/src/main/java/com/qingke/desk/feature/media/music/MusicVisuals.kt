@@ -31,6 +31,7 @@ import com.qingke.desk.feature.media.music.artwork.ArtworkBackdrop
 import com.qingke.desk.feature.media.music.artwork.ArtworkVisual
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.sin
 
 /**
  * 背景层。四档的差别**全部落在这里**（见 [BackgroundSpec]）。
@@ -244,9 +245,25 @@ fun rememberEffectPhase(active: Boolean, periodMs: Float): State<Float> {
  *
  * 透明度整体再乘 `(1 − f) × bass`：能量向外衰减，同时响度小时整片波一起暗下去。
  *
- * `phase` 与 `amplitude` 都在**绘制期**读取（见 [rememberEffectPhase] 与
+ * ---------------------------------------------------------------------------
+ * `isPlaying` 与"有效响度"：外部播放源下不能整片波消失（2026-10-15 修）
+ *
+ * 响度只可能来自我们自己的 `TeeAudioProcessor` —— 它挂在**自家 ExoPlayer** 的
+ * AudioSink 上。而音乐页大部分时间是**外部**系统媒体会话在播（QQ 音乐 App 自己播，
+ * 那个 PCM 根本不过我们的进程）。此时 `level` 恒 0，于是：
+ *   · 径向渐变的每个色标 alpha 都乘 0 → **整片波完全不可见**；
+ *   · 左侧那道细亮环的 alpha 是常量、半径是 `0.20W + 0.02W×bass` —— bass 恒 0，
+ *     它被**冻在 0.20W**，看上去像一根静止的线。
+ * 用户看到的就是"左右声波静止不动"。
+ *
+ * 所以这里把"页面在播"（[isPlaying]）与"有没有频谱"分开：
+ * 拿不到频谱时，用一条**低频呼吸**兜底（`sin` 走 [FALLBACK_BREATH_HZ] 个周期/相位轮），
+ * 让波纹继续起伏。一旦真频谱出现（`rawBass > [SPECTRUM_TRUST_FLOOR]`）就立刻换回真值 ——
+ * 兜底只是"没数据时的替身"，不是滤波器。
+ *
+ * `phase` 与 `amplitude` 仍然只在**绘制期**读取（见 [rememberEffectPhase] 与
  * [com.qingke.desk.feature.media.music.spectrum.TeeAudioProcessor.level]），不会触发重组。
- * `amplitude` = 1 是"没有频谱数据时的满幅观感"（壳层没挂 QQ 自播源时就是这样），0 是静默。
+ * `amplitude` = 1 是"没有频谱数据时的满幅观感"，0 是静默（外部源播放时就是 0，见上）。
  */
 @Composable
 fun WaveRings(
@@ -254,6 +271,8 @@ fun WaveRings(
     accent: Color,
     phase: State<Float>,
     amplitude: State<Float>,
+    /** 页面是否在播。**只有它决定"没频谱时要不要兜底呼吸"**，与谱本身的来源无关。 */
+    isPlaying: Boolean,
     driftX: Dp,
     driftY: Dp,
     modifier: Modifier = Modifier,
@@ -273,7 +292,14 @@ fun WaveRings(
         if (w <= 0f || h <= 0f) return@Canvas
 
         val p = phase.value
-        val bass = amplitude.value.coerceIn(0f, 1f)
+        // ---- 有效响度：真频谱优先，拿不到就按"在播"兜底呼吸 ----
+        val rawBass = amplitude.value.coerceIn(0f, 1f)
+        val bass = when {
+            rawBass > SPECTRUM_TRUST_FLOOR -> rawBass
+            isPlaying -> (0.35f + 0.35f * sin(p * FALLBACK_BREATH_RATE * PI).toFloat())
+                .coerceAtLeast(0f)
+            else -> 0f
+        }
 
         // 半径比例与布局层同源（[MusicLayout.WAVE_WIDTH_RATIO]），免得"布局按 0.55W 算、
         // 画的时候是另一个数"这种两处各写一遍的漂移。响度再让它胀 [PULSE_GAIN]。
@@ -316,8 +342,8 @@ fun WaveRings(
             // ---- 左组专属：一道细亮环 ----
             //
             // 参考视频左侧有一条 1.2 dp 的锐利白圈压在整片柔波上。它是这一层里**唯一的硬边**，
-            // 作用就是拿"锐"去衬"柔"。半径跟响度走一点点（0.20W → 0.22W）：
-            // 有低频的时候圈微微张开，是唯一一处"跟着音乐动"的几何变化。
+            // 作用就是拿"锐"去衬"柔"。半径跟**有效响度**走（0.20W → 0.22W）：
+            // 这也是外部源播放时"这根线不是死的"的唯一证据（见类注释的有效响度）。
             if (isLeft) {
                 drawCircle(
                     color = Color.White.copy(alpha = SHARP_RING_ALPHA),
@@ -343,6 +369,20 @@ private const val WAVE_CYCLES = 3.5f
 
 /** 响度对波场半径的增益：满响度时胀 12%。 */
 private const val PULSE_GAIN = 0.12f
+
+/**
+ * 高过它才认为"这是真频谱"。低于它是 `TeeAudioProcessor` 的静默底噪（或它根本没在算）——
+ * 见 [WaveRings] 类注释：外部源播放时 `level` 恒 0，那种 0 不是"安静"，是"没有数据"。
+ */
+private const val SPECTRUM_TRUST_FLOOR = 0.02f
+
+/**
+ * 没有频谱时的兜底呼吸的相位系数：`sin(p × 4π)`。
+ *
+ * p 走完一个波周期（HIGH 档约 2.86 s）时呼吸正好走 **2 个完整周期**；
+ * 幅度落在 0 ~ 0.7（真频谱是 0 ~ 1），即"看得见在起伏，但不抢真实频谱的戏"。
+ */
+private const val FALLBACK_BREATH_RATE = 4f
 
 /** 左圆心出屏的比例（在屏幕左侧之外）。 */
 private const val CENTER_OFFSCREEN_LEFT = 0.10f

@@ -50,6 +50,7 @@ import com.qingke.desk.feature.media.MediaPermission
 import com.qingke.desk.feature.media.mediaSourceLabel
 import com.qingke.desk.feature.media.music.artwork.ArtworkBackdrop
 import com.qingke.desk.feature.media.music.artwork.ArtworkVisual
+import com.qingke.desk.feature.media.music.lyrics.ChineseConverter
 import com.qingke.desk.feature.media.music.lyrics.ImportResult
 import com.qingke.desk.feature.media.music.lyrics.LyricsDoc
 import com.qingke.desk.feature.media.music.lyrics.LyricsRepository
@@ -403,6 +404,19 @@ fun MusicPage(
             }
         }.value
 
+        // 曲目元数据一路的繁转简（歌词那一路已经在解析层转过了，见 [ChineseConverter]）。
+        // 用 remember 包住：`Transliterator` 是 native 调用，而这两个串会跟着
+        // 位置心跳/重组被反复读到 —— 不能每次重组都转一遍。
+        val displayTitle = remember(track?.title) {
+            ChineseConverter.toSimplified(track?.title.orEmpty())
+        }
+        val displayArtist = remember(track?.artist) {
+            ChineseConverter.toSimplified(track?.artist.orEmpty())
+        }
+        val watermarkText = remember(displayArtist, displayTitle, watermarkLine) {
+            watermarkTextOf(displayArtist, displayTitle, watermarkLine)
+        }
+
         MusicBackdrop(
             visual = visual,
             spec = bg,
@@ -411,7 +425,7 @@ fun MusicPage(
         )
 
         Watermark(
-            text = watermarkTextOf(track?.artist.orEmpty(), track?.title, watermarkLine),
+            text = watermarkText,
             size = metrics.watermarkSize,
             alpha = if (tier == EffectTier.OFF) WATERMARK_ALPHA_OFF else WATERMARK_ALPHA,
             driftX = driftX,
@@ -424,6 +438,8 @@ fun MusicPage(
             accent = visual.accent,
             phase = phase,
             amplitude = amplitude,
+            // 外部系统会话在播时我们拿不到 PCM，画面上要靠它兜底呼吸（见 WaveRings 类注释）。
+            isPlaying = track?.isPlaying == true,
             driftX = driftX,
             driftY = driftY,
         )
@@ -485,8 +501,8 @@ fun MusicPage(
             if (track != null) {
                 MusicHud(
                     visual = visual,
-                    title = track.title,
-                    artist = track.artist,
+                    title = displayTitle,
+                    artist = displayArtist,
                     sourceLabel = sourceLabelOf(track.sourcePackage),
                     positionMs = positionState,
                     durationMs = track.durationMs,

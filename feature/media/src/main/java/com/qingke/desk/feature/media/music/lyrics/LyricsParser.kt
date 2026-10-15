@@ -79,14 +79,21 @@ object LyricsParser {
             .mapNotNull { it.toLyricLine(durationMs) }
             .sortedBy { it.startMs }
 
+        // 曲目元数据也统一转简（标题/歌手会出现在水印与 HUD 上）。
+        val title = parsed.title.takeIf { it.isNotBlank() }?.let(ChineseConverter::toSimplified)
+        val artist = parsed.artists
+            ?.joinToString("/") { it.name }
+            ?.takeIf { it.isNotBlank() }
+            ?.let(ChineseConverter::toSimplified)
+
         if (lines.isEmpty()) {
             // 有时间戳却一行文字都没有 —— 这是纯音乐的写法（有些 LRC 就是这么标的）。
             Log.i(TAG, "timestamps present but no text -> instrumental")
             return LyricsDoc(
                 lines = emptyList(),
                 source = source,
-                title = parsed.title.takeIf { it.isNotBlank() },
-                artist = parsed.artists?.joinToString("/") { it.name }?.takeIf { it.isNotBlank() },
+                title = title,
+                artist = artist,
                 instrumental = true,
             )
         }
@@ -98,8 +105,8 @@ object LyricsParser {
         return LyricsDoc(
             lines = lines,
             source = source,
-            title = parsed.title.takeIf { it.isNotBlank() },
-            artist = parsed.artists?.joinToString("/") { it.name }?.takeIf { it.isNotBlank() },
+            title = title,
+            artist = artist,
         )
     }
 
@@ -112,8 +119,11 @@ object LyricsParser {
      * 才不需要在聚焦逻辑里再跳一次空行。
      */
     private fun ISyncedLine.toLyricLine(durationMs: Long): LyricLine? {
-        val text = textOf().trim()
-        if (text.isBlank()) return null
+        val raw = textOf().trim()
+        if (raw.isBlank()) return null
+        // 繁体统一在这里转一次（详见 [ChineseConverter]）：主歌词、逐字高亮、
+        // 以及由歌词首词生成的动态水印，全都从这一个出口拿到简体，不需要各自记得转。
+        val text = ChineseConverter.toSimplified(raw)
 
         val startMs = start.coerceAtLeast(0)
         var endMs = end
@@ -130,7 +140,15 @@ object LyricsParser {
         val syllables = (this as? KaraokeLine)
             ?.syllables
             ?.filter { it.content.isNotBlank() }
-            ?.map { LyricSyllable(text = it.content, startMs = it.start, endMs = it.end) }
+            ?.map {
+                LyricSyllable(
+                    // 逐字也要转：不转的话"整行（text）是简体、逐字高亮拼出来是繁体"，
+                    // 而逐字高亮画的正是这些 syllable。
+                    text = ChineseConverter.toSimplified(it.content),
+                    startMs = it.start,
+                    endMs = it.end,
+                )
+            }
             .orEmpty()
 
         return LyricLine(
