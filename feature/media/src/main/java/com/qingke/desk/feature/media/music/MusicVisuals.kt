@@ -333,8 +333,13 @@ fun WaveRings(
 /** 径向渐变的色标数。48 段线性插值已经看不出折线，再多只是增加每帧的数组长度。 */
 private const val WAVE_STOPS = 48
 
-/** 半径方向上的完整波数。4 = 每侧能看到 4 道亮带。 */
-private const val WAVE_CYCLES = 4f
+/**
+ * 半径方向上的**完整波周期数**。规范值 3.5，与 `radiusMax` 一起决定波纹的疏密。
+ *
+ * 3.5 个周期铺满 0.55W 的半径：每侧露出约 3~4 道亮带，与参考视频的疏密对齐。
+ * （半周期的结尾让圆心端与最外圈端落在相反的相位上，两端都不会正好卡在波峰/波谷。）
+ */
+private const val WAVE_CYCLES = 3.5f
 
 /** 响度对波场半径的增益：满响度时胀 12%。 */
 private const val PULSE_GAIN = 0.12f
