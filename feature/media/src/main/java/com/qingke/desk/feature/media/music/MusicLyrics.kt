@@ -18,11 +18,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -38,14 +38,10 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.qingke.desk.feature.media.music.artwork.ArtworkBackdrop
 import com.qingke.desk.feature.media.music.lyrics.LyricLine
 import com.qingke.desk.feature.media.music.lyrics.LyricsDoc
@@ -71,6 +67,30 @@ import com.qingke.desk.feature.media.music.lyrics.LyricsDoc
  * 字号到 105~120sp 之后，一行最多也就放得下四五个汉字（666 dp 宽 ÷ 105 dp ≈ 6 字）。
  * 整段名字硬塞会溢出到屏幕外，而 `Text` 的 `Ellipsis` 在这么大的字号上会截成
  * "李荣…" 这种半截样子 —— 比不显示更难看。所以取"核心词"，规则见 [watermarkTextOf]。
+ *
+ * ---------------------------------------------------------------------------
+ * 为什么走 `drawBehind` + `StaticLayout` 而不是 `Text`（2026-10-15 二次对标改）
+ *
+ * 有三件事 `Text` 做不到，而它们正是参考视频里那层大字的质感：
+ *   1. **真衬线**：`Text` 走 Compose 的 `FontFamily.Serif`，它落到哪一款字由系统决定，
+ *      与中央歌词用的 `Typeface.create(SERIF, BOLD)` 未必是同一份。现在两层用**同一个
+ *      typeface**，"衬线"这件事在整页只有一个口径；
+ *   2. **常驻模糊**：参考视频里大字的边缘是化开的（一坨柔光里的字），
+ *      而 `Modifier.blur` 是 RenderEffect（API 31+）—— 在 API 30 的小米上静默无效。
+ *      [BlurMaskFilter] 是 API 1 的原生能力，两台机器同一份代码。
+ *      半径固定 [WATERMARK_BLUR_DP] dp：它是这层字的**固有属性**，不随动画变；
+ *   3. **两层同时画**：换词要旧词淡出、新词淡入（交叉），`Text` 一次只能画一份内容。
+ *
+ * ---------------------------------------------------------------------------
+ * 换词：600 ms 交叉淡入淡出
+ *
+ * 动态取词（见 [watermarkTextOf]）几乎是逐句在变的，硬切会"闪"。
+ * 所以留一份 [prev]（上一句的字），在 [WATERMARK_SWAP_MS] 里让 `cross` 从 0 走到 1：
+ * 旧词画 `1 − cross`、新词画 `cross`，两层叠着换。
+ * **只有文字真的变了才动**（`prev == text` 直接返回）—— 否则每次重组都会重放一遍淡入。
+ *
+ * 外部契约不变：仍然是 `fillMaxWidth` + `offset(driftX, driftY)`，尺寸由 [size] 定
+ * （行高 = size × [MusicLayout.LYRIC_LINE_HEIGHT_EM]，与 [LyricLineText] 同一算法）。
  */
 @Composable
 fun Watermark(
@@ -84,44 +104,127 @@ fun Watermark(
     color: Color = Color.Black,
 ) {
     if (text.isBlank() || alpha <= 0f) return
-    Text(
-        text = text,
-        fontSize = size,
-        lineHeight = size * MusicLayout.LYRIC_LINE_HEIGHT_EM,
-        color = color,
-        fontWeight = FontWeight.Bold,
-        maxLines = 1,
-        softWrap = false,
-        overflow = TextOverflow.Clip,
-        textAlign = TextAlign.Center,
+
+    val density = LocalDensity.current
+    val textSizePx = with(density) { size.toPx() }
+    val lineHeightDp = with(density) { (size * MusicLayout.LYRIC_LINE_HEIGHT_EM).toDp() }
+    val lineSpacingMult = with(density) {
+        (size * MusicLayout.LYRIC_LINE_HEIGHT_EM).toPx() / size.toPx()
+    }
+    val blurPx = with(density) { WATERMARK_BLUR_DP.dp.toPx() }
+    val textColor = color.toArgb()
+
+    // Paint 复用（与 [LyricLineText] 同一条理由）：每帧新建 Paint 会让交叉期每帧都分配。
+    // 按 blurPx 记忆：密度变了要换成新半径的滤镜。
+    val paint = remember(blurPx) {
+        TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
+            // 常驻模糊 —— 这一层的字永远是这个化开的样子，不是过渡效果。
+            maskFilter = BlurMaskFilter(blurPx, BlurMaskFilter.Blur.NORMAL)
+        }
+    }
+
+    // 上一句的字。**动画结束后才更新**：交叉过程中它必须保持旧值，
+    // 否则两层会画成同一句话（那看起来就是"没换"）。
+    var prev by remember { mutableStateOf(text) }
+    val cross = remember { Animatable(1f) }
+    LaunchedEffect(text) {
+        if (prev == text) return@LaunchedEffect
+        cross.snapTo(0f)
+        cross.animateTo(1f, tween(WATERMARK_SWAP_MS))
+        prev = text
+    }
+    val crossValue = cross.value.coerceIn(0f, 1f)
+
+    Box(
         modifier = modifier
             .fillMaxWidth()
+            .height(lineHeightDp)
             // 防烧屏微位移用 offset 而不是 padding：偏移量是正负 6 dp，
             // `Modifier.padding` 不接受负值，而水印一半时间会往左/往上走。
             .offset(x = driftX, y = driftY)
-            .alpha(alpha),
+            .alpha(alpha)
+            .drawBehind {
+                // **必须显式写 `this.size`**：本函数的参数就叫 `size`（TextUnit），
+                // 直接把 DrawScope 的 size 遮住了。
+                val boxW = this.size.width
+                val boxH = this.size.height
+                if (boxW <= 0f) return@drawBehind
+                drawIntoCanvas { canvas ->
+                    val native = canvas.nativeCanvas
+                    val layoutW = boxW.toInt().coerceAtLeast(1)
+                    // 旧词先画、新词后画（新词压在上面）：交叉期才像"换"，不像"叠"。
+                    // 稳态时只画一层 —— 不留一层 alpha=0 的空绘制。
+                    val layers: List<Pair<String, Float>> = if (prev == text || crossValue >= 1f) {
+                        listOf(text to 1f)
+                    } else {
+                        listOf(prev to 1f - crossValue, text to crossValue)
+                    }
+                    layers.forEach { (content, layerAlpha) ->
+                        paint.textSize = textSizePx
+                        paint.color = textColor
+                        paint.alpha = (layerAlpha.coerceIn(0f, 1f) * 255f).toInt()
+                        val layout = StaticLayout.Builder
+                            .obtain(content, 0, content.length, paint, layoutW)
+                            .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                            .setLineSpacing(0f, lineSpacingMult)
+                            .setIncludePad(false)
+                            // 单行 + 不省略：与旧版 `Text(maxLines = 1, softWrap = false,
+                            // overflow = Clip)` 一致 —— 超宽裁掉，不折行
+                            // （三成大字的折行会盖住中央歌词）。
+                            .setMaxLines(1)
+                            .setEllipsize(null)
+                            .build()
+                        native.save()
+                        // 在 [lineHeightDp] 这个盒子里垂直居中：字号大、行盒高，
+                        // 不居中的话大字会明显偏下。
+                        native.translate(0f, (boxH - layout.height) / 2f)
+                        layout.draw(native)
+                        native.restore()
+                    }
+                }
+            },
     )
 }
 
+/** 水印的常驻模糊半径（dp）。见 [Watermark] 的类注释：它是这层字的固有属性。 */
+private const val WATERMARK_BLUR_DP = 6f
+
+/** 水印换词的交叉淡入淡出时长（ms）。 */
+private const val WATERMARK_SWAP_MS = 600
+
 /**
- * 中央歌词舞台：**单句双行居中 + 衬线粗体**（2026-10-15 对标参考视频重写）。
+ * 中央歌词舞台：**单句折行居中 + 真衬线粗体**（2026-10-15 对标参考视频重写）。
  *
  * ---------------------------------------------------------------------------
  * 与旧版的区别（旧版是"当前行大字 + 下一行半透明小字预告"的列表感）
  *
  * 参考视频的中央只有**当前这一句**：单句较长时在语义空格处折成上下两行，
- * 两行字号、字重、颜色**完全一致**；字体显式 `FontFamily.Serif + FontWeight.Bold`，
- * 颜色取封面主色的高明度浅亮变体（[ArtworkBackdrop.light]）—— 有色调的浅色，
- * 不是刺眼纯白。块高仍是两行预算（[MusicMetrics.lyricBlockHeight]），
+ * 两行字号、字重、颜色**完全一致**；字体是 `Typeface.create(SERIF, BOLD)` 的系统衬线粗体
+ * （真衬线，不是 `FontFamily.Serif` 落到哪算哪 —— 与背景水印共用同一个 typeface），
+ * 颜色取封面主色派生的**同色系浅亮色**（[ArtworkBackdrop.lyricInk]：绝对 S=0.28 / V=0.95）
+ * —— 有色调的浅色，不是刺眼纯白。块高仍是两行预算（[MusicMetrics.lyricBlockHeight]），
  * 单句不折行时垂直居中，不会塌。
  *
- * ---------------------------------------------------------------------------
- * 切句过渡：320ms 真高斯模糊淡入淡出（全 API 版本同一套代码）
+ * 折行宽度由调用方给（见 `maxLineWidth`）：内容区可用宽 × [MusicLayout.LYRIC_MAX_WIDTH_RATIO]。
+ * 不写死 dp —— 两台在役机器的内容区宽差 120 dp。
  *
- * 换句时旧句淡出（缩小到 0.94、模糊加重到 14dp），新句淡入（0.94 长到 1.0、
- * 模糊从 14dp 消散到 0）。模糊走 [BlurMaskFilter] + `drawIntoCanvas` 的
- * 原生 Paint 绘制（见 [LyricLineText]）—— **API 1 起就有的能力**，
- * 小米（API 30）与一加（API 36）跑的是同一份代码、同一个效果。
+ * ---------------------------------------------------------------------------
+ * 切句过渡：600 ms 双层交叉 + 横向微舒展（全 API 版本同一套代码）
+ *
+ * 参考视频的换句不是"上一下一"，而是**两层叠着换**：
+ *   · 旧句：整体淡出（1 → 0），横向**往外张**（1.00 → [LINE_SCALE_OUT_END]），
+ *     模糊从 0 加重到 [BLUR_OUT_DP] —— 像被推散；
+ *   · 新句：从 [LINE_SCALE_IN_START] **收进来**（到 1.00），模糊从 [BLUR_IN_DP] 消散到 0 ——
+ *     像被收拢、对上焦。
+ * 横向只动 6~8%，纵向 `scaleY` 恒为 1：纵向缩放会改变两行折句的观感高度，
+ * 整块跟着"呼吸"就变成了布局变化，而不是过渡。
+ *
+ * 单一时间轴 [LINE_SWAP_MS] = 600 ms（旧版是"前半淡出 160 + 后半淡入 160"，
+ * 合计 320 ms 在真机上快得看不出交叉，只像闪一下）。
+ *
+ * 模糊走 [BlurMaskFilter] + `drawIntoCanvas` 的原生 Paint 绘制（见 [LyricLineText]）——
+ * **API 1 起就有的能力**，小米（API 30）与一加（API 36）跑的是同一份代码、同一个效果。
  * 曾经按 API 31 分岔（RenderEffect vs 双层残影妥协）已废除：妥协即阉割。
  *
  * 过渡只由**行号**触发，不由逐字扫描触发：后者每 200ms 变一次 annotated 串，
@@ -147,8 +250,10 @@ fun LyricStage(
      * 而只有页面知道现在是哪一种。传 null 表示什么都不显示。
      */
     placeholder: String?,
-    /** 封面主色。主字色取它的高明度浅亮变体（见 [ArtworkBackdrop.light]）。 */
+    /** 封面主色。主字色由它派生（见 [ArtworkBackdrop.lyricInk]）。 */
     accent: Color,
+    /** 折行的宽度上限。见类注释 —— 由页面按内容区可用宽算出来传进来。 */
+    maxLineWidth: Dp,
     driftX: Dp,
     driftY: Dp,
     modifier: Modifier = Modifier,
@@ -161,7 +266,7 @@ fun LyricStage(
     val isSinging = currentIdx >= 0 && currentIdx == bigIdx
     val line = doc.lines.getOrNull(bigIdx)
 
-    val lyricColor = ArtworkBackdrop.light(accent)
+    val lyricColor = ArtworkBackdrop.lyricInk(accent)
 
     val target: AnnotatedString = when {
         // 没有行也没有占位话 → 空串（高度仍在，不塌）。
@@ -184,16 +289,19 @@ fun LyricStage(
     }
 
     // ---- 切句过渡（见类注释）：行号是唯一的键 ----
+    //
+    // 只有一条时间轴：0 → 1 的 [LINE_SWAP_MS]。新旧两句**读同一个 p**、各取一半 ——
+    // 两条独立的 animateTo 会让"旧句淡完"与"新句开始淡"之间出现一段双方都很淡的空档。
     var prevIdx by remember { mutableIntStateOf(bigIdx) }
-    val swap = remember { Animatable(1f) }
+    val progress = remember { Animatable(1f) }
     LaunchedEffect(bigIdx) {
         if (prevIdx == bigIdx) return@LaunchedEffect
-        // 旧句淡出（前半程）
-        swap.animateTo(0f, tween(LINE_SWAP_HALF_MS))
+        progress.snapTo(0f)
+        progress.animateTo(1f, tween(LINE_SWAP_MS))
+        // 动画结束才推进 prevIdx：进行中它必须还是"旧句"，否则 oldTarget 会变成新句。
         prevIdx = bigIdx
-        // 新句淡入（后半程）
-        swap.animateTo(1f, tween(LINE_SWAP_HALF_MS))
     }
+    val p = progress.value.coerceIn(0f, 1f)
     val fading = prevIdx != bigIdx
     // 旧句取 prevIdx 那一行（它的逐字扫描用实时位置算 —— 换句瞬间旧句已唱完，
     // 扫描结果天然是"全部唱过"的满色，正合适）。
@@ -236,42 +344,54 @@ fun LyricStage(
                         text = oldTarget,
                         fontSize = metrics.lyricSize,
                         lineHeight = metrics.lyricLineHeight,
+                        maxWidth = maxLineWidth,
                         color = lyricColor,
-                        alpha = swap.value.coerceIn(0f, 1f),
-                        scale = SCALE_MIN + (1f - SCALE_MIN) * swap.value,
-                        haze = (1f - swap.value).coerceIn(0f, 1f),
+                        alpha = 1f - p,
+                        // 往外张（1.00 → 1.06）：旧句是"被推散"。
+                        // 反过来缩小会让它像往屏幕里退，与"飘走"的观感相反。
+                        scaleX = 1f + (LINE_SCALE_OUT_END - 1f) * p,
+                        blurDp = BLUR_OUT_DP * p,
                     )
                 }
                 LyricLineText(
                     text = target,
                     fontSize = metrics.lyricSize,
                     lineHeight = metrics.lyricLineHeight,
+                    maxWidth = maxLineWidth,
                     color = lyricColor,
-                    // 稳态（没有过渡）恒为 1；过渡后半从 0 长到 1。
-                    alpha = if (fading) (1f - swap.value).coerceIn(0f, 1f) else 1f,
-                    scale = if (fading) 1f - (1f - SCALE_MIN) * swap.value else 1f,
-                    haze = if (fading) swap.value.coerceIn(0f, 1f) else 0f,
+                    // 稳态（没有过渡）恒为 1；过渡中从 0 长到 1。
+                    alpha = p,
+                    // 从 1.08 收进来（新句是"被收拢"）。
+                    scaleX = LINE_SCALE_IN_START - (LINE_SCALE_IN_START - 1f) * p,
+                    // 最后 8% 直接把模糊清零（[SHARPEN_AT]）：插值到 0 会在 0~2dp 那一段
+                    // 停很久（人眼对这段最敏感），看起来像"糊了很久才突然清楚"。
+                    blurDp = if (p >= SHARPEN_AT) 0f else BLUR_IN_DP * (1f - p),
                 )
             }
         }
     }
 }
 
-/** 换句动画前半/后半各自的时长（合计 320ms，用户口径）。 */
-private const val LINE_SWAP_HALF_MS = 160
+/** 切句过渡的总时长（ms，单条时间轴）。 */
+private const val LINE_SWAP_MS = 600
+
+/** 换句时旧句模糊的最大半径（dp）。比新句略小：它是"散开"，不是"糊住"。 */
+private const val BLUR_OUT_DP = 20f
+
+/** 换句时新句模糊的起始半径（dp）。略大于 [BLUR_OUT_DP] —— 新句要"从更虚的地方收进来"。 */
+private const val BLUR_IN_DP = 22f
+
+/** 新句的模糊在进度到这一比例时直接归零。见 [LyricStage] 里 `blurDp` 的注释。 */
+private const val SHARPEN_AT = 0.92f
+
+/** 旧句横向展开的终值（1.00 → 这个值）。 */
+private const val LINE_SCALE_OUT_END = 1.06f
+
+/** 新句横向收拢的起始值（这个值 → 1.00）。 */
+private const val LINE_SCALE_IN_START = 1.08f
 
 /** 还没唱到的音节的不透明度。唱过的是满色。 */
 private const val UPCOMING_SYLLABLE_ALPHA = 0.45f
-
-/** 换句时新句的初始缩放（长到 1.0f）。 */
-private const val SCALE_MIN = 0.94f
-
-/**
- * 换句时模糊的最大半径（dp）。**真高斯模糊，全 API 版本同一套代码** ——
- * 走 [BlurMaskFilter]（API 1 原生能力，硬件加速下 API 28+ 完整支持），
- * 不是 RenderEffect（API 31+）。用户口径：小米 API 30 与一加 API 36 必须一致。
- */
-private const val LINE_SWAP_BLUR_DP = 14f
 
 /**
  * 一行歌词的渲染。**样式在这里只有一份**：衬线粗体、显式行高、居中、最多两行。
@@ -294,17 +414,22 @@ private const val LINE_SWAP_BLUR_DP = 14f
  * 半径 ≤ 0.5dp 时 **maskFilter 置 null**（不是设个 0 半径的滤镜）——
  * 稳态下不该有一个"模糊半径为 0"的滤镜对象挂在 Paint 上。
  *
- * @param haze 朦胧度 0..1。过渡中用：0 = 稳态（无滤镜），1 = 最大模糊。
+ * @param maxWidth 折行的宽度上限。`min(这个, 槽位宽)` 才是 StaticLayout 的排版宽度 ——
+ *   排版块再整体水平居中，所以折行后两行的中心仍在屏幕中线上。
+ * @param scaleX 横向缩放。**只缩横向**：纵向一起缩会让两行折句整块"呼吸"，
+ *   那是布局变化不是过渡（见 [LyricStage] 的类注释）。
+ * @param blurDp 模糊半径（dp），由调用方按过渡进度算好传进来。
  */
 @Composable
 private fun LyricLineText(
     text: AnnotatedString,
     fontSize: TextUnit,
     lineHeight: TextUnit,
+    maxWidth: Dp,
     color: Color,
     alpha: Float,
-    scale: Float,
-    haze: Float,
+    scaleX: Float,
+    blurDp: Float,
 ) {
     val density = LocalDensity.current
     val textSizePx = with(density) { fontSize.toPx() }
@@ -312,7 +437,8 @@ private fun LyricLineText(
     // 这里是"同一意图的最近近似"—— 布局整体在块高内居中，行距差只影响组内微偏心，
     // 不会溢出（块高就是两行预算，见 LyricStage）。
     val lineSpacingMult = with(density) { lineHeight.toPx() / fontSize.toPx() }
-    val maxBlurPx = with(density) { LINE_SWAP_BLUR_DP.dp.toPx() }
+    val maxWidthPx = with(density) { maxWidth.toPx() }
+    val blurPx = with(density) { blurDp.dp.toPx() }
 
     // Paint 复用：每帧新建一个 Paint 会让过渡期每帧都分配；
     // remember 住、每帧只改三个字段（maskFilter / textSize / color）。
@@ -328,20 +454,22 @@ private fun LyricLineText(
             .fillMaxSize()
             .graphicsLayer {
                 this.alpha = alpha
-                this.scaleX = scale
-                this.scaleY = scale
+                this.scaleX = scaleX
+                // 纵向恒为 1：见 KDoc。
+                this.scaleY = 1f
             }
             .drawBehind {
                 drawIntoCanvas { canvas ->
-                    val blurPx = haze * maxBlurPx
                     paint.maskFilter =
                         if (blurPx > 0.5f) BlurMaskFilter(blurPx, BlurMaskFilter.Blur.NORMAL) else null
                     paint.textSize = textSizePx
                     paint.color = color.toArgb()
 
+                    // 排版宽度取"槽位宽"与"折行上限"的较小者。
+                    val layoutW = minOf(size.width, maxWidthPx).coerceAtLeast(1f)
                     val spannable = toSpannable(text)
                     val layout = StaticLayout.Builder
-                        .obtain(spannable, 0, spannable.length, paint, size.width.toInt().coerceAtLeast(1))
+                        .obtain(spannable, 0, spannable.length, paint, layoutW.toInt())
                         .setAlignment(Layout.Alignment.ALIGN_CENTER)
                         .setLineSpacing(0f, lineSpacingMult)
                         .setIncludePad(false)
@@ -349,11 +477,13 @@ private fun LyricLineText(
                         .setEllipsize(TextUtils.TruncateAt.END)
                         .build()
 
-                    // 整块在槽位内垂直居中：单句不折行时不会贴顶，两行时作为一组居中。
                     val native = canvas.nativeCanvas
+                    // 整块在槽位内垂直居中：单句不折行时不会贴顶，两行时作为一组居中。
                     val top = (size.height - layout.height) / 2f
                     native.save()
-                    native.translate(0f, top)
+                    // 排版块比槽位窄时，把**块**摆到中间 —— ALIGN_CENTER 管的是块内居中，
+                    // 不管块在槽位里的位置。
+                    native.translate((size.width - layoutW) / 2f, top)
                     layout.draw(native)
                     native.restore()
                 }

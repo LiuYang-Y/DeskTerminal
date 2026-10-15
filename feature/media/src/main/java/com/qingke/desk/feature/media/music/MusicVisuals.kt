@@ -19,7 +19,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
@@ -27,6 +29,8 @@ import androidx.compose.ui.unit.dp
 import com.qingke.desk.core.platform.EffectTier
 import com.qingke.desk.feature.media.music.artwork.ArtworkBackdrop
 import com.qingke.desk.feature.media.music.artwork.ArtworkVisual
+import kotlin.math.PI
+import kotlin.math.cos
 
 /**
  * 背景层。四档的差别**全部落在这里**（见 [BackgroundSpec]）。
@@ -135,19 +139,26 @@ fun backgroundSpec(tier: EffectTier): BackgroundSpec = when (tier) {
 // 声波圆环
 // ---------------------------------------------------------------------------------
 
-/** 圆环的分档参数。[rings] = 0 表示这一档不画。 */
+/**
+ * 圆环的分档参数。**`rings` 只当开关用**（0 = 这一档不画），见 [WaveRings] 的类注释。
+ *
+ * `periodMs` 是**一个完整波周期**的时间（波形向外扩散一轮）。改成渐变之后
+ * 波形是连续的一条曲线，"几道环"不再是可数的整数，所以周期本身成了主要的节奏旋钮：
+ * 0.35 周期/秒（约 2.86 s 一轮）是"看得出在动、但盯着看不心慌"的位置。
+ */
 data class WaveSpec(
     val rings: Int,
     val alpha: Float,
-    val strokeDp: Float,
     val periodMs: Float,
 )
 
 fun waveSpec(tier: EffectTier): WaveSpec = when (tier) {
-    EffectTier.HIGH -> WaveSpec(rings = 4, alpha = 0.30f, strokeDp = 2.5f, periodMs = 2_400f)
-    EffectTier.MEDIUM -> WaveSpec(rings = 3, alpha = 0.20f, strokeDp = 2.0f, periodMs = 3_200f)
-    EffectTier.LOW -> WaveSpec(rings = 2, alpha = 0.13f, strokeDp = 1.5f, periodMs = 4_200f)
-    EffectTier.OFF -> WaveSpec(rings = 0, alpha = 0f, strokeDp = 0f, periodMs = 0f)
+    // 2857 ms = 0.35 周期/秒。三档共用同一个速度观感，靠 alpha 分强弱 ——
+    // 低档再把速度也放慢会让"低性能档"看起来像卡住，而不是省电。
+    EffectTier.HIGH -> WaveSpec(rings = 4, alpha = 0.30f, periodMs = 2_857f)
+    EffectTier.MEDIUM -> WaveSpec(rings = 3, alpha = 0.22f, periodMs = 3_600f)
+    EffectTier.LOW -> WaveSpec(rings = 2, alpha = 0.14f, periodMs = 4_200f)
+    EffectTier.OFF -> WaveSpec(rings = 0, alpha = 0f, periodMs = 0f)
 }
 
 /**
@@ -190,31 +201,56 @@ fun rememberEffectPhase(active: Boolean, periodMs: Float): State<Float> {
 }
 
 /**
- * 左右对称的同心声波圆环 —— **3D 凹凸光影波浪**（2026-10-15 对标参考视频重写）。
- *
- * 圆心**在屏幕两侧边缘上**（`x = 0` 与 `x = W`，`y = H/2`），所以每一侧露出来的
- * 是半个圆 —— "包裹住屏幕两侧边缘"就是靠这个：圆的另一半点在屏幕外面。
+ * 左右两侧的**连续余弦声波**（2026-10-15 二次对标重写：细线圈 → 径向渐变波场）。
  *
  * ---------------------------------------------------------------------------
- * 为什么不是"细线圈"而是"波谷 + 波峰"成对画
+ * 为什么从"画圆环"改成"一条径向渐变"
  *
- * 参考视频的波纹有立体明暗起伏：每个扩散相位画**一对**环 —— 内侧一圈压暗的波谷
- * （黑），外侧一圈提亮的波峰（主色亮变体）。明暗交替让圆环从"线条"变成"有厚度的浪"。
- * 两侧还有各自的戏：
- *   · **左组**（深暗背景上）：波谷用黑 0.35，内圈再叠一根 1.2dp 的锐利亮环 ——
- *     视频左侧那道细亮圈；
- *   · **右组**（明亮背景上）：圆心一团柔和发光核，波浪换成更宽的光带
- *     （波谷压 0.25、波峰提 0.45）—— 亮侧的浪要更"胖"才看得见。
+ * 旧版每个扩散相位画一对 `drawCircle(Stroke)`（暗的波谷 + 亮的波峰）。真机截图里能看出：
+ *   · 环是**一根根独立的线**，相邻两环之间是背景原色 —— 波纹之间有空档，像同心圆分析图；
+ *   · 每个环两端（`StrokeCap.Round` 的收口）留下可见接头；
+ *   · 环数只能是整数，所以波"往外走"是一跳一跳的（环的消失与新生都发生在采样点上）。
  *
- * `phase` 与 `amplitude` 都在绘制期读取（见 [rememberEffectPhase] 与
- * [com.qingke.desk.feature.media.music.spectrum.TeeAudioProcessor.level]），
- * **不会触发重组**。`amplitude` = 1 是"没有频谱数据时的满幅观感"
- * （壳层没挂 QQ 自播源时就是这样），0 是静默。
+ * 参考视频里的波纹是**一整片连续起伏的光**：没有空档、没有接头。
+ * 所以改成一条 `Brush.radialGradient`：沿半径放 [WAVE_STOPS] 个色标，
+ * 每个色标的颜色与透明度按 `cos` 取值。渐变在色标之间做线性插值 ——
+ * 48 段线性拼起来就是一条**看不出折线**的余弦波。
+ *
+ * 另外，整片波用**一次** `drawRect` 铺满（不再是每环一次绘制）：
+ * 绘制调用从每侧 `2 × rings` 次降到 2 次，LOW 档少画的那点活在这里是实打实的。
+ *
+ * ---------------------------------------------------------------------------
+ * 圆心在屏幕**外面**
+ *
+ * 左圆心 `x = −0.10W`、右圆心 `x = 1.06W`，`y = 0.50H`。圆心出屏有两层意思：
+ *   1. 露出来的只有靠屏幕那一段圆弧 —— 波纹是**贴着两侧的竖带**，
+ *      屏幕中央（歌词所在）自然留白，不需要再画一层遮罩去"抠"出干净区；
+ *   2. 圆心那个奇点（半径 0 处所有相位挤在一起）根本不进画面，不会在中间糊成一团。
+ *
+ * 左右不对称（0.10 vs 0.06）是刻意的：完全对称会显得像工程示意图，
+ * 差一点点才像"两束各自扩散的波"。
+ *
+ * ---------------------------------------------------------------------------
+ * 光的颜色
+ *
+ * 每个色标是 `lerp(黑, 波峰色, crest)`，其中 `crest = (cos + 1) / 2`（1 = 波峰，0 = 波谷）：
+ *   · **波谷**（crest = 0）= 黑 @ [TROUGH_ALPHA_LEFT]（左）/ [TROUGH_ALPHA_RIGHT]（右）——
+ *     左侧背景本来就接近深黑，影要压得浓一点才看得见；右侧是亮底，浓黑会显脏。
+ *   · **波峰**（crest = 1）= 封面主色的高明度变体 @ `spec.alpha`。
+ *     用 [ArtworkBackdrop.light] 而不是 [ArtworkBackdrop.lyricInk]：这里要的是
+ *     "跟着封面走的亮色"，与歌词那种"稳定的浅色"是两种诉求。
+ *   · 中间的色标是两者的连续过渡 —— "亮环旁边必然跟着暗影"，立体感来自这条曲线本身，
+ *     而不是来自第二种彩色。
+ *
+ * 透明度整体再乘 `(1 − f) × bass`：能量向外衰减，同时响度小时整片波一起暗下去。
+ *
+ * `phase` 与 `amplitude` 都在**绘制期**读取（见 [rememberEffectPhase] 与
+ * [com.qingke.desk.feature.media.music.spectrum.TeeAudioProcessor.level]），不会触发重组。
+ * `amplitude` = 1 是"没有频谱数据时的满幅观感"（壳层没挂 QQ 自播源时就是这样），0 是静默。
  */
 @Composable
 fun WaveRings(
     spec: WaveSpec,
-    maxRadius: Dp,
     accent: Color,
     phase: State<Float>,
     amplitude: State<Float>,
@@ -222,91 +258,70 @@ fun WaveRings(
     driftY: Dp,
     modifier: Modifier = Modifier,
 ) {
+    // rings 只当开关：0 档（OFF）连 Canvas 都不建。非零档之间靠 alpha 分强弱。
     if (spec.rings <= 0) return
     val density = LocalDensity.current
-    val strokePx = with(density) { spec.strokeDp.dp.toPx() }
-    val sharpPx = with(density) { SHARP_RING_DP.dp.toPx() }
     val driftXPx = with(density) { driftX.toPx() }
     val driftYPx = with(density) { driftY.toPx() }
+    val sharpPx = with(density) { SHARP_RING_DP.dp.toPx() }
 
-    // 波峰色：主色提亮一档（明度 0.75 → 更亮但还没到刺眼）。
-    // 波谷色就是黑 —— 立体感来自"亮环旁边必然有一圈暗影"，不是来自第二种彩色。
-    val peak = ArtworkBackdrop.light(accent).copy(alpha = 0.9f)
+    val peak = ArtworkBackdrop.light(accent)
 
     Canvas(modifier = modifier.fillMaxSize()) {
-        val radiusMax = maxRadius.toPx()
-        if (radiusMax <= 0f) return@Canvas
-        val p = phase.value
-        // 响度 → 半径行程与透明度。地板 0.3：完全静音时环缩到三成且近乎透明，
-        // 与"暂停时相位归零、环缩没"是同向的两件事，不会互相抽梯子。
-        val amp = amplitude.value.coerceIn(0f, 1f)
-        val radiusScale = AMPLITUDE_RADIUS_FLOOR + (1f - AMPLITUDE_RADIUS_FLOOR) * amp
+        val w = size.width
+        val h = size.height
+        if (w <= 0f || h <= 0f) return@Canvas
 
-        // 左右两组。顺序即绘制顺序：先左后右，右侧的发光核最后压上去。
+        val p = phase.value
+        val bass = amplitude.value.coerceIn(0f, 1f)
+
+        // 半径比例与布局层同源（[MusicLayout.WAVE_WIDTH_RATIO]），免得"布局按 0.55W 算、
+        // 画的时候是另一个数"这种两处各写一遍的漂移。响度再让它胀 [PULSE_GAIN]。
+        val radiusMax = w * MusicLayout.WAVE_WIDTH_RATIO * (1f + PULSE_GAIN * bass)
+
         val centers = listOf(
-            Offset(driftXPx, size.height / 2f + driftYPx) to true,
-            Offset(size.width + driftXPx, size.height / 2f + driftYPx) to false,
+            Offset(
+                x = -CENTER_OFFSCREEN_LEFT * w + driftXPx,
+                y = h * CENTER_Y_RATIO + driftYPx,
+            ) to true,
+            Offset(
+                x = CENTER_OFFSCREEN_RIGHT * w + driftXPx,
+                y = h * CENTER_Y_RATIO + driftYPx,
+            ) to false,
         )
 
         centers.forEach { (center, isLeft) ->
-            // ---- 右组：圆心发光核 ----
-            //
-            // 只在右侧画：参考视频里亮侧的圆心是一团柔光，暗侧的圆心是纯暗。
-            // 用 radialGradient 而不是 drawCircle 实心：边缘要化开，硬边会像贴了个饼。
-            if (!isLeft) {
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            ArtworkBackdrop.light(accent).copy(alpha = 0.34f * amp),
-                            Color.Transparent,
-                        ),
-                        center = center,
-                        radius = radiusMax * GLOW_CORE_RATIO,
-                    ),
-                    radius = radiusMax * GLOW_CORE_RATIO,
-                    center = center,
-                )
+            val troughAlpha = if (isLeft) TROUGH_ALPHA_LEFT else TROUGH_ALPHA_RIGHT
+
+            val stops = Array(WAVE_STOPS) { i ->
+                val f = i.toFloat() / (WAVE_STOPS - 1).toFloat()      // 0 = 圆心，1 = 最外圈
+                // 相位里减 p：p 从 0 走到 1，整条波形向外挪一个完整波长（见 WaveSpec.periodMs）。
+                val crest = (cos(TWO_PI * (f * WAVE_CYCLES - p)) + 1f) * 0.5f
+                val fall = (1f - f) * bass
+                val alpha = (troughAlpha + (spec.alpha - troughAlpha) * crest) * fall
+                f to lerp(Color.Black, peak, crest).copy(alpha = alpha.coerceIn(0f, 1f))
             }
 
-            // ---- 波浪本体：每个相位一对"波谷 + 波峰" ----
-            for (i in 0 until spec.rings) {
-                // 每个环错开一个 1/rings 的相位，于是"一圈圈往外扩"是连续不断的。
-                val t = ((p + i.toFloat() / spec.rings) % 1f)
-                val radius = radiusMax * radiusScale * t
-                if (radius < 1f) continue
-                // 越往外越淡：t 从 0 到 1，alpha 从满到 0。这样新环冒出、旧环散尽。
-                // 再叠一层响度：安静时整组环一起暗下去。
-                val fade = (1f - t) * (1f - t) * amp
-
-                // 波谷（暗）：半径内侧一圈、笔画更宽 —— 立体感的来源。
-                // 左侧用 0.35 的浓黑，右侧用 0.25 的浅黑（亮底上太浓会显脏）。
-                val troughAlpha = (if (isLeft) TROUGH_ALPHA_LEFT else TROUGH_ALPHA_RIGHT) * fade
-                drawCircle(
-                    color = Color.Black.copy(alpha = troughAlpha.coerceIn(0f, 1f)),
-                    radius = (radius - strokePx * TROUGH_INSET).coerceAtLeast(1f),
+            drawRect(
+                brush = Brush.radialGradient(
+                    colorStops = stops,
                     center = center,
-                    style = Stroke(width = strokePx * TROUGH_WIDTH_SCALE, cap = StrokeCap.Round),
-                )
-                // 波峰（亮）：主色提亮环。右侧用更宽的光带（亮侧需要更胖的浪）。
-                drawCircle(
-                    color = peak.copy(alpha = (spec.alpha * fade).coerceIn(0f, 1f)),
-                    radius = radius,
-                    center = center,
-                    style = Stroke(
-                        width = if (isLeft) strokePx else strokePx * PEAK_WIDTH_SCALE,
-                        cap = StrokeCap.Round,
-                    ),
-                )
-            }
+                    radius = radiusMax,
+                    // Clamp：最外圈之外保持最后一个色标（近全透明），不做"从头再来一遍"。
+                    // Repeat 是给无缝贴图用的，在这里会让半径外多出一圈假的波。
+                    tileMode = TileMode.Clamp,
+                ),
+            )
 
-            // ---- 左组：内圈锐利细亮环 ----
+            // ---- 左组专属：一道细亮环 ----
             //
-            // 视频左侧那道 1.2dp 的细亮圈。半径取最大半径的 22%（内圈但不缩成点），
-            // 亮度跟随响度但保一个地板 —— 完全静音时它也该在，只是暗。
+            // 参考视频左侧有一条 1.2 dp 的锐利白圈压在整片柔波上。它是这一层里**唯一的硬边**，
+            // 作用就是拿"锐"去衬"柔"。半径跟响度走一点点（0.20W → 0.22W）：
+            // 有低频的时候圈微微张开，是唯一一处"跟着音乐动"的几何变化。
             if (isLeft) {
                 drawCircle(
-                    color = Color.White.copy(alpha = (0.42f * amp + 0.12f).coerceIn(0f, 1f)),
-                    radius = radiusMax * radiusScale * SHARP_RING_RATIO,
+                    color = Color.White.copy(alpha = SHARP_RING_ALPHA),
+                    radius = w * (SHARP_RING_RADIUS_RATIO + SHARP_RING_BASS_GAIN * bass),
                     center = center,
                     style = Stroke(width = sharpPx, cap = StrokeCap.Round),
                 )
@@ -315,17 +330,23 @@ fun WaveRings(
     }
 }
 
-/** 静音时圆环半径的地板比例（满幅 = 1）。见 [WaveRings] 的 `amplitude` 说明。 */
-private const val AMPLITUDE_RADIUS_FLOOR = 0.3f
+/** 径向渐变的色标数。48 段线性插值已经看不出折线，再多只是增加每帧的数组长度。 */
+private const val WAVE_STOPS = 48
 
-/** 波谷环相对波峰环的内缩量（笔画宽度的倍数）。 */
-private const val TROUGH_INSET = 0.9f
+/** 半径方向上的完整波数。4 = 每侧能看到 4 道亮带。 */
+private const val WAVE_CYCLES = 4f
 
-/** 波谷环的笔画宽度倍数（比波峰宽才有"影"的体量）。 */
-private const val TROUGH_WIDTH_SCALE = 1.8f
+/** 响度对波场半径的增益：满响度时胀 12%。 */
+private const val PULSE_GAIN = 0.12f
 
-/** 右组波峰的笔画宽度倍数（亮侧的浪要更胖）。 */
-private const val PEAK_WIDTH_SCALE = 2.4f
+/** 左圆心出屏的比例（在屏幕左侧之外）。 */
+private const val CENTER_OFFSCREEN_LEFT = 0.10f
+
+/** 右圆心出屏的位置（大于 1 即屏幕右侧之外）。比左侧少一点 —— 刻意的不对称，见类注释。 */
+private const val CENTER_OFFSCREEN_RIGHT = 1.06f
+
+/** 两个圆心的纵向位置，相对高度。0.50 = 屏幕中线。 */
+private const val CENTER_Y_RATIO = 0.50f
 
 /** 左组波谷的不透明度（浓黑，参考视频的暗侧）。 */
 private const val TROUGH_ALPHA_LEFT = 0.35f
@@ -333,14 +354,20 @@ private const val TROUGH_ALPHA_LEFT = 0.35f
 /** 右组波谷的不透明度（浅黑，亮底上太浓会显脏）。 */
 private const val TROUGH_ALPHA_RIGHT = 0.25f
 
-/** 右组圆心发光核的半径比例（相对最大半径）。 */
-private const val GLOW_CORE_RATIO = 0.28f
-
 /** 左组锐利细亮环的笔画宽度。 */
 private const val SHARP_RING_DP = 1.2f
 
-/** 左组锐利细亮环的半径比例（相对最大半径）。 */
-private const val SHARP_RING_RATIO = 0.22f
+/** 左组锐利细亮环的不透明度。 */
+private const val SHARP_RING_ALPHA = 0.28f
+
+/** 左组锐利细亮环的基础半径比例（相对宽度）。 */
+private const val SHARP_RING_RADIUS_RATIO = 0.20f
+
+/** 左组锐利细亮环半径的响度附加比例。 */
+private const val SHARP_RING_BASS_GAIN = 0.02f
+
+/** 2π。写成 `val` 而不是 `const`：`PI` 本身是 Double，转 Float 不是编译期常量。 */
+private val TWO_PI = (2.0 * PI).toFloat()
 
 /** 左暗右亮光场的三个停靠明度（HSV 的 V）。见 [MusicBackdrop] 的类注释。 */
 private const val LIGHT_FIELD_LEFT = 0.18f

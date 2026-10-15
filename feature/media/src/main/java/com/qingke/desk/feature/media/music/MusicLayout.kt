@@ -278,7 +278,7 @@ data class DrawerMetrics(
  * lineH     = lyricSize × 1.30            ← 用夹取后的字号**回算**行高
  * block     = 2 × lineH + lyricSize × 0.55
  * watermark = H × 0.29
- * waveR     = min(W × 0.38, H × 0.72)
+ * waveR     = W × 0.55
  * hudBand   = pad + max(cover, progressTouchH + progressGap + control)
  * ```
  *
@@ -397,9 +397,21 @@ object MusicLayout {
     /** 背景大衬字，相对页面高。 */
     const val WATERMARK_RATIO = 0.29f
 
-    /** 声波圆环最大半径：宽向比例 / 高向比例，取小。 */
-    const val WAVE_WIDTH_RATIO = 0.38f
-    const val WAVE_HEIGHT_RATIO = 0.72f
+    /** 声波圆环最大半径：**只跟宽度走**的比例。 */
+    const val WAVE_WIDTH_RATIO = 0.55f
+
+    /**
+     * 歌词折行的宽度上限，相对内容区**可用宽**（已扣掉安全边距）。
+     *
+     * 0.52 是"一句话不要横贯整屏"的克制：参考图里歌词两边留着大块暗场，
+     * 字块是画面中央一个**竖长**的团，不是一条横带。整屏宽（1.0）会让长句贴着
+     * 声波圆的弧线，读起来像横幅；再收窄（0.45 以下）三四个字就要折一行，
+     * 竖排感就过头了。
+     *
+     * 这里只给**比例**，绝对值由页面按内容区宽度算（见 `MusicPage` 的 `lyricMaxWidth`）——
+     * 两台机器的内容区宽差 120 dp，写死 dp 会在一台上正好、另一台上要么横贯要么折断。
+     */
+    const val LYRIC_MAX_WIDTH_RATIO = 0.52f
 
     /** 歌词块与 HUD 之间必须留出的最小缝。 */
     const val LYRIC_HUD_MIN_GAP = 8f
@@ -447,7 +459,9 @@ object MusicLayout {
         val lyricBottomY = lyricTopY + lyricBlockHeight
 
         val watermarkSize = h * WATERMARK_RATIO
-        val waveMaxRadius = minOf(w * WAVE_WIDTH_RATIO, h * WAVE_HEIGHT_RATIO)
+        // 只跟宽度走：圆环要**铺满**左右两侧的暗场，被高度一压就在矮屏上缩成两个小圈，
+        // 与"背景声场"的定位不符（高度方向的溢出由页面裁剪，不需要在这里收敛）。
+        val waveMaxRadius = w * WAVE_WIDTH_RATIO
 
         return MusicMetrics(
             widthDp = w,

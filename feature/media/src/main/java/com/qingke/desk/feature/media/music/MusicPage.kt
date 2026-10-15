@@ -33,11 +33,11 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -242,6 +242,13 @@ fun MusicPage(
         lyricsLoading = true
         lyrics = lyricsRepository.load(current)
         lyricsLoading = false
+        // 歌词来源改成**只写日志**（原来是屏幕顶部一行小字）。
+        //
+        // 删它的原因：那是给验证期看的"工程角标"，日常用不着的字压在画面上，
+        // 把"全屏沉浸"破了一个口子。但这条信息在排查"为什么没词"时是最直接的一条读据，
+        // 所以不删信息、只删展示 —— 落进 files/qq-login.log（[QqLog]），
+        // 验证时 `adb shell run-as ... cat` 一样能读到。
+        QqLog.i("MusicPage", "歌词来源=${lyricsSourceLabel(lyrics, lyricsLoading)}")
     }
 
     // ---- 本地导入 ----------------------------------------------------------
@@ -373,6 +380,18 @@ fun MusicPage(
         val drawerMetrics = remember(maxWidth, maxHeight) {
             MusicLayout.trackDrawer(maxWidth.value, maxHeight.value)
         }
+        // 歌词折行的宽度上限。用 `BoxWithConstraints` 的**实测宽**减掉安全内边距 ——
+        // 与下面那层 `.padding(contentSafePadding)` 同源；拿"屏幕宽"去算会把侧栏那 76 dp
+        // 也算进可写区域，长句右端会压到侧栏下面。比例见 [MusicLayout.LYRIC_MAX_WIDTH_RATIO]。
+        val layoutDirection = LocalLayoutDirection.current
+        val lyricMaxWidth = remember(maxWidth, contentSafePadding, layoutDirection) {
+            val safeWidthDp = (
+                maxWidth -
+                    contentSafePadding.calculateLeftPadding(layoutDirection) -
+                    contentSafePadding.calculateRightPadding(layoutDirection)
+                ).coerceAtLeast(1.dp)
+            safeWidthDp * MusicLayout.LYRIC_MAX_WIDTH_RATIO
+        }
 
         // 水印动态取词：当前这句歌词的**首词**（英文首词 / 中文前 2 字）。
         // 用 derivedStateOf 包一层 —— 位置每 200ms 跳一次，但"换句"是秒级事件，
@@ -402,7 +421,6 @@ fun MusicPage(
 
         WaveRings(
             spec = wave,
-            maxRadius = metrics.waveMaxRadiusDp,
             accent = visual.accent,
             phase = phase,
             amplitude = amplitude,
@@ -450,6 +468,8 @@ fun MusicPage(
                     metrics = metrics,
                     // 主字色取封面主色的浅亮变体（衬线粗体，见 LyricStage）。
                     accent = visual.accent,
+                    // 折行上限：按安全区内的可用宽算（见上面 lyricMaxWidth 的注释）。
+                    maxLineWidth = lyricMaxWidth,
                     placeholder = when {
                         lyricsLoading -> "正在获取歌词…"
                         lyrics.instrumental -> "纯音乐，请欣赏"
@@ -459,26 +479,6 @@ fun MusicPage(
                     },
                     driftX = driftX,
                     driftY = driftY,
-                )
-            }
-
-            // ---- 歌词来源角标（顶部居中）--------------------------------------
-            //
-            // 放在顶部**中间**而不是左边或右边：壳层的设置齿轮会跟着侧栏镜像到
-            // 左上或右上（见 DeskRoot 的 overlayCorner），放两侧总有一边会撞上。
-            if (track != null) {
-                Text(
-                    text = lyricsSourceLabel(lyrics, lyricsLoading),
-                    fontSize = metrics.chipSize,
-                    lineHeight = metrics.chipSize * MusicLayout.HUD_TEXT_LINE_HEIGHT_EM,
-                    color = Color.White.copy(alpha = 0.52f),
-                    maxLines = 1,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = metrics.pad.dp)
-                        // 与 HUD 同步淡出：看词态里这一行属于"chrome"，不是内容。
-                        .alpha(hudFade),
                 )
             }
 
@@ -625,6 +625,8 @@ private fun LyricsLayer(
     metrics: MusicMetrics,
     /** 封面主色。主字色由它派生（见 [LyricStage]）。 */
     accent: Color,
+    /** 歌词折行的宽度上限（安全区内可用宽 × [MusicLayout.LYRIC_MAX_WIDTH_RATIO]）。 */
+    maxLineWidth: Dp,
     placeholder: String?,
     driftX: androidx.compose.ui.unit.Dp,
     driftY: androidx.compose.ui.unit.Dp,
@@ -635,6 +637,7 @@ private fun LyricsLayer(
         metrics = metrics,
         placeholder = placeholder,
         accent = accent,
+        maxLineWidth = maxLineWidth,
         driftX = driftX,
         driftY = driftY,
     )

@@ -81,7 +81,10 @@ object ArtworkBackdrop {
         // 近乎无彩度的颜色（黑白封面），混一点种子色能让画面总有一点色彩倾向。
         val seedHue = hueOf(seed)
         val (accentArgb, backdrop) = if (artwork != null) {
-            val acc = dominantColor(artwork) ?: seedColor(seedHue)
+            // 只对**封面取到的主色**提纯：`dominantColor` 失败时才回退到种子色，
+            // 而种子色本来就是"没有封面时的确定性替代"，不该被封面那条整形规则再动一次
+            // （否则"有封面/没封面"两首歌的种子色会走出两种结果）。
+            val acc = dominantColor(artwork)?.let(::purifySaturation) ?: seedColor(seedHue)
             acc to blurredBackdrop(artwork)
         } else {
             seedColor(seedHue) to null
@@ -212,6 +215,55 @@ object ArtworkBackdrop {
         }.getOrNull()
     }
 
+    /**
+     * **饱和度提纯**：把"泥巴色"（低饱和）抬进干净的颜色区间。
+     *
+     * ---------------------------------------------------------------------------
+     * 为什么需要它
+     *
+     * [dominantColor] 的评分是 `S × V`，所以它挑出来的永远是**这一张封面上最艳的那块**——
+     * 但"最艳"是相对的：一张黑白写真加一小块暗红 logo，主色就是那个暗红，
+     * 饱和度可能只有 0.35。这种颜色配上后面 [darkenForReadability] 的明度压制，
+     * 落到屏幕上就是**灰扑扑的泥巴色**，看起来像取色失败，而不是"从封面取到色"。
+     *
+     * 所以低于 [PURIFY_TRIGGER_SATURATION] 的颜色一律抬进 [PURIFY_MIN_SATURATION, PURIFY_MAX_SATURATION]。
+     *
+     * ---------------------------------------------------------------------------
+     * 为什么是 0.58–0.82
+     *
+     *   · **下限 0.58**：HSV 里 0.58 上下才开始明显"看得出是有颜色的"。
+     *     再低（0.4 以下）在暗背景上就已经读不出色相了，等同于灰。
+     *   · **上限 0.82**：再往上就是荧光色。整屏都是高饱和的紫/绿会很扎眼，
+     *     和"暗场里透出一束光"的参考观感相反。
+     *
+     * 写成 `coerceIn(下限, 上限)` 而不是直接 `= 0.58`：这两个数是这条式子的**契约**
+     * （提纯结果永远落在 [0.58, 0.82]），上下限一起表达"提纯后应该在哪"。
+     * 当前触发线 0.55 低于下限，所以实际上抬起来的就是 0.58 —— 但如果以后把触发线
+     * 调高（比如想连中等饱和也一起收一收），上限仍然接着生效，不用再改这里。
+     *
+     * 色相不动：提纯只是"离开灰 / 别到荧光"，不是换颜色。
+     *
+     * 只有**明度**没被碰过：[darkenForReadability] 后面会把它压到
+     * [MAX_BACKGROUND_VALUE] 以下，那里的饱和度下限是 0.22（比 0.58 低），
+     * 所以提纯后的值能原样穿过去，不会被压回灰。
+     */
+    private fun purifySaturation(argb: Int): Int {
+        val hsv = FloatArray(3)
+        AColor.colorToHSV(argb, hsv)
+        if (hsv[1] >= PURIFY_TRIGGER_SATURATION) return argb
+        hsv[1] = hsv[1].coerceIn(PURIFY_MIN_SATURATION, PURIFY_MAX_SATURATION)
+        return AColor.HSVToColor(hsv)
+    }
+
+    /** 低于它就认为取到的是"泥巴色"。0.55 是"能看出颜色"与"偏灰"之间的分界。 */
+    private const val PURIFY_TRIGGER_SATURATION = 0.55f
+
+    /** 提纯后饱和度的下限。离开灰。 */
+    private const val PURIFY_MIN_SATURATION = 0.58f
+
+    /** 提纯后饱和度的上限。别到荧光。 */
+    private const val PURIFY_MAX_SATURATION = 0.82f
+
     /** 没有封面（或封面取色失败）时的确定性颜色。 */
     private fun seedColor(hue: Float): Int =
         AColor.HSVToColor(floatArrayOf(hue, 0.55f, 0.62f))
@@ -280,6 +332,44 @@ object ArtworkBackdrop {
 
     /** 主色的**高明度浅亮变体**。中央歌词的主字色 —— 有色调的浅色，不是刺眼纯白。 */
     internal fun light(accent: Color): Color = shade(accent, LYRIC_VALUE, LYRIC_SATURATION_SCALE)
+
+    /**
+     * 中央歌词的**主字色**：主色同一色相下、绝对 S=[LYRIC_INK_SATURATION]、V=[LYRIC_INK_VALUE] 的浅亮色。
+     *
+     * ---------------------------------------------------------------------------
+     * 为什么不用 [light] 那种"乘系数"
+     *
+     * [light] 是把主色的饱和度**乘** 0.35。乘系数在封面本身有颜色时没问题，
+     * 但封面主色可能是提纯前就很灰的那种（S≈0.2），乘完只剩 0.07 —— 那就是白，
+     * 色相信息整个丢掉，歌词与"同色系"这件事断了。
+     *
+     * 所以字色给的是**绝对坐标**：无论封面多灰多艳，歌词永远是"同色相 + S 0.28 + V 0.95"。
+     * 歌词是整屏唯一的阅读对象，它的颜色应该稳定 —— 不该随封面漂移。
+     *
+     * ---------------------------------------------------------------------------
+     * 为什么是 0.28 / 0.95
+     *
+     *   · **S 0.28**：低到"远看就是白色"，近看才透出一点色相。再高（0.4+）字会被读成
+     *     彩色字，和"歌词是主体、花色只是氛围"的主次关系反了。
+     *   · **V 0.95**：比 [light] 的 0.93 再亮一档 —— 字要在压暗的背景上立住，
+     *     接近白但不到纯白（纯白在暗场上会有边缘光晕，字反而显得脏）。
+     *
+     * [light] 保留不动：新声波圆的波峰色还要它（那里要的是"跟着封面走的亮色"，
+     * 与字色"稳定的浅色"是两种诉求）。
+     */
+    internal fun lyricInk(accent: Color): Color {
+        val hsv = FloatArray(3)
+        AColor.colorToHSV(accent.toArgbCompat(), hsv)
+        hsv[1] = LYRIC_INK_SATURATION
+        hsv[2] = LYRIC_INK_VALUE
+        return Color(AColor.HSVToColor(hsv))
+    }
+
+    /** 歌词主字的饱和度（绝对值，不是缩放系数）。 */
+    private const val LYRIC_INK_SATURATION = 0.28f
+
+    /** 歌词主字的明度（绝对值）。 */
+    private const val LYRIC_INK_VALUE = 0.95f
 
     /** 歌词主字的明度。压到 0.93 以下会显灰，再高就接近纯白、失去"从封面取色"的意义。 */
     private const val LYRIC_VALUE = 0.93f
