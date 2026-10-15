@@ -57,6 +57,9 @@ import kotlinx.coroutines.delay
  * @param renderEnabled false = 停渲染（翻到别的页 / 别的屏时用）。
  * @param topInset 未同意隐私时，隐私卡顶部额外让出的高度（给悬浮齿轮让位）。
  * @param onConsentChanged 可选回调，让外层知道当前能不能显示地图（用于排布局）。
+ * @param logoLeftMargin 高德 Logo 的左外边距。**全屏地图页专用**：地图铺满物理窗口后
+ *                       Logo 在窗口左下角，会被常驻侧栏压住 —— 侧栏在左时传
+ *                       "侧栏宽 + 间距"把它推出来。首页预览卡不传（0）。
  */
 @Composable
 fun MapPane(
@@ -67,6 +70,7 @@ fun MapPane(
     renderEnabled: Boolean = true,
     renderFps: Int = MAP_FULL_FPS,
     topInset: Dp = 0.dp,
+    logoLeftMargin: Dp = 0.dp,
     onConsentChanged: ((Boolean) -> Unit)? = null,
 ) {
     val context = LocalContext.current
@@ -96,6 +100,7 @@ fun MapPane(
             showMyLocation = showMyLocation,
             renderEnabled = renderEnabled,
             renderFps = renderFps,
+            logoLeftMargin = logoLeftMargin,
         )
         return
     }

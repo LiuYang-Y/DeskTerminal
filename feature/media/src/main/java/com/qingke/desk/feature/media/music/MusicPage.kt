@@ -45,7 +45,7 @@ import androidx.compose.ui.unit.sp
 import com.qingke.desk.core.platform.BurnInGuard
 import com.qingke.desk.core.platform.EffectTier
 import com.qingke.desk.core.ui.DeskDimens
-import com.qingke.desk.core.ui.LocalEffectTier
+import com.qingke.desk.core.ui.LocalMusicEffectTier
 import com.qingke.desk.feature.media.MediaPermission
 import com.qingke.desk.feature.media.mediaSourceLabel
 import com.qingke.desk.feature.media.music.artwork.ArtworkBackdrop
@@ -79,11 +79,11 @@ private const val HUD_AUTO_HIDE_MS = 4_000L
  */
 private const val POSITION_TICK_MS = 200L
 
-/** 背景大衬字的不透明度。取用户给的范围（0.14~0.18）的中值。 */
-private const val WATERMARK_ALPHA = 0.16f
+/** 背景大衬字的不透明度。深黑压底色（2026-10-15 改：旧版是半透明白字，与前景白字互相干扰）。 */
+private const val WATERMARK_ALPHA = 0.24f
 
 /** OFF 档时水印的不透明度。比别的档低一截，但**不归零** —— 归零等于整页只剩一块纯色。 */
-private const val WATERMARK_ALPHA_OFF = 0.09f
+private const val WATERMARK_ALPHA_OFF = 0.18f
 
 /**
  * 路线 D 的音乐页。**全屏沉浸式**，铺满内容区（不吃侧栏，也不吃挖孔区）。
@@ -142,9 +142,22 @@ fun MusicPage(
      * "播放中 / 页面可见 / 效果档位"三件事的地方。
      */
     spectrum: SpectrumControl? = null,
+    /**
+     * 前景安全内边距（2026-10-15 全屏沉浸化）。**只作用于前景**（HUD、歌词角标、
+     * 状态卡、登录浮层、选歌抽屉）；背景层（渐变光场、水印、声波圆环）铺满物理窗口，
+     * 一直延伸到挖孔区和侧栏底下 —— 侧栏的玻璃透镜直接采样这层流动的声波。
+     *
+     * 默认 0 = 调用方自己已经让出了安全区（历史行为）。壳层在全屏模式下传
+     * "挖孔 + 侧栏宽 + 间距"，保证任何按钮与文字都不被侧栏或挖孔遮挡。
+     */
+    contentSafePadding: PaddingValues = PaddingValues(0.dp),
 ) {
     val context = LocalContext.current
-    val tier = LocalEffectTier.current
+    // 音乐舞台读**自己的**档位（LocalMusicEffectTier），不读玻璃层的 LocalEffectTier：
+    // 后者的 minApi 门槛（HIGH=33/MEDIUM=31）只该卡 kyant-backdrop 侧栏玻璃，
+    // 而圆环与歌词模糊在 API 26+ 全部原生 —— 共用会让小米（API 30）被锁在 LOW，
+    // 波纹特效被无辜砍掉。用户口径：两台在役机器的音乐特效必须 100% 一致。
+    val tier = LocalMusicEffectTier.current
     val scope = rememberCoroutineScope()
 
     // 登录浮层是否展开。归页面持有（它是纯 UI 状态），登录流程本身归壳层。
@@ -361,6 +374,16 @@ fun MusicPage(
             MusicLayout.trackDrawer(maxWidth.value, maxHeight.value)
         }
 
+        // 水印动态取词：当前这句歌词的**首词**（英文首词 / 中文前 2 字）。
+        // 用 derivedStateOf 包一层 —— 位置每 200ms 跳一次，但"换句"是秒级事件，
+        // 只有结果真的变了才通知，否则整页会跟着 5Hz 重组。
+        val watermarkLine: String? = remember(lyrics) {
+            derivedStateOf {
+                val (idx, _) = lyrics.focusAt(positionState.value.toInt())
+                if (idx >= 0) lyrics.lines.getOrNull(idx)?.text else null
+            }
+        }.value
+
         MusicBackdrop(
             visual = visual,
             spec = bg,
@@ -369,7 +392,7 @@ fun MusicPage(
         )
 
         Watermark(
-            text = watermarkTextOf(track?.artist.orEmpty(), track?.title),
+            text = watermarkTextOf(track?.artist.orEmpty(), track?.title, watermarkLine),
             size = metrics.watermarkSize,
             alpha = if (tier == EffectTier.OFF) WATERMARK_ALPHA_OFF else WATERMARK_ALPHA,
             driftX = driftX,
@@ -387,155 +410,168 @@ fun MusicPage(
             driftY = driftY,
         )
 
-        if (track == null) {
-            MusicStatusCard(
-                status = status,
-                metrics = metrics,
-                loginState = loginState,
-                modifier = Modifier.align(Alignment.Center),
-                onOpenSettings = {
-                    MediaPermission.openSettings(context) { reason -> onMessage?.invoke(reason) }
-                },
-                // 没在播的时候 HUD 不存在，所以这里是**唯一**的登录入口 ——
-                // 少了它，"还没登录 → 没内容 → 看不到入口"就是一个死循环。
-                onOpenLogin = { showLoginPane = true },
-                // 已登录时同一位置换成"选歌"：状态卡是空态页面的主操作区，
-                // 登录过的人到这里要的是"放一首"，不是"再登录一次"。
-                onOpenDrawer = if (loginState.isUsableCredential && library != null) {
-                    {
-                        showDrawer = true
-                        wake()
-                    }
-                } else {
-                    null
-                },
-            )
-        } else {
-            LyricsLayer(
-                doc = lyrics,
-                position = positionState,
-                metrics = metrics,
-                placeholder = when {
-                    lyricsLoading -> "正在获取歌词…"
-                    lyrics.instrumental -> "纯音乐，请欣赏"
-                    lyrics.unreachable -> "网络暂时不可用，稍后自动重试"
-                    lyrics.isEmpty -> "未找到同步歌词"
-                    else -> null
-                },
-                driftX = driftX,
-                driftY = driftY,
-            )
-        }
-
-        // ---- 歌词来源角标（顶部居中）--------------------------------------
+        // ---- 前景层：吃安全内边距 ------------------------------------------
         //
-        // 放在顶部**中间**而不是左边或右边：壳层的设置齿轮会跟着侧栏镜像到
-        // 左上或右上（见 DeskRoot 的 overlayCorner），放两侧总有一边会撞上。
-        if (track != null) {
-            Text(
-                text = lyricsSourceLabel(lyrics, lyricsLoading),
-                fontSize = metrics.chipSize,
-                lineHeight = metrics.chipSize * MusicLayout.HUD_TEXT_LINE_HEIGHT_EM,
-                color = Color.White.copy(alpha = 0.52f),
-                maxLines = 1,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = metrics.pad.dp)
-                    // 与 HUD 同步淡出：看词态里这一行属于"chrome"，不是内容。
-                    .alpha(hudFade),
-            )
-        }
-
-        if (track != null) {
-            MusicHud(
-            visual = visual,
-            title = track.title,
-            artist = track.artist,
-            sourceLabel = sourceLabelOf(track.sourcePackage),
-            positionMs = positionState,
-            durationMs = track.durationMs,
-            isPlaying = track.isPlaying,
-            canSeek = track.canSeek,
-            canPrevious = track.canPrevious,
-            canNext = track.canNext,
-            canPlayPause = track.canPlayPause,
-            metrics = metrics,
-            fade = hudFade,
-            // 隐藏时真的不可点 —— `Modifier.alpha(0f)` 不影响命中测试，
-            // 少了这一条会变成"看不见的地方点一下，歌突然跳了"。
-            interactive = hudVisible,
-            driftX = driftX,
-            driftY = driftY,
-            onPrevious = {
-                source.previous()
-                wake()
-            },
-            onPlayPause = {
-                source.playPause()
-                wake()
-            },
-            onNext = {
-                source.next()
-                wake()
-            },
-            onSeek = { position ->
-                source.seekTo(position)
-                wake()
-            },
-            onImportLyrics = {
-                importLauncher.launch(arrayOf("*/*"))
-                wake()
-            },
-            accountLabel = hudAccountLabel(loginState),
-            onAccountClick = {
-                showLoginPane = true
-                wake()
-            },
-            // 已登录且壳层提供了曲库源时才给这颗 chip（null = 不渲染）。
-            onPickTrack = if (loginState.isUsableCredential && library != null) {
-                {
-                    showDrawer = true
-                    wake()
-                }
+        // 一切**可读、可点**的东西都在这一层里：状态卡 / 歌词 / 角标 / HUD /
+        // 登录浮层 / 选歌抽屉。上面的背景层（渐变光场 / 水印 / 声波圆环）
+        // 全窗口铺着，侧栏浮在整页之上时，这层内边距保证控件不被它压住。
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(contentSafePadding),
+        ) {
+            if (track == null) {
+                MusicStatusCard(
+                    status = status,
+                    metrics = metrics,
+                    loginState = loginState,
+                    modifier = Modifier.align(Alignment.Center),
+                    onOpenSettings = {
+                        MediaPermission.openSettings(context) { reason -> onMessage?.invoke(reason) }
+                    },
+                    // 没在播的时候 HUD 不存在，所以这里是**唯一**的登录入口 ——
+                    // 少了它，"还没登录 → 没内容 → 看不到入口"就是一个死循环。
+                    onOpenLogin = { showLoginPane = true },
+                    // 已登录时同一位置换成"选歌"：状态卡是空态页面的主操作区，
+                    // 登录过的人到这里要的是"放一首"，不是"再登录一次"。
+                    onOpenDrawer = if (loginState.isUsableCredential && library != null) {
+                        {
+                            showDrawer = true
+                            wake()
+                        }
+                    } else {
+                        null
+                    },
+                )
             } else {
-                null
-            },
-            )
-        }
+                LyricsLayer(
+                    doc = lyrics,
+                    position = positionState,
+                    metrics = metrics,
+                    // 主字色取封面主色的浅亮变体（衬线粗体，见 LyricStage）。
+                    accent = visual.accent,
+                    placeholder = when {
+                        lyricsLoading -> "正在获取歌词…"
+                        lyrics.instrumental -> "纯音乐，请欣赏"
+                        lyrics.unreachable -> "网络暂时不可用，稍后自动重试"
+                        lyrics.isEmpty -> "未找到同步歌词"
+                        else -> null
+                    },
+                    driftX = driftX,
+                    driftY = driftY,
+                )
+            }
 
-        // ---- 登录浮层 ----------------------------------------------------
-        //
-        // 放在**最后**（z 序最高）：它要盖住歌词、HUD 与状态卡。
-        // 遮罩自己消费点击，所以浮层展开时下面那层唤醒层收不到事件。
-        if (showLoginPane) {
-            QqLoginPane(
-                state = loginState,
-                metrics = paneMetrics,
-                onStartLogin = onStartLogin,
-                onCancel = onCancelLogin,
-                onLogout = onLogout,
-                onDismiss = { showLoginPane = false },
-            )
-        }
+            // ---- 歌词来源角标（顶部居中）--------------------------------------
+            //
+            // 放在顶部**中间**而不是左边或右边：壳层的设置齿轮会跟着侧栏镜像到
+            // 左上或右上（见 DeskRoot 的 overlayCorner），放两侧总有一边会撞上。
+            if (track != null) {
+                Text(
+                    text = lyricsSourceLabel(lyrics, lyricsLoading),
+                    fontSize = metrics.chipSize,
+                    lineHeight = metrics.chipSize * MusicLayout.HUD_TEXT_LINE_HEIGHT_EM,
+                    color = Color.White.copy(alpha = 0.52f),
+                    maxLines = 1,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = metrics.pad.dp)
+                        // 与 HUD 同步淡出：看词态里这一行属于"chrome"，不是内容。
+                        .alpha(hudFade),
+                )
+            }
 
-        // ---- 选歌抽屉（第 2 步）-------------------------------------------
-        //
-        // 与登录浮层并列的最高层。**library 为 null 时整个分支不出现** ——
-        // 页面对"能不能选歌"的唯一判断依据就是这个抽象在不在。
-        if (showDrawer && library != null && libraryState != null) {
-            TrackDrawer(
-                state = libraryState.value,
-                metrics = drawerMetrics,
-                onSelectTrack = { index -> library.playTrackAt(index) },
-                onRefresh = { library.refresh() },
-                onOpenFavorites = { library.openFavorites() },
-                onOpenPlaylist = { id -> library.openPlaylist(id) },
-                onDismiss = {
-                    showDrawer = false
-                    wake()
-                },
-            )
+            if (track != null) {
+                MusicHud(
+                    visual = visual,
+                    title = track.title,
+                    artist = track.artist,
+                    sourceLabel = sourceLabelOf(track.sourcePackage),
+                    positionMs = positionState,
+                    durationMs = track.durationMs,
+                    isPlaying = track.isPlaying,
+                    canSeek = track.canSeek,
+                    canPrevious = track.canPrevious,
+                    canNext = track.canNext,
+                    canPlayPause = track.canPlayPause,
+                    metrics = metrics,
+                    fade = hudFade,
+                    // 隐藏时真的不可点 —— `Modifier.alpha(0f)` 不影响命中测试，
+                    // 少了这一条会变成"看不见的地方点一下，歌突然跳了"。
+                    interactive = hudVisible,
+                    driftX = driftX,
+                    driftY = driftY,
+                    onPrevious = {
+                        source.previous()
+                        wake()
+                    },
+                    onPlayPause = {
+                        source.playPause()
+                        wake()
+                    },
+                    onNext = {
+                        source.next()
+                        wake()
+                    },
+                    onSeek = { position ->
+                        source.seekTo(position)
+                        wake()
+                    },
+                    onImportLyrics = {
+                        importLauncher.launch(arrayOf("*/*"))
+                        wake()
+                    },
+                    accountLabel = hudAccountLabel(loginState),
+                    onAccountClick = {
+                        showLoginPane = true
+                        wake()
+                    },
+                    // 已登录且壳层提供了曲库源时才给这颗 chip（null = 不渲染）。
+                    onPickTrack = if (loginState.isUsableCredential && library != null) {
+                        {
+                            showDrawer = true
+                            wake()
+                        }
+                    } else {
+                        null
+                    },
+                )
+            }
+
+            // ---- 登录浮层 ----------------------------------------------------
+            //
+            // 放在**最后**（z 序最高）：它要盖住歌词、HUD 与状态卡。
+            // 遮罩自己消费点击，所以浮层展开时下面那层唤醒层收不到事件。
+            if (showLoginPane) {
+                QqLoginPane(
+                    state = loginState,
+                    metrics = paneMetrics,
+                    onStartLogin = onStartLogin,
+                    onCancel = onCancelLogin,
+                    onLogout = onLogout,
+                    onDismiss = { showLoginPane = false },
+                )
+            }
+
+            // ---- 选歌抽屉（第 2 步）-------------------------------------------
+            //
+            // 与登录浮层并列的最高层。**library 为 null 时整个分支不出现** ——
+            // 页面对"能不能选歌"的唯一判断依据就是这个抽象在不在。
+            if (showDrawer && library != null && libraryState != null) {
+                TrackDrawer(
+                    state = libraryState.value,
+                    metrics = drawerMetrics,
+                    onSelectTrack = { index -> library.playTrackAt(index) },
+                    onRefresh = { library.refresh() },
+                    onOpenFavorites = { library.openFavorites() },
+                    onOpenPlaylist = { id -> library.openPlaylist(id) },
+                    onDismiss = {
+                        showDrawer = false
+                        wake()
+                    },
+                )
+            }
         }
     }
 }
@@ -587,6 +623,8 @@ private fun LyricsLayer(
     doc: LyricsDoc,
     position: State<Long>,
     metrics: MusicMetrics,
+    /** 封面主色。主字色由它派生（见 [LyricStage]）。 */
+    accent: Color,
     placeholder: String?,
     driftX: androidx.compose.ui.unit.Dp,
     driftY: androidx.compose.ui.unit.Dp,
@@ -596,6 +634,7 @@ private fun LyricsLayer(
         positionMs = position.value.toInt(),
         metrics = metrics,
         placeholder = placeholder,
+        accent = accent,
         driftX = driftX,
         driftY = driftY,
     )

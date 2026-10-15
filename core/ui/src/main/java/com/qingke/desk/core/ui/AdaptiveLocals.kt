@@ -43,6 +43,20 @@ val LocalDeviceProfile: ProvidableCompositionLocal<DeviceProfile> =
 val LocalEffectTier: ProvidableCompositionLocal<EffectTier> =
     compositionLocalOf { EffectTier.HIGH }
 
+/**
+ * **音乐舞台**的效果档位（2026-10-15 用户口径，与 [LocalEffectTier] 解耦）。
+ *
+ * 玻璃层的 API 门槛（HIGH=33 / MEDIUM=31）只该卡 `kyant-backdrop` 侧栏玻璃；
+ * 音乐舞台的 3D 凹凸圆环与歌词 `BlurMaskFilter` 真高斯模糊在 API 26+ 全部原生。
+ * 共用 [LocalEffectTier] 会让旗舰机（小米 API 30）因玻璃跑不了 HIGH 而被锁在 LOW，
+ * 音乐特效被无辜砍掉 —— 两台在役机器必须 100% 一致。
+ *
+ * 由 [com.qingke.desk.MainActivity] 从 `EffectGovernor.musicTier` 下发；
+ * 只有音乐页（:feature:media 的 MusicPage）读它，玻璃与透镜照旧读 [LocalEffectTier]。
+ */
+val LocalMusicEffectTier: ProvidableCompositionLocal<EffectTier> =
+    compositionLocalOf { EffectTier.HIGH }
+
 /** 读当前设备档案。 */
 val currentDeviceProfile: DeviceProfile
     @Composable

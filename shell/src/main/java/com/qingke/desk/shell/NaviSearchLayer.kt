@@ -154,6 +154,13 @@ fun NaviSearchLayer(
      * 界面不自己再算一遍（起终点在会话里，界面拿不到）。
      */
     onRetry: () -> Unit,
+    /**
+     * 前景安全内边距（2026-10-15 全屏沉浸化）。地图漫游态下 MapPane 铺满整块物理窗口，
+     * 本层也跟着铺满，但**搜索条 / 联想面板 / 路线预览卡**要避开常驻侧栏与挖孔 ——
+     * 这个内边距就是"挖孔 inset + 侧栏宽 + 间距"。遮罩（压暗地图）**不**吃它：
+     * 地图铺满全屏，遮罩也铺满全屏，否则侧栏底下那一块地图会亮得刺眼。
+     */
+    contentSafePadding: PaddingValues = PaddingValues(0.dp),
 ) {
     val context = LocalContext.current
     val searcher = remember { PlaceSearch(context) }
@@ -223,6 +230,10 @@ fun NaviSearchLayer(
                     .background(Color.Black.copy(alpha = DeskGlass.mapScrimAlpha)),
             )
         }
+
+        // ---- 前景：搜索条 / 面板 / 预览卡，吃安全内边距避让侧栏与挖孔 ----
+        // 遮罩不在这里面（见上面），这一层只包"可读可点"的三块。
+        Box(modifier = Modifier.fillMaxSize().padding(contentSafePadding)) {
 
         // ---- 1. 展开态：贴顶部一整块「输入框 + 结果」面板 ----
         //
@@ -362,6 +373,8 @@ fun NaviSearchLayer(
                     onClearDestination()
                 },
             )
+        }
+        // ---- 前景 Box 结束（搜索条 / 面板 / 预览卡都在里面）----
         }
     }
 }

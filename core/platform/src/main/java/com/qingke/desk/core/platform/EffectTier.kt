@@ -125,3 +125,35 @@ fun EffectTier.degradedBy(penalty: Int): EffectTier {
     if (index < 0) return this
     return EffectTier.DESCENDING[(index + penalty).coerceAtMost(EffectTier.DESCENDING.lastIndex)]
 }
+
+/**
+ * **音乐舞台**的生效档位（2026-10-15 用户口径：与玻璃层解耦）。
+ *
+ * ---------------------------------------------------------------------------
+ * 为什么要有这一份（[minApi] 只该卡玻璃库）
+ *
+ * [EffectTier] 的 `minApi` 门槛（HIGH=33 / MEDIUM=31）是照 `kyant-backdrop` 2.0.0
+ * 的源码读出来的 —— 它卡的是**侧栏玻璃**（RenderEffect / RuntimeShader）。
+ * 但同一个枚举同时驱动着**音乐舞台**：3D 凹凸声波圆环（`Brush.radialGradient`）
+ * 与歌词的 `BlurMaskFilter` 真高斯模糊在 **API 26+ 就全部原生支持**，
+ * 没有任何 API 31/33 依赖。
+ *
+ * 后果是误伤：小米 11 Ultra（骁龙 888 / 12GB）明明是旗舰，却因 API 30 被
+ * [resolveBaseTier] 锁在 LOW，AUTO 档下音乐页的波纹特效被无辜砍掉。
+ * 用户口径明确：**两台在役机器（API 30 / API 36）的音乐特效必须 100% 一致**。
+ *
+ * 规则：
+ *   · [EffectLevel.AUTO] → 基线直接取 [EffectTier.HIGH]，只叠加运行时段数
+ *     （温度/掉帧降级照旧生效 —— 那是热与卡的硬约束，不是能力误判）；
+ *   · 用户手动锁定 HIGH/MEDIUM/LOW/OFF → 就用锁定值，**不受 minApi 限制**
+ *     （音乐舞台跑得动；玻璃层那边仍走 [resolveBaseTier] 自己的降级，互不影响）；
+ *   · 调试强制档位（override）优先级最高。
+ */
+fun resolveMusicTier(level: EffectLevel, penalty: Int, override: EffectTier? = null): EffectTier {
+    if (override != null) return override
+    val base = when (level) {
+        EffectLevel.AUTO -> EffectTier.HIGH
+        else -> level.lockedTier() ?: EffectTier.HIGH
+    }
+    return base.degradedBy(penalty)
+}

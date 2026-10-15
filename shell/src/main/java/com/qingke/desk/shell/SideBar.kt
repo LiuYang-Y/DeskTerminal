@@ -75,6 +75,16 @@ fun SideBar(
     glassBackdrop: LayerBackdrop?,
     modifier: Modifier = Modifier,
     availableHeightDp: Float? = null,
+    /**
+     * 深色底衬模式（地图漫游态专用）。
+     *
+     * 地图漫游态下 MapPane 铺满整块物理窗口，侧栏浮在浅色/绿色地图之上；但地图是
+     * 独立 SurfaceView 图层，Compose 的玻璃背景层采不到它 —— 侧栏真玻璃背后只剩
+     * 自家底色，而 OFF/LOW 档的半透明白蒙版会透出浅色地图、白底压白图标看不清。
+     *
+     * true 时侧栏主体改用深色磨砂底衬（deskGlassOverlay 黑底），任何档位下都高对比。
+     */
+    darkUnderlay: Boolean = false,
 ) {
     LensSideBar(
         items = items,
@@ -84,5 +94,6 @@ fun SideBar(
         lensEnabled = LensSpec.ENABLED,
         modifier = modifier,
         availableHeightDp = availableHeightDp,
+        darkUnderlay = darkUnderlay,
     )
 }

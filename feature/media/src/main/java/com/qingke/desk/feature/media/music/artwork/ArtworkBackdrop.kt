@@ -255,8 +255,37 @@ object ArtworkBackdrop {
         return AColor.HSVToColor(hsv)
     }
 
-    /** 渐变两端之间的色相偏移量。小一点才像"同一束光"，大一点就成撞色了。 */
+/** 渐变两端之间的色相偏移量。小一点才像"同一束光"，大一点就成撞色了。 */
     private const val HUE_SHIFT_DEGREES = 24f
+
+    // ------------------------------------------------------------- 派生色（音乐页光场）
+
+    /**
+     * 由主色派生一个**指定明度**的同色相颜色（左暗右亮光场的三个停靠点用它）。
+     *
+     * 明度直接给目标值而不是乘系数：光场要的是"左端 0.18、右端 0.86"这种**绝对**
+     * 控制 —— 乘系数的话，封面本身很暗时右端永远亮不起来（乘 2 也还是暗），
+     * 封面很亮时左端永远暗不下去。色相与饱和度跟着主色走，画面才像"同一束光"。
+     *
+     * @param value 目标明度（HSV 的 V），0..1。
+     * @param saturationScale 饱和度缩放。浅亮字色用它把饱和度降下来（接近白但有色调）。
+     */
+    internal fun shade(accent: Color, value: Float, saturationScale: Float = 1f): Color {
+        val hsv = FloatArray(3)
+        AColor.colorToHSV(accent.toArgbCompat(), hsv)
+        hsv[1] = (hsv[1] * saturationScale).coerceIn(0f, 1f)
+        hsv[2] = value.coerceIn(0f, 1f)
+        return Color(AColor.HSVToColor(hsv))
+    }
+
+    /** 主色的**高明度浅亮变体**。中央歌词的主字色 —— 有色调的浅色，不是刺眼纯白。 */
+    internal fun light(accent: Color): Color = shade(accent, LYRIC_VALUE, LYRIC_SATURATION_SCALE)
+
+    /** 歌词主字的明度。压到 0.93 以下会显灰，再高就接近纯白、失去"从封面取色"的意义。 */
+    private const val LYRIC_VALUE = 0.93f
+
+    /** 歌词主字的饱和度缩放。0.35 是"看得出色调但不抢字"的位置。 */
+    private const val LYRIC_SATURATION_SCALE = 0.35f
 
     /** 仅用于单元测试/预览：把 [ArtworkVisual] 画成一张预览位图。 */
     internal fun previewSwatch(visual: ArtworkVisual, size: Int): Bitmap {

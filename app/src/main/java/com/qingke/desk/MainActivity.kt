@@ -26,6 +26,7 @@ import com.qingke.desk.core.platform.EffectGovernor
 import com.qingke.desk.core.platform.WindowDisplayController
 import com.qingke.desk.core.ui.LocalDeviceProfile
 import com.qingke.desk.core.ui.LocalEffectTier
+import com.qingke.desk.core.ui.LocalMusicEffectTier
 import com.qingke.desk.shell.DeskRoot
 
 /**
@@ -92,10 +93,14 @@ class MainActivity : ComponentActivity() {
         setContent {
             val tier by governor.tier.collectAsStateWithLifecycle()
             val level by governor.level.collectAsStateWithLifecycle()
+            // 音乐舞台档位与玻璃层解耦（用户口径：小米 API 30 与一加 API 36 特效一致）。
+            // 玻璃的 API 门槛只该卡侧栏，音乐特效 API 26+ 全部原生，AUTO 直接满血。
+            val musicTier by governor.musicTier.collectAsStateWithLifecycle()
 
             CompositionLocalProvider(
                 LocalDeviceProfile provides profile,
                 LocalEffectTier provides tier,
+                LocalMusicEffectTier provides musicTier,
             ) {
                 DeskRoot(
                     orchestrator = DeskGraph.orchestrator,

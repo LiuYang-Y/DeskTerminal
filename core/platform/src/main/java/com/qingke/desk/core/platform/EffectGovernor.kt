@@ -127,6 +127,17 @@ class EffectGovernor(
         override ?: base.degradedBy(penalty)
     }.stateIn(scope, SharingStarted.Eagerly, resolveBaseTier(EffectLevel.AUTO, initialProfile))
 
+    /**
+     * **音乐舞台**的生效档位（2026-10-15 用户口径，与 [tier] 解耦）。
+     *
+     * 玻璃层的 `minApi` 门槛不该误伤音乐特效 —— 圆环与歌词模糊在 API 26+ 全部原生。
+     * AUTO 时基线直接 HIGH（只叠运行时段数）；手动锁定时按锁定值、不受 minApi 限制。
+     * 详见 [resolveMusicTier]。
+     */
+    val musicTier: StateFlow<EffectTier> = combine(_level, _penalty, _override) { level, penalty, override ->
+        resolveMusicTier(level, penalty, override)
+    }.stateIn(scope, SharingStarted.Eagerly, resolveMusicTier(EffectLevel.AUTO, 0, null))
+
     /** [updateProfile] 后强制重算一次基准档位（combine 已经会做，这里只为可读性留个入口）。 */
     private fun refreshBaseTier() {
         // combine(_level, _profile) 会在 _profile 变化时自动重算，这里什么都不用做。

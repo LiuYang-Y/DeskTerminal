@@ -60,6 +60,7 @@ import com.qingke.desk.core.ui.LocalDeviceProfile
 import com.qingke.desk.core.ui.LocalEffectTier
 import com.qingke.desk.core.ui.SidebarFit
 import com.qingke.desk.core.ui.SidebarFitLevel
+import com.qingke.desk.core.ui.deskGlassOverlay
 import com.qingke.desk.core.ui.deskGlassSurface
 import com.qingke.desk.core.ui.fitSidebar
 import com.qingke.desk.core.ui.indicatorAlpha
@@ -72,6 +73,15 @@ import kotlin.math.roundToInt
 
 /** 列内淡出的过渡带宽（单位：格）。越小越"干脆"，越大越柔和。 */
 private const val LENS_FADE_SPAN: Float = 0.30f
+
+/**
+ * 地图漫游态侧栏的深色底衬不透明度。
+ *
+ * 比侧栏白蒙版（DeskGlass.surfaceAlpha = 0.12）高很多、比地图浮层（overlayAlpha = 0.72）
+ * 低 —— 侧栏里是图标不是小字号数字，0.55 足以压住浅色地图上的白图标对比度，
+ * 又不会让侧栏退化成一块纯黑板、失去"浮在地图上"的玻璃轮廓。
+ */
+private const val SIDEBAR_DARK_UNDERLAY_ALPHA = 0.55f
 
 /**
  * 玻璃透镜侧栏 —— 侧栏 [SideBar] 的实现本体。
@@ -265,6 +275,11 @@ fun LensSideBar(
      * 为 null 时退回档案值 —— 只在"没有确定容器可量"的调试页里发生。
      */
     availableHeightDp: Float? = null,
+    /**
+     * 深色底衬模式（地图漫游态专用）。见 [SideBar] 的同名参数。
+     * true 时侧栏主体玻璃改用深色磨砂底，不再采样 [backdrop]（地图采不到）。
+     */
+    darkUnderlay: Boolean = false,
 ) {
     if (items.isEmpty()) return
 
@@ -390,17 +405,34 @@ fun LensSideBar(
         modifier = modifier
             // 宽度跟着**实际**条目尺寸走（原来取写死的 sideBarWidth 76dp）。
             .width(fit.itemSize + DeskDimens.sideBarInnerPadding * 2)
-            .deskGlassSurface(
-                backdrop = backdrop,
-                shape = { RoundedCornerShape(DeskDimens.sideBarCorner) },
+            .then(
+                if (darkUnderlay) {
+                    // 地图漫游态：深色磨砂底衬。deskGlassOverlay 自带描边与漫散射光，
+                    // 所以下面那条 railStroke border 不再叠（否则是双描边）。
+                    Modifier.deskGlassOverlay(
+                        shape = RoundedCornerShape(DeskDimens.sideBarCorner),
+                        alpha = SIDEBAR_DARK_UNDERLAY_ALPHA,
+                    )
+                } else {
+                    Modifier.deskGlassSurface(
+                        backdrop = backdrop,
+                        shape = { RoundedCornerShape(DeskDimens.sideBarCorner) },
+                    )
+                }
             )
-            .border(
-                // 这条描边是"深色半透明胶囊 + 细描边"里的一分子，属于新样式，
-                // 所以跟着 active 一起开关：总开关关掉后要回到**改动前**的侧栏，
-                // 连描边也不该多出来。
-                width = if (active) 1.dp else 0.dp,
-                brush = railStrokeBrush,
-                shape = RoundedCornerShape(DeskDimens.sideBarCorner),
+            .then(
+                if (darkUnderlay) {
+                    Modifier
+                } else {
+                    Modifier.border(
+                        // 这条描边是"深色半透明胶囊 + 细描边"里的一分子，属于新样式，
+                        // 所以跟着 active 一起开关：总开关关掉后要回到**改动前**的侧栏，
+                        // 连描边也不该多出来。
+                        width = if (active) 1.dp else 0.dp,
+                        brush = railStrokeBrush,
+                        shape = RoundedCornerShape(DeskDimens.sideBarCorner),
+                    )
+                }
             )
             .padding(DeskDimens.sideBarInnerPadding)
             // key 里放的是 **shownItems** 而不是 items：截断后条数变了，手势闭包里

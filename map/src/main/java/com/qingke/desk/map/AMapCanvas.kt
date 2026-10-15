@@ -19,6 +19,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -116,9 +118,21 @@ fun AMapCanvas(
     naviShape: NaviShape? = null,
     naviCar: GeoPoint? = null,
     naviCarBearing: Float? = null,
+    /**
+     * 高德 Logo 的左外边距（dp）。**全屏地图页专用**：地图铺满物理窗口后，
+     * SDK 的 Logo 画在地图左下角 = 窗口左下角，会被常驻侧栏压住。
+     * 侧栏在左时传"侧栏宽 + 间距"把 Logo 推出来；其余场景传 0（默认）。
+     *
+     * 单位换算成像素在这一层做掉（SDK 的 UiSettings 只要像素）：
+     * 调用方传 dp，这里乘密度。
+     */
+    logoLeftMargin: Dp = 0.dp,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    // Logo 左外边距：dp → px（SDK 的 UiSettings 只认像素）。0dp 时就是 0，
+    // 预览卡与导航态不传，Logo 留在默认位置。
+    val logoLeftMarginPx = with(LocalDensity.current) { logoLeftMargin.toPx() }.toInt()
 
     var locationGranted by remember { mutableStateOf(context.hasLocationPermission()) }
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -232,6 +246,9 @@ fun AMapCanvas(
                 uiSettings.isScaleControlsEnabled = false
                 uiSettings.isCompassEnabled = false
                 uiSettings.isMyLocationButtonEnabled = false
+                // Logo 左外边距：全屏地图页避开常驻侧栏（dp → px 在这一层换）。
+                // 预览卡与导航态传 0，Logo 回到自己的默认位置。
+                uiSettings.setLogoLeftMargin(logoLeftMarginPx)
                 mapType = style.amapType
             }
         },

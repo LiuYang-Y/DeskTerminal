@@ -70,6 +70,7 @@ import com.qingke.desk.core.ui.DeskDimens
 import com.qingke.desk.core.ui.DeskGlass
 import com.qingke.desk.core.ui.DeskTheme
 import com.qingke.desk.core.ui.deskGlassOverlay
+import com.qingke.desk.core.ui.deskGlassSource
 import com.qingke.desk.core.ui.glassLayerEnabled
 import com.qingke.desk.core.ui.rememberDeskGlassBackdrop
 import com.qingke.desk.feature.media.MediaPermission
@@ -694,6 +695,100 @@ fun DeskRoot(
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background),
         ) {
+            // ---- 全屏沉浸层（2026-10-15）：音乐页 + 地图漫游态铺满物理窗口 ----
+            //
+            // 这两屏的背景（音乐的光场/声波/水印、地图瓦片）一路铺到挖孔区和侧栏底下，
+            // 消灭"侧栏那一整条黑边"。侧栏在骨架层里浮在它们之上：
+            //   · 音乐页套 [deskGlassSource]，侧栏真玻璃直接采样折射背后流动的声波；
+            //   · 地图是独立 SurfaceView 图层、采不到，侧栏改用深色底衬（见 SideBarSlot）。
+            //
+            // 前景（HUD / 搜索条 / 预览卡）吃 [contentSafePadding]（挖孔 + 侧栏宽 + 间距），
+            // 保证任何按钮与文字都不被侧栏或挖孔遮挡。
+            val sidebarInset = DeskDimens.sideBarWidth + DeskDimens.sidebarSpacing
+            val contentSafePadding = PaddingValues(
+                start = cutoutLeft + if (sidebarSide == SidebarSide.LEFT) sidebarInset else 0.dp,
+                end = cutoutRight + if (sidebarSide == SidebarSide.RIGHT) sidebarInset else 0.dp,
+                top = cutoutTop,
+                bottom = cutoutBottom,
+            )
+            // 地图漫游态 = 地图屏 + 不在导航 + 已同意隐私。导航中/隐私卡仍走内容区避让布局。
+            val mapRoamFullscreen = screen == DeskScreen.MAP && !naviActive && amapAgreed
+
+            when {
+                screen == DeskScreen.MUSIC -> MusicPage(
+                    source = playbackSource,
+                    library = playbackSource,
+                    spectrum = playbackSource,
+                    lyricsRepository = lyricsRepository,
+                    loginState = loginState,
+                    onStartLogin = { loginController.startLogin() },
+                    onCancelLogin = { loginController.cancelLogin() },
+                    onLogout = { loginController.logout() },
+                    onMessage = onMessage,
+                    // 玻璃采样源套在音乐页上：背景层（光场/声波/水印）录进 glassBackdrop，
+                    // 侧栏真玻璃采样它折射背后的彩色声波。前景 HUD 吃 contentSafePadding。
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .deskGlassSource(glassBackdrop),
+                    contentSafePadding = contentSafePadding,
+                )
+
+                mapRoamFullscreen -> {
+                    MapPane(
+                        modifier = Modifier.fillMaxSize(),
+                        host = mapViewHost,
+                        renderEnabled = true,
+                        // 高德 Logo 画在地图左下角 = 窗口左下角，侧栏在左时被压住，
+                        // 把它推出侧栏。侧栏在右时留在默认位置（0）。
+                        logoLeftMargin = if (sidebarSide == SidebarSide.LEFT) sidebarInset else 0.dp,
+                    )
+                    NaviSearchLayer(
+                        state = navi,
+                        destination = naviDestination,
+                        city = NAVI_CITY,
+                        homePlace = homePlace,
+                        workPlace = workPlace,
+                        onPicked = { picked -> planRoute(picked) },
+                        onSaveHome = { picked ->
+                            val point = picked.point
+                            if (point == null) {
+                                navi.notice = "这个地点没有坐标，不能保存"
+                            } else {
+                                val place = NaviPlace(
+                                    title = picked.name,
+                                    point = point,
+                                    address = picked.subtitle,
+                                )
+                                ShellSettings.setNaviHome(context, place)
+                                homePlace = place
+                                onMessage?.invoke("已设为家的地址：${place.title}")
+                            }
+                        },
+                        onSaveWork = { picked ->
+                            val point = picked.point
+                            if (point == null) {
+                                navi.notice = "这个地点没有坐标，不能保存"
+                            } else {
+                                val place = NaviPlace(
+                                    title = picked.name,
+                                    point = point,
+                                    address = picked.subtitle,
+                                )
+                                ShellSettings.setNaviWork(context, place)
+                                workPlace = place
+                                onMessage?.invoke("已设为公司的地址：${place.title}")
+                            }
+                        },
+                        onStartNavi = {
+                            NaviSession.requestStart(context, ValidationDriver.emulatorOverride)
+                        },
+                        onClearDestination = { NaviSession.clearRoute() },
+                        onRetry = { NaviSession.retryCalculate(context) },
+                        contentSafePadding = contentSafePadding,
+                    )
+                }
+            }
+
             Box(modifier = Modifier.fillMaxSize()) {
                 // A. 地图**不再铺满整屏**（2026-10-12 改）。
                 //
@@ -740,6 +835,7 @@ fun DeskRoot(
                             orchestrator = orchestrator,
                             onMessage = onMessage,
                             onScreenChange = { screen = it },
+                            darkUnderlay = mapRoamFullscreen,
                         )
                     }
 
@@ -961,67 +1057,10 @@ fun DeskRoot(
                                             )
                                         }
                                     }
-                                } else if (amapAgreed) {
-                                    MapPane(
-                                        modifier = Modifier.fillMaxSize(),
-                                        host = mapViewHost,
-                                        renderEnabled = true,
-                                        topInset = overlayInset,
-                                    )
-                                    // 搜索层叠在地图上（同日导航接入）。
-                                    // 只在**同意隐私之后**才出现：不同意时这一屏是一张政策卡，
-                                    // 底下一个搜索条既没意义、又会让人以为地图能用。
-                                    NaviSearchLayer(
-                                        state = navi,
-                                        destination = naviDestination,
-                                        city = NAVI_CITY,
-                                        homePlace = homePlace,
-                                        workPlace = workPlace,
-                                        onPicked = { picked -> planRoute(picked) },
-                                        onSaveHome = { picked ->
-                                            val point = picked.point
-                                            if (point == null) {
-                                                navi.notice = "这个地点没有坐标，不能保存"
-                                            } else {
-                                                val place = NaviPlace(
-                                                    title = picked.name,
-                                                    point = point,
-                                                    address = picked.subtitle,
-                                                )
-                                                ShellSettings.setNaviHome(context, place)
-                                                homePlace = place
-                                                onMessage?.invoke("已设为家的地址：${place.title}")
-                                            }
-                                        },
-                                        onSaveWork = { picked ->
-                                            val point = picked.point
-                                            if (point == null) {
-                                                navi.notice = "这个地点没有坐标，不能保存"
-                                            } else {
-                                                val place = NaviPlace(
-                                                    title = picked.name,
-                                                    point = point,
-                                                    address = picked.subtitle,
-                                                )
-                                                ShellSettings.setNaviWork(context, place)
-                                                workPlace = place
-                                                onMessage?.invoke("已设为公司的地址：${place.title}")
-                                            }
-                                        },
-                                        // "开始导航"不切屏：它只把会话推到 STARTING，
-                                        // 而这一屏**看到阶段变了就自己改画导航**（见上面的 naviActive）。
-                                        // 切屏与导航状态从此解耦 —— 上一版这里写的是
-                                        // `screen = DeskScreen.NAVI`，那正是"切走再回来就分家"的入口。
-                                        onStartNavi = {
-                                            // 模拟导航只在 debug 变体里可能为 true（release 恒 false）。
-                                            NaviSession.requestStart(context, ValidationDriver.emulatorOverride)
-                                        },
-                                        onClearDestination = { NaviSession.clearRoute() },
-                                        // 算路失败后的"重试"：起终点都在会话里，
-                                        // 界面只负责说一声"再算一次"。
-                                        onRetry = { NaviSession.retryCalculate(context) },
-                                    )
-                                } else {
+                                } else if (!amapAgreed) {
+                                    // 漫游态（已同意 + 不在导航）已在外层全屏层渲染
+                                    // （mapRoamFullscreen），内容区这里只兜"未同意隐私"这一种情况：
+                                    // 政策卡保留安全区避让布局，侧栏不压文字。
                                     AMapPrivacyCard(
                                         modifier = Modifier.fillMaxSize(),
                                         topInset = overlayInset,
@@ -1036,30 +1075,10 @@ fun DeskRoot(
                                 }
                             }
 
-                            // 音乐页（路线 D 第一版，2026-10-14）。全屏沉浸，铺满内容区 ——
-                            // 不吃侧栏（侧栏是这台终端唯一稳定的入口，任何时候都不让位），
-                            // 也不吃挖孔区（那一块归外层底色）。
-                            //
-                            // 它只认 `PlaybackSource` + `LyricsRepository` 两个抽象，
-                            // 不认识 `MediaSession`、也不认识歌词解析库 —— 壳层在这里
-                            // 注入的是"读系统媒体会话"的实现，以后换成 ExoPlayer 或本地曲库，
-                            // 这一屏和 :feature:media 的页面代码都不用改。
-                            DeskScreen.MUSIC -> MusicPage(
-                                source = playbackSource,
-                                // QQ 曲库（我喜欢 / 歌单 / 选歌抽屉）。null 时页面
-                                // 不渲染抽屉入口 —— 桌面上的历史实现就是 null。
-                                library = playbackSource,
-                                // PCM 频谱旁路（驱动声波圆环的响度）。router 委派到
-                                // QQ 自播源内部持有的 tee —— 壳层不碰 media3 类型。
-                                spectrum = playbackSource,
-                                lyricsRepository = lyricsRepository,
-                                loginState = loginState,
-                                onStartLogin = { loginController.startLogin() },
-                                onCancelLogin = { loginController.cancelLogin() },
-                                onLogout = { loginController.logout() },
-                                onMessage = onMessage,
-                                modifier = Modifier.fillMaxSize(),
-                            )
+                            // 音乐页已在外层全屏层渲染（screen == DeskScreen.MUSIC 那一支），
+                            // 内容区这里不再画它 —— 背景铺满物理窗口、前景吃安全内边距，
+                            // 见 DeskRoot 外层"全屏沉浸层"的注释。留一个空分支保住 when 穷尽。
+                            DeskScreen.MUSIC -> Unit
 
                             DeskScreen.SHIZUKU_GUIDE -> ShizukuGuideScreen(
                                 status = shizukuStatus,
@@ -1101,6 +1120,7 @@ fun DeskRoot(
                             orchestrator = orchestrator,
                             onMessage = onMessage,
                             onScreenChange = { screen = it },
+                            darkUnderlay = mapRoamFullscreen,
                         )
                     }
                 }
@@ -1390,6 +1410,8 @@ private fun RowScope.SideBarSlot(
     orchestrator: ConnectionOrchestrator,
     onMessage: ((String) -> Unit)?,
     onScreenChange: (DeskScreen) -> Unit,
+    /** 地图漫游态侧栏用深色底衬（地图是独立图层、玻璃采不到，见 SideBar 参数注释）。 */
+    darkUnderlay: Boolean = false,
 ) {
     // **侧栏的可用高度必须量出来，不能拿档案算**（2026-10-13）：
     //
@@ -1412,6 +1434,7 @@ private fun RowScope.SideBarSlot(
             // 两者对"竖直居中"是同一件事，横向本来就是这个盒子自己撑开的宽度。
             modifier = Modifier.align(Alignment.CenterStart),
             availableHeightDp = railHeightDp,
+            darkUnderlay = darkUnderlay,
         )
     }
 }
