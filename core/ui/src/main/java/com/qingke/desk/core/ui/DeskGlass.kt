@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.backdrops.LayerBackdrop
@@ -117,8 +118,11 @@ fun Modifier.deskGlassSource(backdrop: LayerBackdrop?): Modifier =
  * 同一块 [backdrop] 可以被**多层**同时使用（侧栏整块 + 里面的选中指示块），
  * 只要两者都只是"读"这块层、没有谁再 `layerBackdrop` 录一遍，就不会形成
  * glass-on-glass 的自采样循环 —— 官方教程警告的是"在 drawBackdrop 之后又
- * layerBackdrop 同一块内容"（RenderThread SIGSEGV），那是 `exportedBackdrop`
- * 参数存在的理由。本工程不碰那个参数，靠**共用同一个源**绕开整类问题。
+ * layerBackdrop 同一块内容"（RenderThread SIGSEGV），那是 [exportedBackdrop]
+ * 参数存在的理由。
+ *
+ * **2026-10-15 起本工程用上了 [exportedBackdrop]**（侧栏「胶囊 → 水滴」那一层），
+ * 走的是**单向** DAG：本体读内容区、导出成 A；浮层读 A、自身不再导出。见下文的导出小节。
  *
  * @param surfaceColor 蒙版色：它决定可读性，深色主题下宜用白色低透明度。
  * @param alpha 蒙版不透明度。**这是拉出层次的主要手段**：同一块背景层上，
@@ -147,6 +151,32 @@ fun Modifier.deskGlassSource(backdrop: LayerBackdrop?): Modifier =
  *
  * 本函数因此是 `@Composable` 的：它要读 CompositionLocal。所有调用点都在组合期，
  * 不受影响；但**不能再在 `drawBehind {}` 这类绘制期 lambda 里调它**。
+ *
+ * ---------------------------------------------------------------------------
+ * 导出（`exportedBackdrop`）：给"想采样本体的浮层"用（2026-10-15 新增）
+ *
+ * 库里 `drawBackdrop(..., exportedBackdrop = layer)` 会把**本节点自己的绘制**
+ * 录进 `layer.graphicsLayer`：`onDrawBehind → drawBackdropLayer → onDrawSurface → onDrawFront`
+ * （见库的 `DrawBackdropModifier.kt:316-347`）。于是浮层拿 `layer` 当 backdrop 采样时，
+ * 采到的就是"本体这一层玻璃"，而不是本体背后的内容区 —— 侧栏「静止胶囊 + 按下的水滴透镜」
+ * 正是靠这条实现的（水滴采侧栏本体，不是采内容区）。
+ *
+ * ⚠️ **导出内容里没有 `drawContent()`**：子节点（图标/文字）**不会**进导出层，只有玻璃本体、
+ * surface 与 front。所以：
+ *   · 想被浮层采样到的**描边必须画在 [onDrawFront]（或 [onDrawSurface]）里** ——
+ *     光用 `Modifier.border()` 画的那一条不会被导出，浮层里就看不到它弯折；
+ *   · 浮层里想显示图标/文字，只能**自己再画一份**（导出里没有）。
+ *
+ * 单向 DAG，别绕回来：本体只读"内容区 backdrop"、导出成 A；浮层只读 A、且**自身
+ * `exportedBackdrop` 必须传 null**。任何一层同时"读 A 又导出成 A"就是自采样，会给成环
+ * 打开口子（官方警告的 RenderThread SIGSEGV）。
+ *
+ * OFF/LOW 的静态路径（上面的 `this.background(...)` 分支）**不建层**，导出无从谈起 ——
+ * 传进来的 [exportedBackdrop] / [onDrawFront] 在这条路径上被忽略。
+ *
+ * @param exportedBackdrop 非 null 时，把本节点导出的玻璃层录进它，供上层浮层采样。
+ *        **默认 null = 不导出**，与本参数加入前行为一致。
+ * @param onDrawFront 玻璃最前一层（画在内容之后）。需要进导出的描边放这里。
  */
 @Composable
 fun Modifier.deskGlassSurface(
@@ -155,6 +185,8 @@ fun Modifier.deskGlassSurface(
     surfaceColor: Color = Color.White,
     alpha: Float = DeskGlass.surfaceAlpha,
     highlight: () -> Highlight = { Highlight.Default },
+    exportedBackdrop: LayerBackdrop? = null,
+    onDrawFront: (DrawScope.() -> Unit)? = null,
 ): Modifier {
     val tier = LocalEffectTier.current
 
@@ -165,6 +197,7 @@ fun Modifier.deskGlassSurface(
 
     // OFF 与 LOW 共用这条**静态**路径：不采样背景、不建层，只铺一层纯色半透明底。
     // 两块地（侧栏胶囊 0.12 / 选中块 0.26）因此都还看得见，只是不再有模糊与折射。
+    // 不建层 = 没有导出，[exportedBackdrop] / [onDrawFront] 在这里被忽略。
     if (tier == EffectTier.OFF || tier == EffectTier.LOW) {
         return this.background(surfaceColor.copy(alpha = alpha), shape())
     }
@@ -187,7 +220,9 @@ fun Modifier.deskGlassSurface(
             }
         },
         highlight = highlight,
+        exportedBackdrop = exportedBackdrop,
         onDrawSurface = { drawRect(surfaceColor.copy(alpha = alpha)) },
+        onDrawFront = onDrawFront,
     )
 }
 

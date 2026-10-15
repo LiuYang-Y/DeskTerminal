@@ -38,16 +38,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.backdrops.LayerBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
@@ -67,7 +75,6 @@ import com.qingke.desk.core.ui.indicatorAlpha
 import com.qingke.desk.shell.ShellItem
 import kotlinx.coroutines.launch
 import kotlin.math.abs
-import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
@@ -86,58 +93,64 @@ private const val SIDEBAR_DARK_UNDERLAY_ALPHA = 0.55f
 /**
  * 玻璃透镜侧栏 —— 侧栏 [SideBar] 的实现本体。
  *
- * 需求（用户口径）：镜片比单个图标略大、镜内图标被放大且染成强调色、带折射与彩色边缘、
- * 按下/拖动时镜片再放大一点、拖动连续跟手、抬手回弹吸附最近一项；
- * 侧栏本体是深色半透明胶囊 + 细描边 + 高光。
+ * 需求（用户口径）：**静止时是内嵌在侧栏里的一颗胶囊，按下/拖动时鼓成一颗清澈水滴** ——
+ * 水滴里能看到被光学弯折的**侧栏本体**（含左右边框线穿进去弯折），镜内图标被放大且染成强调色，
+ * 高档带真色散；抬手回弹吸附最近一项。
  *
  * ---------------------------------------------------------------------------
- * 为什么镜内图标是"重画一份"而不是"采样侧栏的像素"
+ * 结构：**侧栏本体导出 railBackdrop + 水滴透镜作平级兄弟**（2026-10-15 重构）
  *
- * 官方 Interactive Glass Bottom Bar 用 `drawBackdrop(..., exportedBackdrop = rail)`
- * 把底栏自身录成一块层，镜片再采样它 —— 那样镜片里是**被弯折的真实像素**，
- * 拖动时还能看到邻近项被折射进来。本项目**不这么做**，两条理由：
+ * ```
+ * Box(手势 + 侧栏胶囊外形, width = itemSize + innerPadding*2)
+ *   ├─ (a) 侧栏本体：玻璃覆盖整条 rail，导出成 railBackdrop
+ *   │        Modifier.deskGlassSurface(backdrop = 内容区backdrop,
+ *   │                                 exportedBackdrop = railBackdrop,
+ *   │                                 onDrawFront = { 画 rail 那条 1dp 细描边 })
+ *   │        └─ Column(内边距 + 各项)
+ *   └─ (b) 水滴透镜：平级兄弟，后绘制；只采 railBackdrop，自身 exportedBackdrop = null
+ *            Modifier.graphicsLayer { 按压放大 }
+ *                    .drawBackdrop(backdrop = railBackdrop, ...)
+ * ```
  *
- *   1. 真折射要 API 33（`isRuntimeShaderSupported()`，证据见
- *      docs/2026-10-13-sidebar-glass-lens-plan.md），低版本上 `lens()` 第一行就 return，
- *      采样了也看不出任何形变；
- *   2. exportedBackdrop 引入"玻璃采样玻璃"的成环风险（RenderThread 自采样 → SIGSEGV）。
- *      用同一份数据**重画一遍**替代像素副本，从根上不可能成环 ——
- *      这也是本文件不出现 exportedBackdrop 参数的原因。
- *
- * 镜内画的是"当前项 + 邻近项"（按 `i - pos` 定位），所以拖动时镜片里是**内容滚过**，
- * 与真透镜"镜内看到邻近像素"的观感接近，代价是没有色散与边缘畸变。
- *
- * ---------------------------------------------------------------------------
- * 自适应分档（2026-10-14 改：档位来源是用户设置，不是 API 等级）
- *
- * 档位一律来自 [EffectTier]（用户在设置面板选的等级 + EffectGovernor 按温度/掉帧的降级），
- * 由 [toLensTier] 映射成下面的 [LensTier]；**本文件不再读 `Build.VERSION.SDK_INT` 自己推** ——
- * 之前读它，于是设置面板切"高/中/低/关"画面完全不变，因为两条线从来不相交。
- *
- * | 档位 | 来源 | 镜片玻璃 | 彩色边缘 |
- * |---|---|---|---|
- * | [LensTier.HIGHEST] | `EffectTier.HIGH`（RuntimeShader，API 33+ 才可能被 Governor 给到） | 真折射 + 真模糊 + **真色散** | 由 shader 给出 |
- * | [LensTier.MEDIUM] | `EffectTier.MEDIUM`（RenderEffect，API 31+） | 真模糊，无折射 | 渐变描边近似 |
- * | [LensTier.LOWEST] | `EffectTier.LOW` / `EffectTier.OFF` | 半透明底 + 高光，无模糊无折射 | 渐变描边近似 |
- *
- * 前两档**都能看到**"镜内放大 + 染色 + 镜片比项大"，因为这些是自绘的，不依赖 RuntimeShader。
- * 分档只决定"折射/色散/模糊"这层增强有没有。
- *
- * [EffectTier.OFF] 更进一步：**放大、染色、描边也一起关掉**（见 [LensSideBar] 里的 `active`）——
- * 用户明确选了"关"，那就不该看到任何靠玻璃撑起来的效果。此时 backdrop 为 null
- * （[rememberDeskGlassBackdrop] 在 OFF 档返回 null），`blur()/lens()` 本来也无层可画。
- * **但侧栏胶囊与选中块本身仍在**（静态纯色底，[deskGlassSurface] 对 OFF/LOW 走同一条路径）——
- * "关闭"省掉的是采样与合成开销，不该省成"侧栏整条消失"。
+ * **严格单向 DAG**（这是本结构唯一的硬约束）：
+ *   内容区 backdrop ──(a 读)──> railBackdrop ──(b 读)──> 水滴
+ * (a) 只读"内容区 backdrop"、导出成 railBackdrop；(b) 只读 railBackdrop、**不再导出**。
+ * 没有任何一环"读同一块又写同一块"，所以不会出现官方法警告的 RenderThread 自采样 SIGSEGV。
+ * 上一版之所以完全不用 `exportedBackdrop`（只共用同一个源），是把成环风险一刀切掉了；
+ * 现在按需求把它收窄成上面这条单向链。
  *
  * ---------------------------------------------------------------------------
- * 竖向布局的溢出：**不越界**
+ * 为什么描边必须画在 `onDrawFront` 里（而不是 `Modifier.border`）
  *
- * 侧栏宽 76 = 项 64 + 内边距 6×2。镜片取 68 而不是"看起来更能装"的 72，是两条
- * 硬约束挤出来的结果（详见 [LensSpec.lensSize] 的注释）：
- *   1. 静止时居中于项，左右各占 2dp 余量 —— 仍在 76dp 的侧栏内；
- *   2. **按下放大 1.12 倍之后也不能探出侧栏**：68 × 1.12 ≈ 76.2dp，取 72 就会在
- *      施工按下的那一瞬多出 8px，压到内容区里去。
- * 想要更大的鼓出，得先解决第 2 条（缩 press 倍率或加宽侧栏），不是改个数就行。
+ * 库的导出（`DrawBackdropModifier.kt:316-347`）录的是
+ * `onDrawBehind + drawBackdropLayer + onDrawSurface + onDrawFront` —— **没有 `drawContent()`**。
+ * 也就是说：
+ *   · `Modifier.border()` 画的那条线**不进导出层**，水滴里就看不到它被弯折；
+ *   · 只有画进 `onDrawFront`（或 `onDrawSurface`）的描边才会进 railBackdrop、被水滴采样。
+ * 所以 rail 的那条 1dp 细描边改由 [railStrokeOnFront] 画在 `onDrawFront` 里。
+ *
+ * ---------------------------------------------------------------------------
+ * 为什么镜内图标仍然是"重画一份"（不是采样本体的像素）
+ *
+ * 承上：导出里**没有子内容**。railBackdrop 里只有玻璃本体 + surface + 描边，
+ * 没有图标也没有文字。若水滴只采样 railBackdrop，镜里就是一个"清澈但空"的水滴。
+ * 所以【保留】现有的镜内自绘：把所有项都画一遍（[LensGlyph]），由 graphicsLayer 统一放大。
+ * 结论：**水滴 = 真光学采样的清澈/弯折玻璃 + 自绘的放大图标**，两者各补对方缺的部分。
+ *
+ * ---------------------------------------------------------------------------
+ * 按压形变：静止内嵌 → 按下鼓出（这次**允许越界**）
+ *
+ * | 状态 | 水滴边长 | 白底 alpha |
+ * |---|---|---|
+ * | 静止 `press = 0` | `fit.itemSize`（64dp，收在 76dp 侧栏内，每边留 6dp） | 0.14 |
+ * | 按下 `press = 1` | `itemSize × (1 + 0.26) ≈ 80.6dp` | 0.02 |
+ *
+ * **上一版有一条"按下也不越出侧栏"的硬约束**（`lensSize × 1.12 ≤ 侧栏宽`，于是 lensSize 被夹到 68dp），
+ * 这一版**主动删掉**：需求要的就是"水滴鼓出侧栏边界、让左右边框线穿进水滴发生光学弯折"。
+ * 64dp × 0.26 = 每边约 8.3dp 的横向鼓出。侧栏宽 76dp、水滴中心在正中，放大到 80.6dp 后
+ * 每边已经越过 rail 边框线（38dp）约 2.3dp —— 边框线因此落进水滴内、被透镜弯折。
+ * 相应的 `LensSpec.lensSize` 与它的夹取逻辑整段删除；横向越界不做任何 clip 拦截
+ * （父级 Box 默认不裁剪，见 [LensSpec.PRESS_SCALE_EXTRA_LENS]）。
  *
  * ---------------------------------------------------------------------------
  * 每帧重组会崩（2026-10-13，真机 SIGSEGV）
@@ -150,53 +163,45 @@ private const val SIDEBAR_DARK_UNDERLAY_ALPHA = 0.55f
  * 根因：**在组合期读了动画状态**。镜内内容原本按"当前位置 ± 1.2 格"取一个窗口，
  * 列内淡出量也按当前位置算 —— 两个都在组合期读 `indicatorState.value`，
  * 于是拖动时每一帧整棵玻璃子树重组一次、图形层每帧重建一次。
- * 旧侧栏的文件头早就写了这条（"位移要在 placement 阶段，别让玻璃每帧重建"），
- * 我加镜片时把这条忘了。
  *
  * 修法（两条都用上，缺一条都不放心）：
  *   1. 所有随动画变化的量只许在 `offset {}` / `graphicsLayer {}` 这类**布局或绘制
  *      阶段**的 lambda 里读，组合期一律不读。镜内因此改成"全部项都画"，
- *      窗口不再由位置决定 —— 组合结果与位置无关。
- *   2. 低版本（LOWEST）不再给镜片单独开一层 backdrop：那层在上面本来就没效果，
- *      却要多一块 SurfaceControl。
+ *      窗口不再由位置决定 —— 组合结果与位置无关。水滴的白底 alpha 也只在
+ *      `onDrawSurface` 的绘制期 lambda 里读 `pressAmount()` 算。
+ *   2. 低版本（LOWEST）不再给水滴单独开一层 backdrop：那层在上面本来就没效果，
+ *      却要多一块 SurfaceControl。用一块随按下变淡的静态白玻璃代替（见 [waterDropGlass]）。
  *
  * 判据：拖 10 个来回 + 反复切屏，`/data/tombstones` 数量不变、进程 pid 不变。
  */
 object LensSpec {
 
-    /** 总开关。false = 回到改动前的样式（同一套代码，只是不放大、不染色、镜片回到 64dp）。 */
+    /** 总开关。false = 回到改动前的样式（同一套代码，只是不放大、不染色、水滴回到条目尺寸）。 */
     const val ENABLED: Boolean = true
 
-    /**
-     * 镜片边长。**68dp = 项 64 + 每边 2**，取值由两条约束一起定下来：
-     *
-     *   1. 静止时不越出侧栏（76dp）自不必说；
-     *   2. **按下放大到 1.12 倍时也要留在侧栏里**：68 × 1.12 ≈ 76.2dp —— 正好贴住
-     *      [DeskDimens.sideBarWidth]，多 1dp 就会在施工按下的那一瞬露出侧栏外面去。
-     *
-     * 顺带解决一个容易被忽略的问题：一格的总高是 70dp（项 64 + 间距 6），
-     * 镜片取 68dp < 70dp，静止时它落在自己那一行里、不会压到相邻项。
-     * （第一版取 72dp，静止就比一格还高 2dp，相邻项被压掉 1dp。）
-     */
-    val lensSize = 68.dp
-
-    /** 镜片圆角。取 26dp 而不是 lensSize/2：留一点直边，更像"镜片"而不是"圆点"。 */
+    /** 水滴圆角。取 26dp 而不是 itemSize/2：留一点直边，更像"水滴/镜片"而不是"圆点"。 */
     val lensCorner = 26.dp
 
-    /** 按下/拖动时镜片整体再放大的倍率增量（1.0 → 1.12）。 */
-    const val PRESS_SCALE_EXTRA: Float = 0.12f
+    /**
+     * 按下/拖动时水滴整体放大的倍率增量（1.0 → 1.26），与**镜内图标**的放大是两件事。
+     *
+     * 0.26 = 需求给的"允许横向鼓出侧栏边界"的量化：itemSize 64dp 时每边约 8.3dp。
+     * （上一版的 0.12 是为了"按下也不越界"而夹出来的，见文件头 —— 本版不需要那个约束。）
+     */
+    const val PRESS_SCALE_EXTRA_LENS: Float = 0.26f
 
-    /** 镜内内容的放大倍率：松手 / 按下。放大原点在镜片中心。 */
+    /** 镜内内容的放大倍率：松手 / 按下。放大原点在水滴中心。 */
     const val GLYPH_BOOST_IDLE: Float = 1.25f
     const val GLYPH_BOOST_PRESSED: Float = 1.45f
 
-    /** 镜片玻璃的白色蒙版不透明度。比指示块（0.26）低一点，它要"透"也要"亮"。 */
-    const val LENS_SURFACE_ALPHA: Float = 0.20f
+    /** 水滴玻璃的白色蒙版不透明度：静止 → 按下。它要"透"也要"亮"，按下时更透。 */
+    const val LENS_SURFACE_ALPHA_IDLE: Float = 0.14f
+    const val LENS_SURFACE_ALPHA_PRESSED: Float = 0.02f
 
-    /** 彩色边缘的描边宽度（LOWEST/MEDIUM 档用它近似色散）。 */
-    val chromaStroke = 1.4.dp
+    /** 水滴外缘描边宽度（真色散不可用的档位用它近似"镜片边缘"）。 */
+    val rimStroke = 1.dp
 
-    /** 镜片内缘的一圈柔光，模拟透镜聚光（纯装饰，不参与降级判定）。 */
+    /** 水滴内缘的一圈柔光，模拟透镜聚光（纯装饰，不参与降级判定）。 */
     const val innerGlowAlpha: Float = 0.10f
 
     /** HIGHEST/MEDIUM 档的背景模糊半径。 */
@@ -214,7 +219,7 @@ object LensSpec {
  */
 enum class LensTier(val label: String, val detail: String) {
     HIGHEST("最高档", "真折射 + 真色散 + 真模糊（RuntimeShader，API 33+）"),
-    MEDIUM("中档", "真模糊，无折射；彩色边缘用渐变描边近似（RenderEffect，API 31+）"),
+    MEDIUM("中档", "真模糊，无折射；水滴外缘用渐变描边近似（RenderEffect，API 31+）"),
     LOWEST("最低档", "无模糊无折射；放大/染色/描边全部自绘（API < 31）"),
 }
 
@@ -249,10 +254,9 @@ fun EffectTier.toLensTier(): LensTier = when (this) {
  * 透镜侧栏原型。
  *
  * 左右镜像**不经过这里**：整条侧栏由外层 Row 摆到屏幕另一侧，项本来就居中于侧栏
- * 内容区，所以镜片的横向位置与左右无关（第一版留过一个 `side` 参数，实测没有任何
- * 一处用到它，删掉 —— 留着只会让人以为这里藏着镜像逻辑）。
+ * 内容区，所以水滴的横向位置与左右无关。
  *
- * @param backdrop 内容区那块 LayerBackdrop（与侧栏本体共用同一个源）。
+ * @param backdrop 内容区那块 LayerBackdrop。**只给侧栏本体读**（本体再导出成 railBackdrop 给水滴）。
  * @param lensEnabled 透镜效果开关。false 时视觉回到改动前。
  */
 @OptIn(ExperimentalFoundationApi::class)
@@ -277,7 +281,8 @@ fun LensSideBar(
     availableHeightDp: Float? = null,
     /**
      * 深色底衬模式（地图漫游态专用）。见 [SideBar] 的同名参数。
-     * true 时侧栏主体玻璃改用深色磨砂底，不再采样 [backdrop]（地图采不到）。
+     * true 时侧栏主体玻璃改用深色磨砂底，不再采样 [backdrop]（地图采不到），
+     * 也因此**不做水滴采样**（没有可采样的 Compose 背景，rail 层无从导出）。
      */
     darkUnderlay: Boolean = false,
 ) {
@@ -316,15 +321,15 @@ fun LensSideBar(
 
     // 选中项的位置**必须在 [shownItems] 上找**，不能在完整的 [items] 上找：
     // 入口被截断时（fitting=false）下标会越界 —— 5 项截成 3 项、而当前屏对应第 5 项时，
-    // 这里会返回 4，接着 `indicator.animateTo(4f)` 把镜片滑到列表外面去。
-    // 找不到（被截掉的那一项正被选中）退回 0：宁可指示块停在第一项，也不要越界。
+    // 这里会返回 4，接着 `indicator.animateTo(4f)` 把水滴滑到列表外面去。
+    // 找不到（被截掉的那一项正被选中）退回 0：宁可水滴停在第一项，也不要越界。
     val selectedIndex = shownItems.indexOfFirst { it.id == selectedId }
         .let { if (it < 0) 0 else it }
 
     // 位置单位是"第几项"的浮点值，与正式侧栏一致：条目尺寸变了也不用重算动画。
     val indicator = remember { Animatable(0f) }
     val indicatorState = remember(indicator) { indicator.asState() }
-    // 按下/拖动的强度 0..1。镜片缩放与镜内放大量都由它插值 —— 一条弹簧驱动全部形变。
+    // 按下/拖动的强度 0..1。水滴缩放与镜内放大量都由它插值 —— 一条弹簧驱动全部形变。
     val press = remember { Animatable(0f) }
     val pressState = remember(press) { press.asState() }
     val scope = rememberCoroutineScope()
@@ -350,7 +355,7 @@ fun LensSideBar(
         }
     }
 
-    // 抬手回弹：press 归零，镜片缩回 1.0。与位置吸附是两条独立的弹簧。
+    // 抬手回弹：press 归零，水滴缩回 1.0。与位置吸附是两条独立的弹簧。
     LaunchedEffect(dragging) {
         press.animateTo(
             targetValue = if (dragging) 1f else 0f,
@@ -370,78 +375,58 @@ fun LensSideBar(
     // 描边同时还是侧栏胶囊的那条边，也在 `active` 里一并关掉。
     val active = lensEnabled && LensSpec.ENABLED && effectTier != EffectTier.OFF
 
-    // 镜片尺寸：开启时比项大一点，关闭时回到条目尺寸（= 改动前的指示块）。
+    // ---- 侧栏本体导出的那一层（单向 DAG 的中间节点）----------------------
     //
-    // 68dp 这个数原来是写死的，它的**约束**其实是"按下放大 1.12 倍之后不越出侧栏宽"，
-    // 而侧栏宽 = 条目边长 + 内边距×2 —— 条目边长现在按屏幕算了，这个数也得跟着算：
-    //   lensSize × 1.12 ≤ itemSize + 2×innerPadding
-    // 条目 64、内边距 6 时解得 67.86 ≈ 68，与原来的值对上。
-    // 另外夹一个 itemSize + 4 的上限，避免在很高的屏上镜片比条目大太多。
-    val lensSize = if (active) {
-        val maxByWidth = (fit.itemSize.value + DeskDimens.sideBarInnerPadding.value * 2f) /
-            (1f + LensSpec.PRESS_SCALE_EXTRA)
-        minOf(maxByWidth, fit.itemSize.value + 4f).dp
-    } else {
-        fit.itemSize
-    }
-    val lensSizePx = with(density) { lensSize.toPx() }
+    // 只在**正常态且 active** 时使用导出：darkUnderlay（地图漫游态）没有可采样的 Compose
+    // 背景（地图是独立 SurfaceView 图层），rail 层导出出来也是空的，保持现有
+    // deskGlassOverlay 深色底衬路径不变、不做水滴采样。
+    val railBackdrop = rememberLayerBackdrop()
+    val exportRail = !darkUnderlay && active
+
+    // 水滴要采样的 backdrop：
+    //   · 正常态 + active：采 railBackdrop（侧栏本体导出的玻璃 + 描边，这才是"水滴"）；
+    //   · darkUnderlay / 未 active：退回改动前那条路径（直接采内容区 backdrop / 静态指示块）。
+    val dropBackdrop = if (exportRail) railBackdrop else backdrop
+
+    // 水滴圆角：开启时大一点（镜片），关闭时回到指示块圆角。
     val lensCorner = if (active) LensSpec.lensCorner else DeskDimens.sideBarIndicatorCorner
 
     // **动画的量一律不许在组合期读**（2026-10-13 崩溃复盘，见文件头"每帧重组会崩"）：
-    // 下面两个只是"取值函数"，必须放进 offset{} / graphicsLayer{} 这类**布局或绘制阶段**
-    // 的 lambda 里调用。写在组合期 = 拖动时每帧重组整棵玻璃子树 = 每帧重建图形层，
-    // 真机上 hwui 的 SurfaceComposerClient 事务会直接 SIGSEGV。
+    // 下面两个只是"取值函数"，必须放进 offset{} / graphicsLayer{} / onDrawSurface 这类
+    // **布局或绘制阶段**的 lambda 里调用。写在组合期 = 拖动时每帧重组整棵玻璃子树 =
+    // 每帧重建图形层，真机上 hwui 的 SurfaceComposerClient 事务会直接 SIGSEGV。
     val pressAmount: () -> Float = { if (active) pressState.value else 0f }
-    // 被镜片罩住的程度：0 = 完全在镜外（列内原样画），1 = 完全在镜内（列内隐藏）。
+    // 被水滴罩住的程度：0 = 完全在镜外（列内原样画），1 = 完全在镜内（列内隐藏）。
     // 只由 index 与当前位置决定，读状态这件事发生在调用它的 graphicsLayer lambda 里。
-    val halfSpan = (lensSizePx / 2f) / stepPx
+    val halfSpan = (itemSizePx / 2f) / stepPx
     val covered: (Int) -> Float = { index ->
         if (!active) 0f
         else ((halfSpan + 0.05f - abs(indicatorState.value - index)) / LENS_FADE_SPAN)
             .coerceIn(0f, 1f)
     }
 
+    // 容器高度 = 内容列高 + 上下内边距。取**显式高度**而不是让它 wrap：
+    // 本体用 fillMaxSize() 铺满容器（玻璃要盖到内边距外面那圈），显式高度才让 fillMaxSize
+    // 有确定的边界；这个值必须与 Column 的实际高度一致，否则玻璃会与条目错位。
+    val railHeight = fit.itemSize * shownItems.size +
+        fit.gap * (shownItems.size - 1) +
+        DeskDimens.sideBarInnerPadding * 2
+
     Box(
         modifier = modifier
             // 宽度跟着**实际**条目尺寸走（原来取写死的 sideBarWidth 76dp）。
             .width(fit.itemSize + DeskDimens.sideBarInnerPadding * 2)
-            .then(
-                if (darkUnderlay) {
-                    // 地图漫游态：深色磨砂底衬。deskGlassOverlay 自带描边与漫散射光，
-                    // 所以下面那条 railStroke border 不再叠（否则是双描边）。
-                    Modifier.deskGlassOverlay(
-                        shape = RoundedCornerShape(DeskDimens.sideBarCorner),
-                        alpha = SIDEBAR_DARK_UNDERLAY_ALPHA,
-                    )
-                } else {
-                    Modifier.deskGlassSurface(
-                        backdrop = backdrop,
-                        shape = { RoundedCornerShape(DeskDimens.sideBarCorner) },
-                    )
-                }
-            )
-            .then(
-                if (darkUnderlay) {
-                    Modifier
-                } else {
-                    Modifier.border(
-                        // 这条描边是"深色半透明胶囊 + 细描边"里的一分子，属于新样式，
-                        // 所以跟着 active 一起开关：总开关关掉后要回到**改动前**的侧栏，
-                        // 连描边也不该多出来。
-                        width = if (active) 1.dp else 0.dp,
-                        brush = railStrokeBrush,
-                        shape = RoundedCornerShape(DeskDimens.sideBarCorner),
-                    )
-                }
-            )
-            .padding(DeskDimens.sideBarInnerPadding)
-            // key 里放的是 **shownItems** 而不是 items：截断后条数变了，手势闭包里
-            // 的越界判断（lastIndex）与取项（shownItems[target]）都要跟着重建，
+            .height(railHeight)
+            // 手势仍挂在容器上：拖动/点击的坐标系就是"侧栏胶囊外框"，与水滴的定位基准一致。
+            //
+            // key 里放的是 **shownItems** 而不是 items：截断后条数变了，手势闭包里的
+            // 越界判断（lastIndex）与取项（shownItems[target]）都要跟着重建，
             // 否则 pointerInput 会一直握着旧列表的那个 lambda。
             .pointerInput(shownItems, stepPx, lastIndex) {
                 detectVerticalDragGestures(
                     onDragStart = { down ->
                         dragging = true
+                        // down.y 是相对**容器（含内边距）**的坐标，减掉上内边距才落到内容列。
                         val base = floor((down.y - innerPaddingPx) / stepPx)
                             .coerceIn(0f, lastIndex.toFloat())
                         dragOrigin.value = base
@@ -471,154 +456,197 @@ fun LensSideBar(
                 )
             },
     ) {
-        // 镜片画在条目**下层**：它是"选中项后面的一块透镜"，镜内副本由它自己带。
+        // ------------------------------------------------------------------
+        // (a) 侧栏本体：玻璃盖满整条 rail，并把"自己"导出成 railBackdrop 给水滴采样。
         //
-        // （纵向定位的说明见下；条目尺寸现在由 [fit] 给，不读 DeskDimens.sideBarItemSize。）
-        //
-        // 纵向要减掉 overhang：镜片比项高 8dp，不减会让它整体偏下 4dp，
-        // 镜内副本就会与它"罩住"的那一项错开半个身位。
-        // 外层先占一个"跟条目一样大"的盒子，跟着 indicator 走；镜片再在这个盒子里
-        // 用 Alignment.Center 居中 —— **横向/纵向都不手算偏移量**。
-        //
-        // 手算的版本连错两次，记录在这里免得再回头写：
-        //   第一版 `size(68dp)` 被父级约束夹成 224px 宽（分不清它是"多大"），
-        //         配 (itemSize - lensSize)/2 的偏移就整体偏左 4dp；
-        //   第二版改成 requiredSize，宽度对了，但 `-overhang` 那个偏移在渲染时
-        //         实际落了一份两倍的位移（实测中心 262.5 vs 条目中心 269.5，偏左 2dp）。
-        // 交给 Alignment 居中，就不存在"两套算术对不上"的机会。
+        // 描边画在 onDrawFront（不是 Modifier.border）—— 只有进 front 的那条才会被导出，
+        // 水滴里才看得到左右边框线穿进去弯折。理由见文件头。
+        // ------------------------------------------------------------------
         Box(
             modifier = Modifier
-                .offset { IntOffset(0, (indicatorState.value * stepPx).roundToInt()) }
-                .size(fit.itemSize),
-            contentAlignment = Alignment.Center,
+                .fillMaxSize()
+                .then(
+                    if (darkUnderlay) {
+                        // 地图漫游态：深色磨砂底衬。deskGlassOverlay 自带描边与漫散射光，
+                        // 所以不叠 rail 描边（否则是双描边）。
+                        Modifier.deskGlassOverlay(
+                            shape = RoundedCornerShape(DeskDimens.sideBarCorner),
+                            alpha = SIDEBAR_DARK_UNDERLAY_ALPHA,
+                        )
+                    } else {
+                        Modifier.deskGlassSurface(
+                            backdrop = backdrop,
+                            shape = { RoundedCornerShape(DeskDimens.sideBarCorner) },
+                            exportedBackdrop = if (exportRail) railBackdrop else null,
+                            onDrawFront = if (active) railStrokeOnFront else null,
+                        )
+                    },
+                )
+                // LOW 档（active 但走静态路径、不会调 onDrawFront）补一条描边，
+                // 别让侧栏在低端机上丢了轮廓。MEDIUM/HIGH 档描边由 onDrawFront 负责，
+                // 这里 width=0 不画，避免双描边。
+                .then(
+                    if (!darkUnderlay && active && tier == LensTier.LOWEST) {
+                        Modifier.border(
+                            width = 1.dp,
+                            brush = railStrokeBrush,
+                            shape = RoundedCornerShape(DeskDimens.sideBarCorner),
+                        )
+                    } else {
+                        Modifier
+                    },
+                ),
         ) {
-        Box(
-            modifier = Modifier
-                // requiredSize 而不是 size：这块要**故意比条目大**，不能被父约束夹回去。
-                .requiredSize(lensSize)
-                .graphicsLayer {
-                    val s = 1f + LensSpec.PRESS_SCALE_EXTRA * pressAmount()
-                    scaleX = s
-                    scaleY = s
-                    transformOrigin = TransformOrigin.Center
-                }
-                .lensGlass(
-                    backdrop = backdrop,
-                    shape = RoundedCornerShape(lensCorner),
-                    tier = tier,
-                    active = active,
-                )
-                .border(
-                    width = if (active) LensSpec.chromaStroke else 0.dp,
-                    brush = if (active) chromaBrush else invisibleBrush,
-                    shape = RoundedCornerShape(lensCorner),
-                )
-                .clip(RoundedCornerShape(lensCorner)),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (active) {
-                // 镜内柔光：中心一点白，边缘收住，像玻璃弧面的聚光。
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.radialGradient(
-                                colors = listOf(
-                                    Color.White.copy(alpha = LensSpec.innerGlowAlpha),
-                                    Color.Transparent,
-                                ),
-                            ),
-                        ),
-                )
-
-                // **镜内不是"一项"，而是"当前项 + 邻近项"的放大副本**。
-                //
-                // 每一项用**绝对定位**放在"它相对镜片中心的位置"上：
-                //   centerY_i = lensSize/2 + (i - pos) * step
-                // 所以拖动时这些副本会整体滚过镜片，某一项进入中心就被放大 ——
-                // 而不是"一格一跳地换图标"。
-                //
-                // 为什么不用"整列 + 一个大 offset"：那样 Column 的布局高度仍是镜片高，
-                // 被 offset 推出去的内容不在 layer 边界内，实测整块不渲染（镜片里空的）。
-                // 改成一格一格绝对定位后，每项的位移都只有一两格，稳。
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            val b = LensSpec.GLYPH_BOOST_IDLE +
-                                (LensSpec.GLYPH_BOOST_PRESSED - LensSpec.GLYPH_BOOST_IDLE) *
-                                pressAmount()
-                            scaleX = b
-                            scaleY = b
-                            transformOrigin = TransformOrigin.Center
-                        },
-                ) {
-                    // **全部项都画，不按当前位置裁窗口**。
+            Column(
+                modifier = Modifier.padding(DeskDimens.sideBarInnerPadding),
+                verticalArrangement = Arrangement.spacedBy(fit.gap),
+            ) {
+                shownItems.forEachIndexed { index, item ->
+                    val selected = item.id == selectedId
+                    // 开启透镜时，镜外一律原色（染色只发生在镜内）；
+                    // 关闭时恢复改动前的规则：选中项在列内染强调色。
+                    val tint = if (!active && selected) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    }
+                    // **被水滴视野罩住的那些项，在列内淡出**：
+                    // 镜里已经有它们的放大副本，列内原样画就会叠成"双影"。
+                    // 范围取水滴半高折成的格数 + 半个淡出带宽，且是**连续**的 ——
+                    // 拖动时是渐变而不是整格突变。
                     //
-                    // 第一版按 `ceil(pos - 1.2) .. floor(pos + 1.2)` 取一个窗口，看着省事，
-                    // 但那个范围是在**组合期**由 pos 算出来的 —— pos 每帧变，这个循环
-                    // 就每帧重组，正是崩机的根因（见文件头）。现在窗口恒为 0..lastIndex，
-                    // 组合结果与位置无关；某一项画在哪，交给下面 offset 的 lambda 去算。
-                    //
-                    // 远处的项会被镜片的 clip 裁掉，只是白布局一下（5 个小图标，
-                    // 比每帧重建玻璃子树便宜得多）。
-                    for (i in 0..lastIndex) {
-                        key(i) {
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopCenter)
-                                    .offset {
-                                        IntOffset(
-                                            x = 0,
-                                            y = (
-                                                lensSizePx / 2f +
-                                                    (i - indicatorState.value) * stepPx -
-                                                    itemSizePx / 2f
-                                                ).roundToInt(),
-                                        )
-                                    },
-                            ) {
-                                LensGlyph(
-                                    item = shownItems[i],
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    fit = fit,
-                                )
-                            }
-                        }
+                    // 淡出量同样只在 graphicsLayer 的 lambda 里算（[covered] 内部读
+                    // indicatorState），否则又变成每帧重组。
+                    Box(
+                        modifier = Modifier.graphicsLayer { alpha = 1f - covered(index) },
+                    ) {
+                        LensRailItem(
+                            item = item,
+                            tint = tint,
+                            fit = fit,
+                            onClick = { onSelect(item) },
+                        )
                     }
                 }
             }
         }
-        }
 
-        Column(
-            verticalArrangement = Arrangement.spacedBy(fit.gap),
+        // ------------------------------------------------------------------
+        // (b) 水滴透镜：平级兄弟、后绘制。只读 railBackdrop，自身不导出（DAG 单向）。
+        //
+        // 外层锚盒子 = 一个"跟条目一样大"的盒子，用 offset 跟着 indicator 走；
+        // 水滴再在锚盒子里用 Alignment.Center 居中、requiredSize 到 itemSize 以上。
+        // 横向/纵向都不手算偏移量（手算的版本连错两次，见旧版注释的教训）。
+        // ------------------------------------------------------------------
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(0, (innerPaddingPx + indicatorState.value * stepPx).roundToInt()) }
+                .size(fit.itemSize)
+                .align(Alignment.TopStart),
+            contentAlignment = Alignment.Center,
         ) {
-            shownItems.forEachIndexed { index, item ->
-                val selected = item.id == selectedId
-                // 开启透镜时，镜外一律原色（染色只发生在镜内）；
-                // 关闭时恢复改动前的规则：选中项在列内染强调色。
-                val tint = if (!active && selected) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.onSurface
-                }
-                // **被镜片视野罩住的那些项，在列内淡出**：
-                // 镜片里已经有它们的放大副本，列内原样画就会叠成"双影"。
-                // 范围取镜片半高折成的格数 + 半个淡出带宽，且是**连续**的 ——
-                // 拖动时是渐变而不是整格突变。
-                //
-                // 淡出量同样只在 graphicsLayer 的 lambda 里算（[covered] 内部读
-                // indicatorState），否则又变成每帧重组。
-                Box(
-                    modifier = Modifier.graphicsLayer { alpha = 1f - covered(index) },
-                ) {
-                    LensRailItem(
-                        item = item,
-                        tint = tint,
-                        fit = fit,
-                        onClick = { onSelect(item) },
+            Box(
+                modifier = Modifier
+                    // requiredSize 而不是 size：水滴按压时要**故意鼓出**锚盒子与侧栏边界，
+                    // 不能被父约束夹回去。
+                    .requiredSize(fit.itemSize)
+                    .graphicsLayer {
+                        // 形变只在这里（绘制阶段）读 pressState：1.0（静止，收在栏内）
+                        // → 1 + 0.26（按下，鼓出侧栏约每边 8.3dp）。
+                        val s = 1f + LensSpec.PRESS_SCALE_EXTRA_LENS * pressAmount()
+                        scaleX = s
+                        scaleY = s
+                        transformOrigin = TransformOrigin.Center
+                    }
+                    .waterDropGlass(
+                        backdrop = dropBackdrop,
+                        shape = RoundedCornerShape(lensCorner),
+                        corner = lensCorner,
+                        tier = tier,
+                        active = active,
+                        pressAmount = pressAmount,
                     )
+                    // 外缘描边：真色散可用的高档位交给 shader（chromaticAberration），
+                    // 中/低档位用一条同族语言的半透明白光渐变近似。
+                    .border(
+                        width = if (active && tier != LensTier.HIGHEST) LensSpec.rimStroke else 0.dp,
+                        brush = lensRimBrush,
+                        shape = RoundedCornerShape(lensCorner),
+                    )
+                    .clip(RoundedCornerShape(lensCorner)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (active) {
+                    // 镜内柔光：中心一点白，边缘收住，像玻璃弧面的聚光。
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.radialGradient(
+                                    colors = listOf(
+                                        Color.White.copy(alpha = LensSpec.innerGlowAlpha),
+                                        Color.Transparent,
+                                    ),
+                                ),
+                            ),
+                    )
+
+                    // **镜内不是"一项"，而是"全部项的放大副本"**（导出不含子内容，故自绘）。
+                    //
+                    // 每一项用**绝对定位**放在"它相对水滴中心的位置"上：
+                    //   centerY_i = itemSize/2 + (i - pos) * step
+                    // 所以拖动时这些副本会整体滚过水滴，某一项进入中心就被放大 ——
+                    // 而不是"一格一跳地换图标"。
+                    //
+                    // 为什么不用"整列 + 一个大 offset"：那样 Column 的布局高度仍是水滴高，
+                    // 被 offset 推出去的内容不在 layer 边界内，实测整块不渲染（镜里空的）。
+                    // 改成一格一格绝对定位后，每项的位移都只有一两格，稳。
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                val b = LensSpec.GLYPH_BOOST_IDLE +
+                                    (LensSpec.GLYPH_BOOST_PRESSED - LensSpec.GLYPH_BOOST_IDLE) *
+                                    pressAmount()
+                                scaleX = b
+                                scaleY = b
+                                transformOrigin = TransformOrigin.Center
+                            },
+                    ) {
+                        // **全部项都画，不按当前位置裁窗口**。
+                        //
+                        // 第一版按 `ceil(pos - 1.2) .. floor(pos + 1.2)` 取一个窗口，看着省事，
+                        // 但那个范围是在**组合期**由 pos 算出来的 —— pos 每帧变，这个循环
+                        // 就每帧重组，正是崩机的根因（见文件头）。现在窗口恒为 0..lastIndex，
+                        // 组合结果与位置无关；某一项画在哪，交给下面 offset 的 lambda 去算。
+                        //
+                        // 远处的项会被 clip 裁掉，只是白布局一下（5 个小图标，
+                        // 比每帧重建玻璃子树便宜得多）。
+                        for (i in 0..lastIndex) {
+                            key(i) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopCenter)
+                                        .offset {
+                                            IntOffset(
+                                                x = 0,
+                                                y = (
+                                                    itemSizePx / 2f +
+                                                        (i - indicatorState.value) * stepPx -
+                                                        itemSizePx / 2f
+                                                    ).roundToInt(),
+                                            )
+                                        },
+                                ) {
+                                    LensGlyph(
+                                        item = shownItems[i],
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        fit = fit,
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -626,32 +654,35 @@ fun LensSideBar(
 }
 
 /**
- * 镜片玻璃。**按运行时档位选实现**：
+ * 水滴玻璃。**按运行时档位选实现**：
  *
- * - [LensTier.HIGHEST]：自己调库的 `drawBackdrop`，把 `chromaticAberration`/`depthEffect`
+ * - [LensTier.HIGHEST]：自己调库的 `drawBackdrop`，把 `depthEffect`/`chromaticAberration`
  *   两个开关打开 —— `core:ui` 的 [deskGlassSurface] 是统一封装，没开这两个开关，
  *   而"彩色边缘"正是靠色散给的。注意这两个 boolean **只能按位置传**：
  *   jar 里没有形参名（LocalVariableTable 为空），具名参数编译不过。
- * - [LensTier.MEDIUM]：退回 [deskGlassSurface]（真模糊生效、无折射 —— 它内部只开
- *   `vibrancy + blur`，因为 lens() 在 API 31/32 上本来就 return）。
- * - [LensTier.LOWEST]：**不再多开一层 backdrop**，用普通 Compose 画同款观感
- *   （半透明底 + 下面那层径向柔光）。低版本上 blur()/lens() 会静默 return，
- *   这层玻璃画出来**本来就没有折射也没有模糊**，却要多申请一块 SurfaceControl；
- *   真机实测每帧多这一块就把 hwui 的事务压崩了（见文件头"每帧重组会崩"）。
+ * - [LensTier.MEDIUM]：`drawBackdrop`，真模糊生效、无折射（lens() 在 API 31/32 上本来就 return）。
+ * - [LensTier.LOWEST]：**不给水滴单独开一层 backdrop**，用一块随按下变淡的静态白玻璃代替
+ *   （半透明底 + 外层那层径向柔光）。低版本上 blur()/lens() 会静默 return，
+ *   这层玻璃画出来**本来就没有折射也没有模糊**，却要多申请一块 SurfaceControl。
+ *
+ * 采样的目标由调用方给（[backdrop]）：正常态是侧栏本体导出的 `railBackdrop`，
+ * darkUnderlay / 未 active 时退回内容区 backdrop。**本函数不导出**（`exportedBackdrop`
+ * 不传 = null），保证 "读 rail 的人不再写 rail" 这条单向 DAG。
  *
  * `active=false` 有两种来源，两者都只画与改动前一致的指示块玻璃：
  *   · [LensSpec.ENABLED] / 调用方的透镜开关被关掉；
  *   · **档位是 [EffectTier.OFF]** —— 此时 [rememberDeskGlassBackdrop] 返回 null，
- *     [deskGlassSurface] 走 OFF/LOW 的静态路径，画出**一块纯色半透明底**
- *     （2026-10-14 改；此前 OFF 是"什么都不画"，结果是侧栏与选中块一起隐形）。
+ *     [deskGlassSurface] 走 OFF/LOW 的静态路径，画出**一块纯色半透明底**。
  *     所以 OFF 档看到的是"朴素的侧栏"，而不是"没有侧栏"。
  */
 @Composable
-private fun Modifier.lensGlass(
+private fun Modifier.waterDropGlass(
     backdrop: LayerBackdrop?,
     shape: Shape,
+    corner: Dp,
     tier: LensTier,
     active: Boolean,
+    pressAmount: () -> Float,
 ): Modifier {
     if (!active) {
         return this.deskGlassSurface(
@@ -660,20 +691,16 @@ private fun Modifier.lensGlass(
             alpha = DeskGlass.indicatorAlpha,
         )
     }
-    // 低版本：**不申请第二块 backdrop**。理由见本函数文档 —— 这一层在低版本上
-    // 没有任何效果（blur/lens 静默 return），只有成本（多一块 SurfaceControl）。
+    // 低版本 / 没有可采样的层：**不申请多余的一层 backdrop**。理由见本函数文档 ——
+    // 这一层在低版本上没有任何效果（blur/lens 静默 return），只有成本（多一块 SurfaceControl）。
+    // 白底 alpha 仍随按下变淡，但读它发生在**绘制期**的 drawBehind lambda 里。
     if (backdrop == null || tier == LensTier.LOWEST) {
-        return this.background(
-            color = Color.White.copy(alpha = LensSpec.LENS_SURFACE_ALPHA),
-            shape = shape,
-        )
-    }
-    if (tier != LensTier.HIGHEST) {
-        return this.deskGlassSurface(
-            backdrop = backdrop,
-            shape = { shape },
-            alpha = LensSpec.LENS_SURFACE_ALPHA,
-        )
+        return this.drawBehind {
+            drawRoundRect(
+                color = Color.White.copy(alpha = dropSurfaceAlpha(pressAmount())),
+                cornerRadius = CornerRadius(corner.toPx()),
+            )
+        }
     }
     return this.drawBackdrop(
         backdrop = backdrop,
@@ -681,22 +708,55 @@ private fun Modifier.lensGlass(
         effects = {
             vibrancy()
             blur(LensSpec.blurRadius.toPx())
-            // 位置参数：lens(height, amount, chromaticAberration, depthEffect)
-            lens(
-                LensSpec.refractionHeight.toPx(),
-                LensSpec.refractionAmount.toPx(),
-                true,
-                true,
-            )
+            // 位置参数：lens(refractionHeight, refractionAmount, depthEffect, chromaticAberration)
+            if (tier == LensTier.HIGHEST) {
+                lens(
+                    LensSpec.refractionHeight.toPx(),
+                    LensSpec.refractionAmount.toPx(),
+                    true,
+                    true,
+                )
+            }
         },
         highlight = { Highlight.Default },
-        onDrawSurface = { drawRect(Color.White.copy(alpha = LensSpec.LENS_SURFACE_ALPHA)) },
+        // 白底蒙版：静止 0.14 → 按下 0.02。alpha 只在绘制期 lambda 里读 pressAmount() 算，
+        // 组合期不读 —— 见文件头"每帧重组会崩"。
+        onDrawSurface = { drawRect(Color.White.copy(alpha = dropSurfaceAlpha(pressAmount()))) },
+    )
+}
+
+/** 水滴白蒙版的不透明度：静止 → 按下 线性插值。 */
+private fun dropSurfaceAlpha(press: Float): Float =
+    LensSpec.LENS_SURFACE_ALPHA_IDLE +
+        (LensSpec.LENS_SURFACE_ALPHA_PRESSED - LensSpec.LENS_SURFACE_ALPHA_IDLE) * press
+
+/**
+ * 侧栏本体那条 1dp 细描边，画在 `onDrawFront` 里 —— 只有画在 front 的描边会进导出层，
+ * 被水滴采样后在水滴里发生光学弯折（理由见文件头）。
+ *
+ * 用**顶层常量 lambda** 而不是内联闭包：它的引用必须跨重组稳定，否则每次重组
+ * 都会让库的 `DrawBackdropElement.equals` 判不等 → 重建节点 + `invalidateDrawCache()`。
+ */
+private val railStrokeOnFront: DrawScope.() -> Unit = {
+    val strokePx = 1.dp.toPx()
+    // 内缩半个描边宽，让整条线都落在节点内（避免外侧半像素被导出层裁掉）。
+    drawRoundRect(
+        brush = railStrokeBrush,
+        topLeft = Offset(strokePx / 2f, strokePx / 2f),
+        size = Size(size.width - strokePx, size.height - strokePx),
+        cornerRadius = CornerRadius(
+            (DeskDimens.sideBarCorner.toPx() - strokePx / 2f).coerceAtLeast(0f),
+        ),
+        style = Stroke(width = strokePx),
     )
 }
 
 /**
  * 镜内的图标 + 文字副本：与列内条目布局完全相同，只是被染色、且由外层的
- * graphicsLayer 统一放大（放大原点在镜片中心，所以"越靠中心越大"是天然出来的）。
+ * graphicsLayer 统一放大（放大原点在水滴中心，所以"越靠中心越大"是天然出来的）。
+ *
+ * 为什么还要自绘：库的导出**不含子内容**（见文件头），若只采样 railBackdrop，
+ * 水滴里就是一个"清澈但空"的玻璃，没有任何图标。这条自绘补的正是这块。
  */
 @Composable
 private fun LensGlyph(
@@ -774,21 +834,17 @@ private fun LensRailItem(
 }
 
 /**
- * 彩色边缘。HIGHEST 档由真色散给出（shader 里的 `chromaticAberration`）；
- * 低版本用**对角三色渐变描边**近似同一观感：品红 → 蓝紫 → 青。
+ * 水滴外缘的一圈柔光描边：上亮下暗，与 [deskGlassOverlay] 的描边同款语言。
+ *
+ * HIGHEST 档不用它 —— 那里靠 shader 的 `chromaticAberration` 给真色散边缘。
  */
-private val chromaBrush: Brush
-    get() = Brush.linearGradient(
+private val lensRimBrush: Brush
+    get() = Brush.verticalGradient(
         colors = listOf(
-            Color(0xFFFF4FA3),
-            Color(0xFF7B6CFF),
-            Color(0xFF3FE0D0),
+            Color.White.copy(alpha = 0.42f),
+            Color.White.copy(alpha = 0.08f),
         ),
     )
-
-/** 关掉透镜时用来"抹掉"描边的透明画刷（保持 modifier 链形状一致，避免分支里形状不同）。 */
-private val invisibleBrush: Brush
-    get() = Brush.linearGradient(listOf(Color.Transparent, Color.Transparent))
 
 /** 侧栏胶囊的细描边：上亮下暗，配合高光做出"边缘有一层薄玻璃"的意思。 */
 private val railStrokeBrush: Brush
