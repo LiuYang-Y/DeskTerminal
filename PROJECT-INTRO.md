@@ -328,8 +328,8 @@ Preview Activity 与 `ValidationDriver`）、**测试 2 文件 / 484 行**（单
 | `README.md` | 用户 / 评审 | 第三方 SDK 与权限逐条说明、数据去向、构建方式、自适应框架详解 |
 | `gemini_prompt.md` | 提问者 | 把项目交给 AI 时的配套提问模板（含"问题放在长上下文之后"的用法说明） |
 | `docs/` | 开发 | 按日期的方案与验证记录；`docs/known-issues/` 是已知问题台账 |
+| `docs/2026-10-13-music-page-design-principles.md` | 开发 | 音乐页全屏歌词舞台的落地约束（降级/可停算/帧率/可见性暂停等） |
 | `docs/2026-10-14-music-phase1-prep.md` | 开发 | 音乐模块阶段一前置材料（歌词命中率实测 + 依赖核查 + 布局草案） |
 | `docs/2026-10-14-music-phase0-qq-vip-check.md` | 决策留档 | Phase 0 第一步：会员问题核查（三个被证伪的猜测） |
 | `docs/2026-10-14-music-phase0-native-playback.md` | 决策留档 | Phase 0 第二步：原生取链接 + ExoPlayer 真机取证（五条断言 + 与 WebView 对比 + 踩坑清单） |
-| `.verify/phase0/` | 决策留档 | Phase 0 的原始探针日志、`dumpsys` 快照、采集脚本（本地留存，未入库） |
 | `.verify/phase0/` | 决策留档 | Phase 0 的原始探针日志、`dumpsys` 快照、采集脚本（本地留存，未入库） |
