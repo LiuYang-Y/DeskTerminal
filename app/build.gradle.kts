@@ -14,6 +14,13 @@ android {
         versionCode = 1
         versionName = "0.1.0"
 
+        // 多 DEX：minSdk=26 由 AGP/D8 自动分包（本工程 20 个 classes*.dex）。显式开着是为
+        // 防止将来有人以为"单 dex 够用"去掉它 —— 主 dex 已 ~65K method，单 dex 直接溢出。
+        // ⚠️ 启动崩 NoClassDefFoundError 曾被误判为"ColorOS 次级 DEX 懒加载"（错），真因是
+        // **增量 dex 缓存损坏丢了 class_def**：clean + assembleDebug --no-build-cache 才修好，
+        // 见 .workbuddy/memory/2026-10-15.md。别再加任何 DEX 预热/延时轮询。
+        multiDexEnabled = true
+
         // androidTest 用：Compose UI 测试要在**进程内**注入手势。
         // 这台基准机是 production 构建，`adb shell input` 一律被拒
         // （INJECT_EVENTS permission），所以"地图卡上横滑能不能翻页""点地图卡能不能
@@ -57,6 +64,9 @@ dependencies {
 
     implementation(project(":shell"))
     implementation(project(":feature:home"))
+    // DeskApplication.onCreate 里要尽早调 QqLog.init（文件日志 sink）。QqLog 住在 :feature:media，
+    // 而 :shell 是用 implementation（非 api）引它的 —— 传递不可见，故这里必须显式声明。
+    implementation(project(":feature:media"))
     implementation(project(":connection"))
     implementation(project(":projection:api"))
     implementation(project(":projection:carplay"))
