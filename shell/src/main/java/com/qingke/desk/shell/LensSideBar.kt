@@ -130,27 +130,27 @@ private const val SIDEBAR_DARK_UNDERLAY_ALPHA = 0.55f
  * 所以 rail 的那条 1dp 细描边改由 [railStrokeOnFront] 画在 `onDrawFront` 里。
  *
  * ---------------------------------------------------------------------------
- * 为什么镜内图标仍然是"重画一份"（不是采样本体的像素）
+ * 镜内为什么**不再自绘图标**（2026-10-17 按真机录屏 + Kyant 原版口径推翻旧结论）
  *
- * 承上：导出里**没有子内容**。railBackdrop 里只有玻璃本体 + surface + 描边，
- * 没有图标也没有文字。若水滴只采样 railBackdrop，镜里就是一个"清澈但空"的水滴。
- * 所以【保留】现有的镜内自绘：把所有项都画一遍（[LensGlyph]），由 graphicsLayer 统一放大。
- * 结论：**水滴 = 真光学采样的清澈/弯折玻璃 + 自绘的放大图标**，两者各补对方缺的部分。
+ * 旧结论说"导出里没有子内容，镜内必须自绘一份 [LensGlyph]" —— **真机录屏证伪了它**：
+ * 拖动时出现上下两个"音乐"叠在一起的重影，正是"railBackdrop 折射出的原字" +
+ * "自绘的放大副本"两套同时在画。HIGHEST 档（RuntimeShader 可用）且 railBackdrop
+ * 已导出时：**水滴内部完全不渲染 LensGlyph**，图标放大与边缘拉伸 100% 交给
+ * `lens(depthEffect = true)` 对 railBackdrop 像素做光学扭曲。
+ * 相应地，列内条目**保持正常绘制**（不再做 covered 淡出）—— 否则 railBackdrop
+ * 里没东西可折射，水滴就是空的。
+ * MEDIUM/LOWEST 档没有折射，仍走自绘路径（见 [LensGlyph]），否则镜里什么都没有。
  *
  * ---------------------------------------------------------------------------
- * 按压形变：静止内嵌 → 按下鼓出（这次**允许越界**）
+ * 按压形变：静止内嵌 → 按下鼓出（各向异性，2026-10-17）
  *
- * | 状态 | 水滴边长 | 白底 alpha |
- * |---|---|---|
- * | 静止 `press = 0` | `fit.itemSize`（64dp，收在 76dp 侧栏内，每边留 6dp） | 0.06 |
- * | 按下 `press = 1` | `itemSize × (1 + 0.22) ≈ 78.1dp` | 0.02 |
+ * | 状态 | 宽 | 高 | 白底 alpha |
+ * |---|---|---|---|
+ * | 静止 `press = 0` | `itemSize`（64dp，内嵌低调圆角块） | 同宽 | 0.14 |
+ * | 按下 `press = 1` | 侧栏总宽 × 1.22 ≈ 92.7dp（**每边越框约 8.3dp**） | `itemSize × 1.15` | 0 |
  *
- * **上一版有一条"按下也不越出侧栏"的硬约束**（`lensSize × 1.12 ≤ 侧栏宽`，于是 lensSize 被夹到 68dp），
- * 这一版**主动删掉**：需求要的就是"水滴鼓出侧栏边界、让左右边框线穿进水滴发生光学弯折"。
- * 64dp × 0.22 = 每边约 7dp 的横向鼓出。侧栏宽 76dp、水滴中心在正中，放大到 78.1dp 后
- * 每边越过 rail 边框线（38dp）约 1dp —— 边框线因此落进水滴内、被透镜弯折。
- * 相应的 `LensSpec.lensSize` 与它的夹取逻辑整段删除；横向越界不做任何 clip 拦截
- * （父级 Box 默认不裁剪，见 [LensSpec.PRESS_SCALE_EXTRA_LENS]）。
+ * 宽高两条独立插值（横向越框是需求核心：左右边框线要穿进水滴被弯折）；
+ * 白底随 press 线性清零，按住的水滴全透明。外层不做任何 clip 拦截。
  *
  * ---------------------------------------------------------------------------
  * 每帧重组会崩（2026-10-13，真机 SIGSEGV）
@@ -183,39 +183,57 @@ object LensSpec {
     val lensCorner = 26.dp
 
     /**
-     * 按下/拖动时水滴整体放大的倍率增量（1.0 → 1.22），与**镜内图标**的放大是两件事。
-     *
-     * 0.22 = 需求给的"允许横向鼓出侧栏边界"的量化：itemSize 64dp 时每边约 7dp 鼓出；
-     * 鼓出后水滴半边长 ≈ 39dp，越过侧栏边框线（半宽 38dp）约 1dp，边框因此落进水滴内、
-     * 被透镜弯折。
-     * （上一版的 0.12 是为了"按下也不越界"而夹出来的，见文件头 —— 本版不需要那个约束。）
+     * 按下时水滴**宽度** = 侧栏总宽（itemSize + 内边距×2 ≈ 76dp）× 此倍率（≈ 92.7dp）。
+     * 1.22 意味着水滴每边越过侧栏边框线（半宽 38dp）约 8.3dp —— 左右边框线整段落进
+     * 水滴内、被透镜真折射弯折。横向放大是**各向异性**的（纵向只多 15%），见
+     * [LensSideBar] 水滴 graphicsLayer 里两条插值 —— 这也是为什么不能再一条 scale 走天下。
      */
-    const val PRESS_SCALE_EXTRA_LENS: Float = 0.22f
+    const val PRESS_WIDTH_OVERSIDE: Float = 1.22f
 
-    /** 镜内内容的放大倍率：松手 / 按下。放大原点在水滴中心。 */
-    const val GLYPH_BOOST_IDLE: Float = 1.25f
-    const val GLYPH_BOOST_PRESSED: Float = 1.45f
+    /** 按下时水滴**高度** = itemSize × (1 + 此值)。纵向只是"鼓"，横向才是"越框"。 */
+    const val PRESS_HEIGHT_EXTRA: Float = 0.15f
 
     /**
-     * 水滴玻璃的白色蒙版不透明度：静止 → 按下。
-     * idle 已经压到很低（0.06）——"清澈水滴"要的就是几乎看不出白雾；
-     * 按下瞬间（press>0.01）直接打到 ~0.02，只留一点聚光高光，见 [dropSurfaceAlpha]。
+     * 水滴玻璃白色蒙版的基础不透明度（静止态）。
+     *
+     * 2026-10-17 按 Kyant 原版口径从 0.06 提到 **0.14**：静止时它是一块"内嵌在侧栏里的
+     * 低调圆角块"（比选中块 0.26 更淡），按下后按 `×(1-press)` 线性清零 ——
+     * 按住的水滴必须**全透明**，底下被折射的边框与图标才看得见（毛玻璃水滴是错的，
+     * 参考视频里"模糊拉到最左"就是这个意思）。
      */
-    const val LENS_SURFACE_ALPHA_IDLE: Float = 0.06f
-    const val LENS_SURFACE_ALPHA_PRESSED: Float = 0.02f
+    const val LENS_SURFACE_ALPHA: Float = 0.14f
+
+    /**
+     * 按压折射参数（HIGHEST 档）：`base + press × delta`。
+     * 参考口径 = Kyant 原版示例（16/28dp），按住后加码让弯折与色散更强。
+     */
+    val refractionHeightBase = 16.dp
+    val refractionHeightPress = 10.dp
+    val refractionAmountBase = 28.dp
+    val refractionAmountPress = 20.dp
+
+    /** 镜内内容的放大倍率：松手 / 按下。放大原点在水滴中心。**只在非 HIGHEST 档的自绘路径用**。 */
+    const val GLYPH_BOOST_IDLE: Float = 1.25f
+    const val GLYPH_BOOST_PRESSED: Float = 1.45f
 
     /** 水滴外缘描边宽度（真色散不可用的档位用它近似"镜片边缘"）。 */
     val rimStroke = 1.dp
 
-    /** 水滴内缘的一圈柔光，模拟透镜聚光（纯装饰，不参与降级判定）。 */
+    /** 水滴内缘的一圈柔光，模拟透镜聚光（纯装饰，不参与降级判定）。**只在非 HIGHEST 自绘路径用**。 */
     const val innerGlowAlpha: Float = 0.10f
 
-    /** HIGHEST/MEDIUM 档的背景模糊半径。 */
-    val blurRadius = 8.dp
+    /**
+     * **水滴的模糊半径 = 0（2026-10-17）** —— 水滴是清澈凸透镜，不是毛玻璃圆饼。
+     * MEDIUM 档仍要一点模糊（它没有折射，blur 是唯一的深度线索），用这个值；
+     * HIGHEST 档的 effects 里**不再出现 blur**。
+     */
+    val dropBlurRadiusMedium = 8.dp
 
-    /** 折射的"高度"与强度（HIGHEST 档才真的生效）。值越大，边框被弯折的弧度越明显。 */
-    val refractionHeight = 18.dp
-    val refractionAmount = 36.dp
+    /** 侧栏本体（Rail）的轻模糊半径：胶囊要能透出内容区，但不能糊成雾。 */
+    val railBlurRadius = 4.dp
+
+    /** 侧栏本体的深色半透明底（2026-10-17 按参考视频口径：深底 + 亮边，突出被折射的内容）。 */
+    const val RAIL_SURFACE_ALPHA: Float = 0.28f
 }
 
 /**
@@ -388,6 +406,11 @@ fun LensSideBar(
     // deskGlassOverlay 深色底衬路径不变、不做水滴采样。
     val railBackdrop = rememberLayerBackdrop()
     val exportRail = !darkUnderlay && active
+    // **真折射自给自足**模式：HIGHEST 档（RuntimeShader）+ railBackdrop 已导出。
+    // 水滴靠 lens(depthEffect) 折射 railBackdrop 里的原始条目 —— 此时：
+    //   · 水滴内**不画** LensGlyph（自绘副本 + 折射像 = 真机录屏里的"双影重字"）；
+    //   · 列内条目**不做 covered 淡出**（淡出了 railBackdrop 里就没内容可折射）。
+    val selfRefract = tier == LensTier.HIGHEST && exportRail
 
     // 水滴要采样的 backdrop：
     //   · 正常态 + active：采 railBackdrop（侧栏本体导出的玻璃 + 描边，这才是"水滴"）；
@@ -406,7 +429,9 @@ fun LensSideBar(
     // 只由 index 与当前位置决定，读状态这件事发生在调用它的 graphicsLayer lambda 里。
     val halfSpan = (itemSizePx / 2f) / stepPx
     val covered: (Int) -> Float = { index ->
-        if (!active) 0f
+        // selfRefract 时恒 0：列内必须原样画着，railBackdrop 里才有图标可供水滴折射
+        //（见文件头"镜内为什么不再自绘图标"—— 淡出列内 = 折射不出东西 = 空水滴）。
+        if (!active || selfRefract) 0f
         else ((halfSpan + 0.05f - abs(indicatorState.value - index)) / LENS_FADE_SPAN)
             .coerceIn(0f, 1f)
     }
@@ -480,9 +505,15 @@ fun LensSideBar(
                             alpha = SIDEBAR_DARK_UNDERLAY_ALPHA,
                         )
                     } else {
+                        // 2026-10-17 按参考视频口径：深色半透明底（0.28）+ 4dp 轻模糊
+                        // + 1dp 亮边描边（描边在 railStrokeOnFront）。深底让被水滴折射的
+                        // 边框线与条目在镜内对比度足够；4dp 是"轻度"——再糊就成雾了。
                         Modifier.deskGlassSurface(
                             backdrop = backdrop,
                             shape = { RoundedCornerShape(DeskDimens.sideBarCorner) },
+                            surfaceColor = Color.Black,
+                            alpha = LensSpec.RAIL_SURFACE_ALPHA,
+                            blurRadius = LensSpec.railBlurRadius,
                             exportedBackdrop = if (exportRail) railBackdrop else null,
                             onDrawFront = if (active) railStrokeOnFront else null,
                         )
@@ -509,9 +540,9 @@ fun LensSideBar(
             ) {
                 shownItems.forEachIndexed { index, item ->
                     val selected = item.id == selectedId
-                    // 开启透镜时，镜外一律原色（染色只发生在镜内）；
-                    // 关闭时恢复改动前的规则：选中项在列内染强调色。
-                    val tint = if (!active && selected) {
+                    // 选中项染强调色（2026-10-17：静止态的"内嵌低调块"口径 —— 水滴停在
+                    // 选中项上时，透过去的图标与文字是强调色；其余项一律原色）。
+                    val tint = if (selected) {
                         MaterialTheme.colorScheme.primary
                     } else {
                         MaterialTheme.colorScheme.onSurface
@@ -565,11 +596,17 @@ fun LensSideBar(
                     // 不能被父约束夹回去。
                     .requiredSize(fit.itemSize)
                     .graphicsLayer {
-                        // 形变只在这里（绘制阶段）读 pressState：1.0（静止，收在栏内）
-                        // → 1 + 0.26（按下，鼓出侧栏约每边 8.3dp）。
-                        val s = 1f + LensSpec.PRESS_SCALE_EXTRA_LENS * pressAmount()
-                        scaleX = s
-                        scaleY = s
+                        // 形变只在这里（绘制阶段）读 pressState，且**各向异性**：
+                        //   宽：itemSize → 侧栏总宽 × 1.22（≈92.7dp，每边越框 8.3dp，
+                        //        左右边框线整段穿进水滴被真折射）；
+                        //   高：itemSize → itemSize × 1.15（只是"鼓"，不越上下邻项太远）。
+                        // 一条 scale 走天下做不到这件事 —— 横向鼓出量是相对**侧栏宽**算的。
+                        val railWidthPx = itemSizePx + innerPaddingPx * 2f
+                        val targetSx = railWidthPx * LensSpec.PRESS_WIDTH_OVERSIDE / itemSizePx
+                        val targetSy = 1f + LensSpec.PRESS_HEIGHT_EXTRA
+                        val p = pressAmount()
+                        scaleX = 1f + (targetSx - 1f) * p
+                        scaleY = 1f + (targetSy - 1f) * p
                         transformOrigin = TransformOrigin.Center
                     }
                     .waterDropGlass(
@@ -589,7 +626,11 @@ fun LensSideBar(
                     ),
                 contentAlignment = Alignment.Center,
             ) {
-                if (active) {
+                // 镜内自绘内容**只在非 selfRefract 档位出现**：
+                // HIGHEST + railBackdrop 已导出时，水滴里的一切（放大图标、弯折边框、
+                // 色散）全部由 lens(depthEffect) 折射 railBackdrop 得到 —— 再画一份
+                // LensGlyph 就是真机录屏里的"双影重字"。此时这里就是一个空的透明透镜 Box。
+                if (active && !selfRefract) {
                     // 镜内柔光：中心一点白，边缘收住，像玻璃弧面的聚光。
                     Box(
                         modifier = Modifier
@@ -671,26 +712,23 @@ fun LensSideBar(
 }
 
 /**
- * 水滴玻璃。**按运行时档位选实现**：
+ * 水滴玻璃。**按运行时档位选实现**（2026-10-17 按参考视频口径重写）：
  *
- * - [LensTier.HIGHEST]：自己调库的 `drawBackdrop`，把 `depthEffect`/`chromaticAberration`
- *   两个开关打开 —— `core:ui` 的 [deskGlassSurface] 是统一封装，没开这两个开关，
- *   而"彩色边缘"正是靠色散给的。注意这两个 boolean **只能按位置传**：
- *   jar 里没有形参名（LocalVariableTable 为空），具名参数编译不过。
- * - [LensTier.MEDIUM]：`drawBackdrop`，真模糊生效、无折射（lens() 在 API 31/32 上本来就 return）。
- * - [LensTier.LOWEST]：**不给水滴单独开一层 backdrop**，用一块随按下变淡的静态白玻璃代替
- *   （半透明底 + 外层那层径向柔光）。低版本上 blur()/lens() 会静默 return，
- *   这层玻璃画出来**本来就没有折射也没有模糊**，却要多申请一块 SurfaceControl。
+ * - [LensTier.HIGHEST]：`drawBackdrop` + **只开 vibrancy 与 lens**（无 blur！静止态连
+ *   lens 也不开）。lens 参数随 press 插值：`height = 16+10p dp`、`amount = 28+20p dp`、
+ *   `depthEffect = true`（图标放大/边缘拉伸全靠它对 railBackdrop 像素做光学扭曲）、
+ *   `chromaticAberration = true`（真色散）。白蒙版 `0.14 × (1-press)` 线性清零 ——
+ *   按住的水滴是**全透明凸透镜**，不是毛玻璃圆饼。注意 lens 的两个 boolean
+ *   **只能按位置传**（jar 里没有形参名）。
+ * - [LensTier.MEDIUM]：保留 blur（这一档没有折射，blur 是唯一的深度线索），
+ *   镜内自绘副本照旧。
+ * - [LensTier.LOWEST]：不给水滴单独开一层 backdrop，用一块随按下变淡的静态白玻璃代替。
  *
  * 采样的目标由调用方给（[backdrop]）：正常态是侧栏本体导出的 `railBackdrop`，
  * darkUnderlay / 未 active 时退回内容区 backdrop。**本函数不导出**（`exportedBackdrop`
  * 不传 = null），保证 "读 rail 的人不再写 rail" 这条单向 DAG。
  *
- * `active=false` 有两种来源，两者都只画与改动前一致的指示块玻璃：
- *   · [LensSpec.ENABLED] / 调用方的透镜开关被关掉；
- *   · **档位是 [EffectTier.OFF]** —— 此时 [rememberDeskGlassBackdrop] 返回 null，
- *     [deskGlassSurface] 走 OFF/LOW 的静态路径，画出**一块纯色半透明底**。
- *     所以 OFF 档看到的是"朴素的侧栏"，而不是"没有侧栏"。
+ * `active=false` 有两种来源，两者都只画与改动前一致的指示块玻璃（见 [LensSideBar]）。
  */
 @Composable
 private fun Modifier.waterDropGlass(
@@ -723,40 +761,43 @@ private fun Modifier.waterDropGlass(
         backdrop = backdrop,
         shape = { shape },
         effects = {
-            vibrancy()
-            blur(LensSpec.blurRadius.toPx())
-            // 位置参数：lens(refractionHeight, refractionAmount, depthEffect, chromaticAberration)
+            // 两个 boolean 是位置参数：lens(refractionHeight, refractionAmount, depthEffect, chromaticAberration)
             if (tier == LensTier.HIGHEST) {
-                lens(
-                    LensSpec.refractionHeight.toPx(),
-                    LensSpec.refractionAmount.toPx(),
-                    true,
-                    true,
-                )
+                vibrancy()
+                // **没有 blur** —— 清澈凸透镜。静止（press≈0）也不开 lens：
+                // 静止态的口径是"侧栏内嵌的低调圆角块"，不是一颗常驻放大镜。
+                val p = pressAmount()
+                if (p > 0.01f) {
+                    val h = LensSpec.refractionHeightBase +
+                        LensSpec.refractionHeightPress * p
+                    val a = LensSpec.refractionAmountBase +
+                        LensSpec.refractionAmountPress * p
+                    lens(
+                        h.toPx(),
+                        a.toPx(),
+                        true,
+                        true,
+                    )
+                }
+            } else {
+                vibrancy()
+                blur(LensSpec.dropBlurRadiusMedium.toPx())
             }
         },
         highlight = { Highlight.Default },
-        // 白底蒙版：静止 0.14 → 按下 0.02。alpha 只在绘制期 lambda 里读 pressAmount() 算，
-        // 组合期不读 —— 见文件头"每帧重组会崩"。
+        // 白底蒙版：0.14 × (1 - press)，按住即全透明。alpha 只在绘制期 lambda 里
+        // 读 pressAmount() 算，组合期不读 —— 见文件头"每帧重组会崩"。
         onDrawSurface = { drawRect(Color.White.copy(alpha = dropSurfaceAlpha(pressAmount()))) },
     )
 }
 
 /**
- * 水滴白蒙版的不透明度：静止（idle 0.06，几乎无白雾）→ 按下（~0.02，只留一点聚光）。
- *
- * 用 smoothstep 让"按下一开始"就把白雾清掉：press 在 0.01 以下维持 idle，
- * 从 0.01 到 0.25 之间快速降到 pressed，之后保持 —— 这样"刚按下"立刻清澈，
- * 而不是跟着弹簧线性慢慢淡（线性会在拖动中途还留着一层雾，看着像没清干净）。
+ * 水滴白蒙版的不透明度：`0.14 × (1 - press)` 线性清零（2026-10-17 按参考口径，
+ * 旧的 smoothstep 两段式删了 —— 需求要的是"按住的瞬间开始向全透明收敛"，
+ * 线性即正确语义；静止态 0.14 是"内嵌低调块"的可见度下限）。
  */
-private fun dropSurfaceAlpha(press: Float): Float {
-    val idle = LensSpec.LENS_SURFACE_ALPHA_IDLE
-    val pressed = LensSpec.LENS_SURFACE_ALPHA_PRESSED
-    if (press <= 0.01f) return idle
-    val t = ((press - 0.01f) / 0.24f).coerceIn(0f, 1f)
-    val eased = t * t * (3f - 2f * t)
-    return pressed + (idle - pressed) * (1f - eased)
-}
+private fun dropSurfaceAlpha(press: Float): Float =
+    LensSpec.LENS_SURFACE_ALPHA * (1f - press)
 
 /**
  * 侧栏本体那条 1dp 细描边，画在 `onDrawFront` 里 —— 只有画在 front 的描边会进导出层，

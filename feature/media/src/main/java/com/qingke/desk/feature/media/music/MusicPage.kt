@@ -31,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -62,6 +63,8 @@ import com.qingke.desk.feature.media.music.online.isUsableCredential
 import com.qingke.desk.feature.media.music.spectrum.SpectrumControl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -394,16 +397,6 @@ fun MusicPage(
             safeWidthDp * MusicLayout.LYRIC_MAX_WIDTH_RATIO
         }
 
-        // 水印动态取词：当前这句歌词的**首词**（英文首词 / 中文前 2 字）。
-        // 用 derivedStateOf 包一层 —— 位置每 200ms 跳一次，但"换句"是秒级事件，
-        // 只有结果真的变了才通知，否则整页会跟着 5Hz 重组。
-        val watermarkLine: String? = remember(lyrics) {
-            derivedStateOf {
-                val (idx, _) = lyrics.focusAt(positionState.value.toInt())
-                if (idx >= 0) lyrics.lines.getOrNull(idx)?.text else null
-            }
-        }.value
-
         // 曲目元数据一路的繁转简（歌词那一路已经在解析层转过了，见 [ChineseConverter]）。
         // 用 remember 包住：`Transliterator` 是 native 调用，而这两个串会跟着
         // 位置心跳/重组被反复读到 —— 不能每次重组都转一遍。
@@ -413,8 +406,26 @@ fun MusicPage(
         val displayArtist = remember(track?.artist) {
             ChineseConverter.toSimplified(track?.artist.orEmpty())
         }
-        val watermarkText = remember(displayArtist, displayTitle, watermarkLine) {
-            watermarkTextOf(displayArtist, displayTitle, watermarkLine)
+
+        // 水印动态取词：当前这句歌词的**首词**（英文首词 / 中文前 2 字）。
+        //
+        // **2026-10-17 重写为 snapshotFlow**：原实现是
+        // `remember(lyrics) { derivedStateOf { lyrics.focusAt(positionState…) } }.value`，
+        // 真机上切歌后大衬字卡死在第一句的首词（《寂寞沙洲冷》全程"寂寞"）。
+        // 根因是**捕获失效**——derivedStateOf 的 lambda 在 `remember` 那一次组合里
+        // 把 `lyrics` / `positionState` 按**值**捕获了；切歌时 positionState 由
+        // `remember(track)` 整个换新、lyrics 也换成新 doc，而旧 derived 依赖的
+        // 是旧对象的 State 链，通知链路断在哪一段取决于两状态谁先到。
+        // snapshotFlow 每次都对**当前捕获的 State** 读值（lambda 里读的是协程作用域
+        // 内的最新闭包），并由 distinctUntilChanged 只在结果变化时发下游 ——
+        // 更新路径上不再有任何"旧捕获"环节，切歌必然跟上。
+        var watermarkText by remember { mutableStateOf("") }
+        LaunchedEffect(lyrics, displayArtist, displayTitle) {
+            snapshotFlow { lyrics.focusAt(positionState.value.toInt()).first }
+                .map { idx -> if (idx >= 0) lyrics.lines.getOrNull(idx)?.text else null }
+                .map { line -> watermarkTextOf(displayArtist, displayTitle, line) }
+                .distinctUntilChanged()
+                .collect { watermarkText = it }
         }
 
         MusicBackdrop(

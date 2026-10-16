@@ -333,7 +333,10 @@ fun NaviSearchLayer(
             SearchBar(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(start = 20.dp, bottom = 14.dp)
+                    // bottom 32dp（2026-10-17，原 14dp）：地图左下角有高德 Logo（含"高德地图"
+                    // 字样的一整块品牌区），14dp 时搜索胶囊左下缘正好压在 Logo 上。
+                    // 抬过 Logo 的高度带（约 24dp）+ 间隙，两者完全错开。
+                    .padding(start = 20.dp, bottom = SEARCH_BAR_BOTTOM_DP)
                     .widthIn(max = metrics.searchBarMaxWidth),
                 onToggle = { state.expanded = true },
             )
@@ -353,7 +356,7 @@ fun NaviSearchLayer(
                     // 两者同一行放不下 —— 靠纵向错开而不是靠"祈祷宽度不超"。
                     // （原来注释里写的"内容区 786"是某台机器的宽度，换机即失效；
                     //   现在这个判断不再依赖任何具体数字。）
-                    .padding(end = 20.dp, bottom = 14.dp + SEARCH_BAR_HEIGHT + 10.dp),
+                    .padding(end = 20.dp, bottom = SEARCH_BAR_BOTTOM_DP + SEARCH_BAR_HEIGHT + 10.dp),
                 metrics = metrics,
                 destination = destination,
                 routeState = routeState,
@@ -990,6 +993,16 @@ private fun RouteOptionRow(
 //   · 会被屏幕影响的，全部挪进 [NaviMetrics]，由 [rememberNaviMetrics] 算。
 
 private val SEARCH_BAR_HEIGHT = 44.dp
+
+/**
+ * 收起态搜索条离内容区底边的高度。
+ *
+ * 14dp 时搜索胶囊的左下缘正好压在地图左下角的**高德 Logo**（品牌区高度约 24dp）上。
+ * 32dp = Logo 高度带 + 一点余量，Logo 与搜索胶囊完全错开。路线预览卡的纵向锚点
+ * 也从它起算（`SEARCH_BAR_BOTTOM_DP + SEARCH_BAR_HEIGHT + 10.dp`），两者一起抬。
+ */
+private val SEARCH_BAR_BOTTOM_DP = 32.dp
+
 private val ROW_HEIGHT = 48.dp
 private val ROUTE_ROW_HEIGHT = 52.dp
 

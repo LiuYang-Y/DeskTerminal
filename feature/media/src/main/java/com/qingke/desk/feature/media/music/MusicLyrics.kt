@@ -147,15 +147,33 @@ fun Watermark(
         }
     }
 
-    // 上一句的字。**动画结束后才更新**：交叉过程中它必须保持旧值，
-    // 否则两层会画成同一句话（那看起来就是"没换"）。
-    var prev by remember { mutableStateOf(text) }
+    // 交叉换字（2026-10-17 改为取消安全）。
+    //
+    // 旧实现把"旧词"放在一个 `prev` 状态里、**动画结束后才推进** —— 动画被下一次换词
+    // 打断时（LaunchedEffect(text) 重启会取消旧协程）prev 停在更早的词上，cross 却
+    // 停在半路；若新词恰好等于这个陈旧 prev，早退分支直接跳过 snap，cross 永远停在
+    // 半路的 alpha 上。真机表现即"大衬字卡死/半透明叠字"。
+    //
+    // 现在换词瞬间就同步推进：`fading` 存"正在淡出的那个词"，`current` 立即指向新词，
+    // 动画只负责 alpha。任何一次打断都会被下一条协程重新 snap 起点收拾干净；
+    // 新词与 current 相同时（同一句的词重复出现）显式清掉 fading 残留再早退。
+    var current by remember { mutableStateOf(text) }
+    var fading by remember { mutableStateOf<String?>(null) }
     val cross = remember { Animatable(1f) }
     LaunchedEffect(text) {
-        if (prev == text) return@LaunchedEffect
+        if (text == current) {
+            // 同词重复到来：清掉上一次可能被打断留下的半路状态，别让两层挂在中间 alpha。
+            if (fading != null || cross.value < 1f) {
+                fading = null
+                cross.snapTo(1f)
+            }
+            return@LaunchedEffect
+        }
+        fading = current
+        current = text
         cross.snapTo(0f)
         cross.animateTo(1f, tween(WATERMARK_SWAP_MS))
-        prev = text
+        fading = null
     }
     val crossValue = cross.value.coerceIn(0f, 1f)
 
@@ -169,21 +187,21 @@ fun Watermark(
 
     // 交叉的两层**各按自己的文字算字号**：旧词 `OneRepublic`、新词 `Yeah`，
     // 用同一个字号会让其中一个明显不合适。
-    val fitSizePx = remember(text, fitWidthPx, textSizePx) {
-        fitTextSize(measurePaint, text, textSizePx, fitWidthPx, minSizePx)
+    val fitSizePx = remember(current, fitWidthPx, textSizePx) {
+        fitTextSize(measurePaint, current, textSizePx, fitWidthPx, minSizePx)
     }
-    val prevFitSizePx = remember(prev, fitWidthPx, textSizePx) {
-        fitTextSize(measurePaint, prev, textSizePx, fitWidthPx, minSizePx)
+    val prevFitSizePx = remember(fading, fitWidthPx, textSizePx) {
+        fitTextSize(measurePaint, fading ?: current, textSizePx, fitWidthPx, minSizePx)
     }
 
     // 旧词先画、新词后画（新词压在上面）：交叉期才像"换"，不像"叠"。
     // 稳态时只画一层 —— 不留一层 alpha=0 的空绘制。
-    val layers: List<Triple<String, Float, Float>> = if (prev == text || crossValue >= 1f) {
-        listOf(Triple(text, 1f, fitSizePx))
+    val layers: List<Triple<String, Float, Float>> = if (fading == null || crossValue >= 1f) {
+        listOf(Triple(current, 1f, fitSizePx))
     } else {
         listOf(
-            Triple(prev, 1f - crossValue, prevFitSizePx),
-            Triple(text, crossValue, fitSizePx),
+            Triple(fading ?: current, 1f - crossValue, prevFitSizePx),
+            Triple(current, crossValue, fitSizePx),
         )
     }
 

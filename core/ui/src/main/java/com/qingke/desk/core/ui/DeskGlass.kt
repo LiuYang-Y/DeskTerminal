@@ -187,6 +187,8 @@ fun Modifier.deskGlassSurface(
     highlight: () -> Highlight = { Highlight.Default },
     exportedBackdrop: LayerBackdrop? = null,
     onDrawFront: (DrawScope.() -> Unit)? = null,
+    /** 本层自己的模糊半径。默认取 [DeskGlass.blurRadius]；侧栏本体用 4dp 轻模糊（2026-10-17）。 */
+    blurRadius: Dp = DeskGlass.blurRadius,
 ): Modifier {
     val tier = LocalEffectTier.current
 
@@ -210,7 +212,7 @@ fun Modifier.deskGlassSurface(
         effects = {
             // 顺序照官方教程：先提饱和，再模糊，最后是边缘折射。
             vibrancy()
-            blur(DeskGlass.blurRadius.toPx())
+            blur(blurRadius.toPx())
             // lens() 内部第一行就是 `if (!isRuntimeShaderSupported()) return`，
             // MEDIUM 档（API 31/32 只有 RenderEffect）调它等于白跑一趟。
             // 跳过它还有个附带好处：调用方不用去猜"折射到底生效了没有"——
