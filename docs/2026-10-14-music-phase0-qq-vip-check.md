@@ -5,7 +5,7 @@
 
 > ### 凭证红线（本次遵守方式）
 > 本文件**不含**任何凭证值：无 Cookie、无 `musickey`、无 UIN、无会话密钥、无签名 URL。
-> 凭证只在**本机内存**里被读取一次（解密本机已有的 `.verify/folia/src/.auth-state/`），
+> 凭证只在**本机内存**里被读取一次（解密本机已有的 `.verify/` 下会话存档），
 > 用完即弃，未落任何仓库/文档/日志。文中所有读数据只有三类：**布尔**（有/无）、
 > **码率前缀**（M500/M800/F000）、**字节数**。
 
@@ -15,9 +15,9 @@
 
 | # | 问题 | 结论 | 证据强度 |
 | - | --- | --- | --- |
-| 1 | 登录账号类型 | **QQ 通道**（修复 `/login/channels` 后用 QQ 扫码）；凭证 `loginType = 2`，与 folia 源码注释「`qq` 通道送 `tmeLoginType 6`、收回 `loginType 2`」一致 | 文档 + 会话实测 |
+| 1 | 登录账号类型 | **QQ 通道**（修复 `/login/channels` 后用 QQ 扫码）；凭证 `loginType = 2`，与上游参考实现注释「`qq` 通道送 `tmeLoginType 6`、收回 `loginType 2`」一致 | 文档 + 会话实测 |
 | 2 | 会员标志字段 | 凭证里**没有**可靠的会员标志（`isPrized = -1`，全项目零处消费）。**权威判据是"能不能取到 320k / 无损"**，不是任何单一标志位 | 实测 |
-| 3 | `new_json=0` 打错了哪个字段 | **没有**。它改的是**搜索接口**（`c.y.qq.com/soso/...`），与取链接完全无关；且 folia 应用侧**根本没调用**那条路由。**它不可能是"会员歌/链接解析异常"的原因** | 三处证伪 |
+| 3 | `new_json=0` 打错了哪个字段 | **没有**。它改的是**搜索接口**（`c.y.qq.com/soso/...`），与取链接完全无关；且应用侧**根本没调用**那条路由。**它不可能是"会员歌/链接解析异常"的原因** | 三处证伪 |
 | 4 | **会员歌能否拿到完整 CDN URL** | **能。** 付费歌（`paypay=1`）实测 **20/20** 取到非空链接，其中抽查的 8 首**实际字节数 = 接口声明的全曲大小**（非 0.92 MB 试听片段）；无损（严格 VIP）**4/4** 取到 | 实测（本机合法凭证） |
 | 5 | 是否触发停止条件 | **未触发**。合法凭证下能拿到会员歌 → 可以继续第二步 | — |
 
@@ -30,8 +30,8 @@
 
 ### 1.1 通道 = QQ（不是微信）
 
-先前记录（`.verify/folia/report/10-一加PKR110跑通与QQ登录修复.md`）已定案：
-"扫码跳微信"的根因是前端拿到的是**微信码**（`/login/channels` 落到 serverless、只声明 wechat），
+先前记录（`.verify/` 下 2026-10-14 的登录修复报告）已定案：
+"扫码跳微信"的根因是前端拿到的是**微信码**（`/login/channels` 落到短生命周期服务端、只声明 wechat），
 把 `/login/channels` 改成声明 `qq` 之后，二维码由 `≈63 KB jpeg` 变为 `≈598 B png`（QQ 码），
 登录成功、昵称 786。
 
@@ -45,10 +45,10 @@
 | `musickey` 有效期 | 约 **+59 天** |
 | 会话 `expiresAt` | 约 **+2 天** |
 
-`loginType = 2` 与 folia 源码注释一致（`qqProvider.ts`）：
+`loginType = 2` 与上游参考实现的源码注释一致（`qqProvider.ts`）：
 > `qq` 是 QQ 扫码登录通道的 canonical 名字（旧名 `mobile`）……协议本身没变：**仍送 `tmeLoginType 6`、收回 `loginType 2`**。
 
-⚠️ 一条容易误读的前提（folia 主题文档已澄清、此处再钉一次）：
+⚠️ 一条容易误读的前提（此处再钉一次）：
 **"扫码通道" ≠ "用什么账号登录"。** 微信码 / QQ 码都只是 QQ 音乐的一次扫码授权，
 扫完登录的仍是**同一个 QQ 音乐账号**；会员权益与歌单**跟账号走，不跟通道走**。
 
@@ -66,7 +66,7 @@
 
 ### 2.1 凭证字段（只在哪、是什么名字，不含值）
 
-登录态在本机共三处（`.verify/folia/report/02` 已审计，本次复核仍在）：
+登录态在本机共三处（`.verify/` 下 2026-10-14 已审计，本次复核仍在）：
 
 | 位置 | 字段名 | 本次用途 |
 | --- | --- | --- |
@@ -122,7 +122,7 @@ new_json: 0, /* upstream-regression: new_json=1 makes QQ search return 0 results
 
 - 全树检索（排除 `node_modules` / `dist` / `dev-dist`）：`getSearchByKey` 只出现在
   `dev/feasibility/qqApiPlugin.mjs` 的**注释**里，`.ts/.tsx` 源码**零调用**。
-- folia 应用的真实搜索走的是另一个端点（`qqLyricProvider.ts:searchQQLyrics`）：
+- 上游参考实现的真实搜索走的是另一个端点（`qqLyricProvider.ts:searchQQLyrics`）：
   `POST music.search.SearchCgiService / DoSearchForQQMusicLite`，**没有 `new_json` 参数**。
 - 也就是说：`new_json=0` 补丁只对"直接 `curl /getSearchByKey`"这条**诊断路径**有意义。
 
@@ -149,7 +149,7 @@ new_json: 0, /* upstream-regression: new_json=1 makes QQ search return 0 results
 
 ### 顺手证伪掉我自己的一个假设（`media_mid` 漏读）
 
-我在 folia 里发现一处**真实的字段错配**：`searchQQLyrics` 把搜索结果映射成 `SongResult` 时
+我在上游参考实现里发现一处**真实的字段错配**：`searchQQLyrics` 把搜索结果映射成 `SongResult` 时
 **没带 `mediaMid`**，而 `normalizeQqSong` 读的是 `file.media_mid` / `item.mediaMid` /
 `providerData.mediaMid` —— 全都取不到，于是 `mediaId` 为空，`filename` 第二段退回 `songmid`。
 
@@ -158,7 +158,7 @@ new_json: 0, /* upstream-regression: new_json=1 makes QQ search return 0 results
 | `mediaId` 取值 | 128k | 320k |
 | --- | --- | --- |
 | `media_mid`（正确） | 非空 206 / 4.12 MB | 非空 206 / 10.29 MB |
-| `""`（folia 实际行为） | 非空 206 / 4.12 MB | 非空 206 / 10.29 MB |
+| `""`（上游参考实现的实际行为） | 非空 206 / 4.12 MB | 非空 206 / 10.29 MB |
 | `songmid`（另一种兜底） | 非空 206 / 4.12 MB | 非空 206 / 10.29 MB |
 
 三种取值**结果完全相同**（含字节数）。合理解释：QQ 服务端**返回的是规范化后的 purl**，
@@ -231,7 +231,7 @@ n = 4，拿到链接 4 首
   `playUrl[mid] = { url: purl ? domain+purl : '', error: purl ? false : '暂无播放链接' }`
 - 匿名路径（`controllers/getMusicPlay.js:117-121`）：
   `error: !item.purl && '暂无播放链接'`
-- folia 自己也在 `qqProvider.ts:305-310` 留了更正注释：
+- 上游参考实现也在 `qqProvider.ts:305-310` 留了更正注释：
   > 后端把每个文件的原因**替换成一个固定字符串**，所以空 `purl` 只能证明"这次没链接"，
   > **绝不能读成会员 / 地区 / 下架**。
 
@@ -266,7 +266,7 @@ n = 4，拿到链接 4 首
 **风险**：
 - 会话 `expiresAt` 约 **+2 天**。第二步（ExoPlayer 真机播放）应趁会话有效期内做，
   否则需要重新扫码登录。
-- `loginType=2` 的"2 是否等于 QQ"是**跟随 folia 源码注释**的判断；若要 100%
+- `loginType=2` 的"2 是否等于 QQ"是**跟随上游参考实现注释**的判断；若要 100%
   自证，需在第二步用 App 内展示的昵称/账号页核对一次。
 
 **下一步（待你拍板）**：第二步 —— 真机 ExoPlayer 播**免费歌 + 会员歌**，跑 Phase 0 五条断言

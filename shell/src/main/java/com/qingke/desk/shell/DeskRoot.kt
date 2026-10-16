@@ -7,6 +7,8 @@ import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.clickable
@@ -42,6 +44,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -372,7 +378,7 @@ fun DeskRoot(
     // 挂在组合上，页面一走就跟着走（与本项目的原生对象约束同一条理由）。
     //
     // **注入凭证源**：QQ 歌词搜索走的是 `DoSearchForQQMusicLite`，那条端点要登录态
-    // （2026-10-16 修的就是这个 —— 之前方法名写错 + 没带凭证，QQ 一字没有地落回 LRCLIB，
+    // （2026-10-16 修的就是这个 —— 之前方法名写错 + 没带凭证，一个字都搜不回来，
     // 用户看到的是"歌词不同步"）。`credentialOrNull()` 每次读盘判过期，不缓存明文。
     val lyricsRepository = remember(context, loginController) {
         LyricsRepository(context, credentialSource = loginController::credentialOrNull)
@@ -519,6 +525,32 @@ fun DeskRoot(
 
         // 设置面板的开合。它是**浮层**，不占壳层骨架的位置，关掉就什么都不剩。
         var settingsOpen by remember { mutableStateOf(false) }
+
+        // ---- 侧栏 + 齿轮「无操作自动暗淡沉浸」--------------------------------
+        //
+        // 最后一次交互后 4 秒，侧栏与右上齿轮整体降到 0.22 alpha；任意触摸立刻回 1.0。
+        // 动画值只在 graphicsLayer 的绘制期 lambda 里读 `sidebarAlpha.value`，
+        // **绝不触发重组**（与 LensSideBar 里"动画量不许在组合期读"的约束同源：
+        // 那是为了躲 SIGSEGV，这里是躲无意义的逐帧重组）。
+        //
+        // 实现要点：
+        //   · `activeTick` 只在"交互发生时"自增 —— 触发一次重组、重启下面的倒计时协程；
+        //     暗淡动画本身由 Animatable 在绘制期推进，不引起重组。
+        //   · 设置浮层展开期间（settingsOpen=true）即使过了 4 秒也不降，用户正在用它。
+        val sidebarAlpha = remember { Animatable(1f) }
+        var activeTick by remember { mutableIntStateOf(0) }
+        val poke: () -> Unit = { activeTick += 1 }
+
+        // 每次交互先亮回 1.0（180ms），再等 4 秒；4 秒内无新交互才降到 0.22（600ms）。
+        LaunchedEffect(activeTick) {
+            sidebarAlpha.animateTo(1f, tween(180))
+            delay(4_000)
+            if (!settingsOpen) {
+                sidebarAlpha.animateTo(0.22f, tween(600))
+            }
+        }
+        // 浮层开关也重置计时：打开时立刻亮；关掉后重新走 4 秒倒计时（否则关掉后停在亮态不降）。
+        LaunchedEffect(settingsOpen) { activeTick += 1 }
 
         // ---- 导航：交互状态 + 家/公司两个本地地址 ------------------------------
         //
@@ -699,7 +731,17 @@ fun DeskRoot(
         Box(
             modifier = modifier
                 .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background),
+                .background(MaterialTheme.colorScheme.background)
+                // 全屏「任意触摸即唤醒」：观测按下事件但不消费，不干扰任何子控件的手势。
+                // requireUnconsumed=false 保证即使子控件已经消费了这次按下，这里也能收到。
+                // `poke` 闭包捕获的是稳定状态（activeTick 的 MutableIntState），
+                // 即使 pointerInput 只建一次也始终指向最新状态，无需 rememberUpdatedState。
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        poke()
+                    }
+                },
         ) {
             // ---- 全屏沉浸层（2026-10-15）：音乐页 + 地图漫游态铺满物理窗口 ----
             //
@@ -834,6 +876,7 @@ fun DeskRoot(
                 ) {
                     if (sidebarSide == SidebarSide.LEFT) {
                         SideBarSlot(
+                            modifier = Modifier.graphicsLayer { alpha = sidebarAlpha.value },
                             sidebarSide = sidebarSide,
                             screen = screen,
                             glassBackdrop = glassBackdrop,
@@ -1119,6 +1162,7 @@ fun DeskRoot(
 
                     if (sidebarSide == SidebarSide.RIGHT) {
                         SideBarSlot(
+                            modifier = Modifier.graphicsLayer { alpha = sidebarAlpha.value },
                             sidebarSide = sidebarSide,
                             screen = screen,
                             glassBackdrop = glassBackdrop,
@@ -1232,7 +1276,9 @@ fun DeskRoot(
                                 top = DeskDimens.statusChipTopPadding,
                                 start = DeskDimens.statusChipSidePadding,
                                 end = DeskDimens.statusChipSidePadding,
-                            ),
+                            )
+                            // 暗淡层：齿轮随 sidebarAlpha 一起淡（与侧栏共用同一个 Animatable）。
+                            .graphicsLayer { alpha = sidebarAlpha.value },
                     ) {
                         SettingsToggleChip(
                             open = settingsOpen,
@@ -1253,7 +1299,9 @@ fun DeskRoot(
                                         if (overlayCorner) 0.dp else gearLane,
                                     end = DeskDimens.statusChipSidePadding +
                                         if (overlayCorner) gearLane else 0.dp,
-                                ),
+                                )
+                                // 暗淡层：设置面板随 sidebarAlpha 一起淡（展开期间保持亮，见倒计时协程）。
+                                .graphicsLayer { alpha = sidebarAlpha.value },
                             sidebarSide = sidebarSide,
                             keepScreenOn = keepScreenOn,
                             amapAgreed = amapAgreed,
@@ -1409,6 +1457,7 @@ private fun selectedShellId(screen: DeskScreen): String = when (screen) {
  */
 @Composable
 private fun RowScope.SideBarSlot(
+    modifier: Modifier = Modifier,
     sidebarSide: SidebarSide,
     screen: DeskScreen,
     glassBackdrop: LayerBackdrop?,
@@ -1425,7 +1474,9 @@ private fun RowScope.SideBarSlot(
     // （基准机上是左侧挖孔 39dp + 底部手势条 16dp）。按上界均分会把最后一项排到
     // 画不到的地方 —— `wm size` 模拟 800×360 dp 时第 5 项「手机投屏」实测被屏幕底边切掉。
     // 这里量的是外层 Row 真正给它的高度，是唯一不会错的那个数。
-    BoxWithConstraints(modifier = Modifier.fillMaxHeight()) {
+    // 暗淡层挂在外层 BoxWithConstraints 上：侧栏整组（含玻璃透镜）随 sidebarAlpha 一起淡入淡出。
+    // 注意这是**整组**淡，不是单独淡某一层 —— 与齿轮共用同一个 Animatable。
+    BoxWithConstraints(modifier = Modifier.fillMaxHeight().then(modifier)) {
         // maxHeight 已经是 Dp（BoxWithConstraints 给的约束），直接用。
         val railHeightDp = maxHeight.value
         SideBar(

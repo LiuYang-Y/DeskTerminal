@@ -7,7 +7,7 @@ package com.qingke.desk.feature.media.music.lyrics
  * 也和解析库的输出一致，链路上不需要任何单位转换。
  *
  * @param syllables 逐字（音节级）时间轴。**空列表 = 这行只有行级时间**。
- *                  只有本地导入的 Enhanced LRC / TTML 才可能有；LRCLIB 一律没有。
+ *                  只有本地导入的 Enhanced LRC / TTML 才有；在线来源一律没有。
  */
 data class LyricLine(
     val text: String,
@@ -29,24 +29,52 @@ data class LyricSyllable(
  * "歌词不对/没歌词"时第一个要问的问题，而它不可见就没法回答。
  */
 enum class LyricsSource(val label: String) {
-    /** QQ 音乐官方歌词（免登录，musicu.fcg 搜 songmid → fcg_query_lyric_new.fcg）。 */
+    /** QQ 音乐官方歌词（musicu.fcg 搜 songmid → fcg_query_lyric_new.fcg）。 */
     QQ_MUSIC("QQ 音乐"),
-
-    /** LRCLIB `/api/get` 精确命中。 */
-    NETWORK_GET("LRCLIB"),
-
-    /** `/api/get` 没中，回退 `/api/search` 取的第一条。 */
-    NETWORK_SEARCH("LRCLIB 搜索"),
 
     /** 用户导入的本地文件。 */
     LOCAL_FILE("本地文件"),
 
-    /** 命中本地缓存（内容本来也来自上面三者之一，这里只表示这次没走网络）。 */
+    /** 命中本地缓存（内容本来也来自上面二者之一，这里只表示这次没走网络）。 */
     CACHE("缓存"),
 
     /** 没有歌词。 */
     NONE("无"),
 }
+
+/**
+ * 一次查词的三种结局。**"确认没有"与"网络不可达"必须分开**，因为调用方
+ * （[LyricsRepository]）对它们的处理完全不同：前者值得写一条 6 小时的负缓存，
+ * 后者只配 5 分钟 —— 把瞬时失败固化成长负缓存是真 bug（2026-10-14 真机抓到）。
+ *
+ * **定义在这里而不是某个 client 内部**：它是 client ↔ repository 之间的公共契约，
+ * 被 [QqLyricsClient] 返回、被 [LyricsRepository] 消费，两边都直接 import 它。
+ */
+sealed interface FetchResult {
+
+    /** 拿到了可用的同步歌词。 */
+    data class Found(val hit: LyricsHit) : FetchResult
+
+    /** 服务器明确回答"没有"（搜不到 / 没时间戳）。重试也是这个答案。 */
+    data object NotFound : FetchResult
+
+    /** 这次根本没问成（未登录 / 超时 / 断网 / 5xx / 限流）。答案未知，稍后应重试。 */
+    data object Unreachable : FetchResult
+}
+
+/**
+ * 一次命中结果。歌词文本 + 来源 + 匹配到的曲目元信息。
+ *
+ * 由 [QqLyricsClient] 产出、[LyricsRepository] 消费。
+ */
+data class LyricsHit(
+    val syncedLyrics: String,
+    val source: LyricsSource,
+    val matchedTrack: String?,
+    val matchedArtist: String?,
+    val matchedAlbum: String?,
+    val instrumental: Boolean,
+)
 
 /**
  * 解析好的歌词文档。**页面上唯一认的歌词类型** —— 解析库（accompanist-lyrics-core）

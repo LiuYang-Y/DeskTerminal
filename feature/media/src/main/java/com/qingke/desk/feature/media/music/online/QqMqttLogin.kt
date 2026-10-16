@@ -23,11 +23,11 @@ import java.util.concurrent.TimeUnit
  * QQ 音乐扫码登录的 MQTT 通道（`qq` = QQ App 扫码，push 模式）。
  *
  * ---------------------------------------------------------------------------
- * 为什么这段能在手机上跑，而 folia 在 Cloudflare/Vercel 上跑不了
+ * 为什么手机端能持这条长连接
  *
- * 上游 `dist/src/serverless/index.js:74`：
- * `channels: qqRelay ? ['qq','wechat'] : ['wechat']` —— 有没有 qq 通道**完全由"谁能持长连接"决定**。
- * serverless 运行时挂不住一条要在二维码有效期内一直开着的 WSS，所以只能宣告 wechat。
+ * 有没有 qq 通道**完全由"谁能持长连接"决定**。
+ * 短生命周期的服务端运行时挂不住一条要在二维码有效期内一直开着的 WSS，只能宣告 wechat；
+ * 而手机 App 天然能一直持有它。
  *
  * 但那条长连接本身**没有任何服务端要求**：`wss://mu.y.qq.com/ws/handshake` 是标准 WS 握手
  * 且**不校验 Origin**（2026-10-14 手写握手实测：101 + `Sec-WebSocket-Protocol: mqtt`）。

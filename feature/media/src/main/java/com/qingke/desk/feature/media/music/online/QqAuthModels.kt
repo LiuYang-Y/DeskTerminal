@@ -2,7 +2,7 @@ package com.qingke.desk.feature.media.music.online
 
 import org.json.JSONObject
 
-/** QIMEI 的新鲜期。上游 24 小时（folia `QIMEI_TTL_MS`）。 */
+/** QIMEI 的新鲜期。上游 24 小时。 */
 internal const val QIMEI_TTL_MS = 24L * 60 * 60 * 1000
 
 /** 登录类型：QQ 音乐 App 扫码（MQTT 推送通道）。上游 `MOBILE_LOGIN_TYPE`。 */
@@ -138,8 +138,8 @@ data class QqCredential(
  * 为什么是**合成**的
  *
  * 上游不校验设备真实性 —— 它要的是一组**稳定**的标识（同一账号反复登录时设备指纹不能变，
- * 否则会触发"登录设备数超限"）。folia 造的就是一台 MI 6（`createAndroidDevice`），
- * Phase 0 那份凭证用的也是它，实测全程可用。
+ * 否则会触发"登录设备数超限"）。这里合成一台 MI 6，
+ * Phase 0 那份凭证用的就是它，实测全程可用。
  *
  * 合成还带来一个真实的隐私好处：**这台终端的真实 IMEI / Android ID 一步都不出设备**。
  *

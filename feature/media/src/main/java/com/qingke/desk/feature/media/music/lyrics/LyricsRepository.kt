@@ -27,7 +27,7 @@ sealed interface ImportResult {
 }
 
 /**
- * 歌词的取数层：内存 → 本机缓存 → LRCLIB；本地文件导入也走这里。
+ * 歌词的取数层：内存 → 本机缓存 → QQ 音乐；本地文件导入也走这里。
  *
  * 链路固定成一条顺序，界面不需要知道走的是哪一段 —— 它只要一个 [LyricsDoc]：
  *
@@ -36,9 +36,7 @@ sealed interface ImportResult {
  *    ↓ 没有
  * 本机缓存（filesDir/lyrics，跨进程）
  *    ↓ 没有，且不是"刚查过确实没有"
- * QQ 音乐（musicu.fcg 搜 mid → fcg_query_lyric_new.fcg）   ← 优先
- *    ↓ 没命中（库里没有 / 没时间戳）
- * LRCLIB /api/get → /api/search                            ← 兜底
+ * QQ 音乐（musicu.fcg 搜 mid → fcg_query_lyric_new.fcg）
  *    ↓ 命中
  * 写缓存 + 写内存 → 返回
  * ```
@@ -49,7 +47,6 @@ sealed interface ImportResult {
  */
 class LyricsRepository(
     context: Context,
-    private val client: LrcLibClient = LrcLibClient(),
     private val credentialSource: suspend () -> QqCredential? = { null },
 ) {
 
@@ -66,7 +63,7 @@ class LyricsRepository(
     private val memory = LruCache<String, LyricsDoc>(MEMORY_CAPACITY)
 
     /**
-     * 歌词也走 QQ 音乐。**凭证要注入**：`DoSearchForQQMusicLite` 需要登录态
+     * 歌词走 QQ 音乐。**凭证要注入**：`DoSearchForQQMusicLite` 需要登录态
      * （见 [QqLyricsClient] 的类注释），把壳层那份凭证源接上之后 QQ 才真正生效。
      *
      * `by lazy` 的理由：这个仓库在未登录时也会被构造，而凭证源在 `LyricsRepository`
@@ -105,18 +102,7 @@ class LyricsRepository(
         // 一首明明在库里的歌，因为拉取时恰好断网，之后 6 小时全显示"未找到"）。
         // "确认没有"与"这次没问成"在这里分叉，各自落到不同时长的负缓存上。
         //
-        // 取数顺序：**QQ 音乐优先、LRCLIB 兜底**。QQ 自家歌词最全、时间戳最准，
-        // 且自带繁简统一；LRCLIB 常对港台歌手存罗马字、中文歌词偶尔缺失 —— 它是兜底。
-        //
-        // **关键修正（2026-10-16）：QQ「这次没问成」(Unreachable) 不能就地判死刑。**
-        // 旧逻辑在 QQ Unreachable 时直接返回 `LyricsDoc.Offline` 且不再试 LRCLIB，于是
-        // 「QQ 抽风几秒 / 被地域过滤 / 偶发超时」就会让用户卡在「网络暂时不可用」好几分钟。
-        // 正确做法见下面 `val qq` 之后的说明：QQ 不论 NotFound 还是 Unreachable 都继续走
-        // LRCLIB 兜底，只有 LRCLIB 也 Unreachable 才真返回 Offline。
-        // QQ 优先，但**不在 QQ 失败时早退**：QQ 明确「库里没有 / 没时间戳」(NotFound)
-        // 或「这次没问成」(Unreachable) 都继续走 LRCLIB 兜底 —— 一个来源不可达不代表
-        // 另一个也挂。QQ 失败时也不写任何负缓存，避免挡住下面 LRCLIB 的命中；
-        // 负缓存由 LRCLIB 那一支按 NotFound / Unreachable 各自落。
+        // 取数来源：**QQ 音乐**（唯一来源，2026-10-16 起）。
         val qq = qqLyrics.fetch(
             title = track.title,
             artist = track.artist,
@@ -124,17 +110,7 @@ class LyricsRepository(
             durationSec = if (track.hasDuration) track.durationMs / 1000L else 0L,
         )
         QqLog.i(TAG, "lyrics[$key] QQ -> ${verdict(qq)} (title=${track.title} artist=${track.artist})")
-        if (qq is FetchResult.Found) return@withContext persistFound(key, qq.hit, track.durationMs)
-        // qq 为 NotFound / Unreachable：不早退，落到 LRCLIB 兜底。
-
-        val result = client.fetch(
-            title = track.title,
-            artist = track.artist,
-            album = track.album,
-            durationSec = if (track.hasDuration) track.durationMs / 1000L else 0L,
-        )
-        QqLog.i(TAG, "lyrics[$key] LRCLIB -> ${verdict(result)}")
-        when (result) {
+        when (qq) {
             is FetchResult.NotFound -> {
                 cache.markMissing(key)
                 LyricsDoc.Empty
@@ -145,7 +121,7 @@ class LyricsRepository(
                 LyricsDoc.Offline
             }
 
-            is FetchResult.Found -> persistFound(key, result.hit, track.durationMs)
+            is FetchResult.Found -> persistFound(key, qq.hit, track.durationMs)
         }
     }
 
@@ -158,9 +134,8 @@ class LyricsRepository(
 
     /**
      * 命中处理：写缓存 + 写内存，解析失败（客户端判据与解析器不一致）按"没有"处理。
-     * QQ 与 LRCLIB 两条命中路径共用同一套落地逻辑，抽出来避免重复两遍。
      */
-    private fun persistFound(key: String, hit: LrcLibClient.Hit, durationMs: Long): LyricsDoc {
+    private fun persistFound(key: String, hit: LyricsHit, durationMs: Long): LyricsDoc {
         val doc = LyricsParser.parseSynced(hit.syncedLyrics, hit.source, durationMs)
         if (doc == null) {
             // 客户端判据说"有时间轴"，解析器却说"没有" —— 两者不一致时以解析器为准，

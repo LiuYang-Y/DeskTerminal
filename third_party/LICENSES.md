@@ -39,7 +39,7 @@
 | 项 | 原因 |
 | --- | --- |
 | `com.mocharealm.accompanist:lyrics-ui` | AAR minSdk=29 > 本项目 26；POM 挂 8 个 `org.jetbrains.compose.*`，会重开 `:core:ui` 排除过的坑。只用 `lyrics-core` |
-| **folia（AGPL-3.0）的任何代码** | 本仓库一行都不允许出现。评估结论：QQ 协议包 MIT 可移植，但 folia 上层应用 AGPL 照搬即传染整仓；WebView 里两层混跑同样被咬住。法律结构已定方向：路线 D 自研（Compose + 系统媒体会话），无 AGPL 接触面。`archive/folia-webview-probe` 分支上的探针代码是**自己写的**，无 folia 源码，随分支留存不进 master |
+| **任何 AGPL-3.0 许可的代码** | 本仓库一行都不允许出现。AGPL 照搬即传染整仓。音乐路线已定方向：自研（Compose + 系统媒体会话），无 AGPL 接触面 |
 
 ## 备注
 

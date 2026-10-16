@@ -424,15 +424,6 @@ fun MusicPage(
             driftY = driftY,
         )
 
-        Watermark(
-            text = watermarkText,
-            size = metrics.watermarkSize,
-            alpha = if (tier == EffectTier.OFF) WATERMARK_ALPHA_OFF else WATERMARK_ALPHA,
-            driftX = driftX,
-            driftY = driftY,
-            modifier = Modifier.align(Alignment.Center),
-        )
-
         WaveRings(
             spec = wave,
             accent = visual.accent,
@@ -447,13 +438,28 @@ fun MusicPage(
         // ---- 前景层：吃安全内边距 ------------------------------------------
         //
         // 一切**可读、可点**的东西都在这一层里：状态卡 / 歌词 / 角标 / HUD /
-        // 登录浮层 / 选歌抽屉。上面的背景层（渐变光场 / 水印 / 声波圆环）
+        // 登录浮层 / 选歌抽屉。上面的背景层（渐变光场 / 声波圆环）
         // 全窗口铺着，侧栏浮在整页之上时，这层内边距保证控件不被它压住。
+        //
+        // 背景大衬字（Watermark）也放进这一层、作为最底层元素：它与主歌词（LyricStage）
+        // **共用同一个安全区中心**（同一 centerX）。原来它挂在全窗口层、按全屏居中，
+        // 而歌词在安全区内居中 —— 侧栏在任一侧时两者中心错开，看着像"大字没对正"。
+        // 现在两者都落在安全区里，严格同心（见 LyricStage 的类注释）。
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(contentSafePadding),
         ) {
+            // 大衬字作为前景层的底层（最先声明、z 序最低），中心与安全区一致。
+            Watermark(
+                text = watermarkText,
+                size = metrics.watermarkSize,
+                alpha = if (tier == EffectTier.OFF) WATERMARK_ALPHA_OFF else WATERMARK_ALPHA,
+                driftX = driftX,
+                driftY = driftY,
+                modifier = Modifier.fillMaxSize(),
+            )
+
             if (track == null) {
                 MusicStatusCard(
                     status = status,

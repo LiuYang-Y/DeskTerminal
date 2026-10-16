@@ -43,18 +43,18 @@ private const val TAG = "DeskQqLyrics"
  * `u.y.qq.com/cgi-bin/musicu.fcg?data={comm,req:{…}}`，方法名写成了
  * `DoSearchForQQMusicDesktop` —— **那是错的**（见 `docs/2026-10-14-music-phase0-qq-vip-check.md`
  * §3 证伪二：应用侧真实搜索走的是 `DoSearchForQQMusicLite`，且**需要凭证**）。
- * 错方法名 + 无凭证 → 上游返回空 → `searchSongMid` 静默 null → 整条 QQ 优先被架空、
- * 悄悄回退 LRCLIB；中文歌在 LRCLIB 常匹配到别的版本，用户看到的就是"歌词不同步"。
+ * 错方法名 + 无凭证 → 上游返回空 → `searchSongMid` 静默 null → 永远取不到 QQ 歌词；
+ * 中文歌词若走了别的源常匹配到别的版本，用户看到的就是"歌词不同步"。
  *
  * 所以搜索这一步与取链接/取歌单走**同一个** `musicu.fcg` POST 传输层：
  * 同一份 `comm`（QIMEI / OpenUDID / authst）、同一个 `Cookie: qm_keyst=…`、
  * 同一套错误码判据。`DoSearchForQQMusicLite` 需要凭证这条也在那里被满足。
  *
  * ---------------------------------------------------------------------------
- * 为什么是"QQ 优先、LRCLIB 兜底"而不是反过来
+ * 为什么歌词**只**走 QQ 音乐
  *
- * QQ 音乐自家的歌词最全、时间戳最准，而且**自带繁简统一**（我们在解析层之外先转一次简体，
- * 与 LRCLIB 走同一出口）。LRCLIB 常对港台歌手存罗马字、中文歌词偶尔缺失 —— 它是兜底。
+ * QQ 音乐自家的歌词最全、时间戳最准，而且**自带繁简统一**（我们在解析层之外先转一次简体）。
+ * 它播放的歌，歌词也来自同一家 —— 版本天然一致，不会出现"歌词不同步"。
  *
  * ---------------------------------------------------------------------------
  * 凭证从哪来（以及"没登录"时怎么办）
@@ -70,14 +70,13 @@ private const val TAG = "DeskQqLyrics"
  * 它在新版上游下**大概率搜不到**，但作为降级它不会 crash，也不会假装成功。
  *
  * ---------------------------------------------------------------------------
- * 命中判据（与 LRCLIB 同一条）
+ * 命中判据
  *
- * 返回文本**必须含有效时间戳**（`LyricsParser.looksSynced`）才认；否则宁可回退 LRCLIB，
+ * 返回文本**必须含有效时间戳**（`LyricsParser.looksSynced`）才认；否则宁可返回"未找到"，
  * 也不要把一份"没有时间轴的歌词"塞进界面 —— 那是本项目最警惕的"它在工作、但工作得不对"。
  *
  * ---------------------------------------------------------------------------
- * 网络实现与 LRCLIB 同一套 OkHttp（理由见 [LrcLibClient] 的类注释）：
- * 小米 11 Ultra 上 `HttpURLConnection` 取歌词稳定失败，统一走 OkHttp 才真正联网。
+ * 网络实现走 OkHttp（与库加载/取链同一套 TLS/连接栈）：
  *
  * @param context 只用来取设备档案（[QqDeviceFactory]，首次会写一份合成档案）。
  *                本类只留 `applicationContext` —— 它被 `remember` 在组合里活很久。
@@ -94,7 +93,7 @@ class QqLyricsClient(
     private val appContext: Context? = context?.applicationContext
 
     /**
-     * 同 [LrcLibClient]：歌词取数统一走 OkHttp（与库加载/取链同一套 TLS/连接栈）。
+     * 歌词取数统一走 OkHttp（与库加载/取链同一套 TLS/连接栈）。
      * 原 `HttpURLConnection` 在小米 11 Ultra 上取歌词稳定 IOException，换成 OkHttp 才真正联网。
      */
     private val httpClient = OkHttpClient.Builder()
@@ -136,7 +135,7 @@ class QqLyricsClient(
                 return@withContext FetchResult.NotFound
             }
             FetchResult.Found(
-                LrcLibClient.Hit(
+                LyricsHit(
                     syncedLyrics = simplified,
                     source = LyricsSource.QQ_MUSIC,
                     matchedTrack = title,
@@ -173,7 +172,7 @@ class QqLyricsClient(
         }
         QqLog.i(TAG, "搜索返回 ${list.length()} 条（'$title' / '$artist'）")
         if (list.length() == 0) return null
-        // 优先挑歌手名能对上的那一条（与 LRCLIB 同一条口径：同名别家歌压下去）。
+        // 优先挑歌手名能对上的那一条（同名别家歌压下去）。
         // 上游字段名两代之间有漂移，`mid` 与 `songmid` 都兜住。
         for (i in 0 until list.length()) {
             val item = runCatching { list.getJSONObject(i) }.getOrNull() ?: continue
@@ -184,7 +183,7 @@ class QqLyricsClient(
             QqLog.i(TAG, "候选[$i] mid=$mid singer='$singerName'${if (matched) " ← 歌手命中" else ""}")
             if (matched) return mid
         }
-        // 一条也没对上歌手名：退而取第一条。这是 LRCLIB 兜底之外的最后一档，
+        // 一条也没对上歌手名：退而取第一条。这是最后一档候选，
         // **不是"命中"** —— 它仍然要过 `looksSynced` 判据。
         val first = midOf(runCatching { list.getJSONObject(0) }.getOrNull() ?: return null)
         if (first.isEmpty()) {
@@ -236,7 +235,7 @@ class QqLyricsClient(
             list
         } catch (e: Exception) {
             // 上游拒绝（QqProtocolException）/ 网络失败都到这里。**不重试、不猜原因**：
-            // 如实记一条 W 日志，交给上层落 LRCLIB 兜底。
+            // 如实记一条 W 日志，交由上层决定"未找到"还是"网络不可用"。
             QqLog.w(TAG, "带凭证搜索失败：${e.javaClass.simpleName}: ${e.message}")
             null
         }
@@ -330,7 +329,7 @@ class QqLyricsClient(
             .joinToString("/")
     }
 
-    /** 设备档案（惰性读盘）。失败不抛：搜索降级，歌词落 LRCLIB 兜底。 */
+    /** 设备档案（惰性读盘）。失败不抛：搜索降级为匿名查询。 */
     private fun ensureDevice(): QqDeviceProfile? {
         device?.let { return it }
         val ctx = appContext ?: return null
@@ -405,7 +404,7 @@ class QqLyricsClient(
      * @param swallowNetworkFailure 网络层失败时返回 null（true）还是抛 [NetworkUnavailable]（false）。
      *
      * 两种都要，因为两条调用点的语义不同：取歌词那一步"没拿到"与"没问成"都是回 null
-     * （上层会落 LRCLIB 兜底，见 [LyricsRepository]）；而搜索那一步"没问成"必须一路
+     * （上层统一按 [FetchResult] 结局处理，见 [LyricsRepository]）；而搜索那一步"没问成"必须一路
      * 冒到 [fetch] 变成 [FetchResult.Unreachable] —— 否则未登录时会被记成"这首歌没有歌词"。
      */
     private fun get(url: String, referer: String?, swallowNetworkFailure: Boolean): String? {

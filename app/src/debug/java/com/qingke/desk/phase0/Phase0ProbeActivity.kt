@@ -260,7 +260,7 @@ class Phase0ProbeActivity : Activity() {
         })
 
         p.setMediaItem(MediaItem.fromUri(url))
-        // 单曲循环：与 folia 那次 30 分钟功耗测试**同条件**（单曲循环）。
+        // 单曲循环：与既有的 30 分钟功耗测试**同条件**（单曲循环）。
         // 这也是必须的 —— 目标曲目只有 269s，不循环的话 4 分半后就是 ENDED + 静止，
         // 30 分钟窗口里后半段测到的是"空转"而不是"播放"。
         p.repeatMode = Player.REPEAT_MODE_ONE
@@ -407,7 +407,7 @@ class Phase0ProbeActivity : Activity() {
     )
 
     /**
-     * music.vkey.GetVkey / UrlGetVkey。与 folia 的 callMusicu 同形：
+     * music.vkey.GetVkey / UrlGetVkey。与 QqMusicuApi 同形：
      * 一次 POST，body = { comm, req_0:{module,method,param} }，凭证在 Cookie 头里。
      * **没有签名参数** —— 这一条是原生移植成本的关键（见报告）。
      */

@@ -2,7 +2,10 @@ package com.qingke.desk.feature.media.music
 
 import android.graphics.BlurMaskFilter
 import android.graphics.Paint
+import android.graphics.RenderEffect
+import android.graphics.Shader
 import android.graphics.Typeface
+import android.os.Build
 import android.text.Layout
 import android.text.SpannableStringBuilder
 import android.text.StaticLayout
@@ -29,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.graphicsLayer
@@ -283,22 +287,23 @@ private const val WATERMARK_SWAP_MS = 600
  * 不写死 dp —— 两台在役机器的内容区宽差 120 dp。
  *
  * ---------------------------------------------------------------------------
- * 切句过渡：600 ms 双层交叉 + 横向微舒展（全 API 版本同一套代码）
+ * 切句过渡：600 ms 双层交叉 + 横向舒展 + 纵向微撑（全 API 版本同一套代码）
  *
  * 参考视频的换句不是"上一下一"，而是**两层叠着换**：
  *   · 旧句：整体淡出（1 → 0），横向**往外张**（1.00 → [LINE_SCALE_OUT_END]），
  *     模糊从 0 加重到 [BLUR_OUT_DP] —— 像被推散；
- *   · 新句：从 [LINE_SCALE_IN_START] **收进来**（到 1.00），模糊从 [BLUR_IN_DP] 消散到 0 ——
- *     像被收拢、对上焦。
- * 横向只动 6~8%，纵向 `scaleY` 恒为 1：纵向缩放会改变两行折句的观感高度，
- * 整块跟着"呼吸"就变成了布局变化，而不是过渡。
+ *   · 新句：从 [LINE_SCALE_IN_START] **收进来**（到 1.00），纵向从 [LINE_SCALE_IN_START_Y]
+ *     撑到 1.00，模糊从 [BLUR_IN_DP] 消散到 0 —— 像被收拢、对上焦。
+ * 横向动 12%、纵向动 8%：纵向只在新句做**极轻微的撑开**，是"对焦推近"的观感，
+ * 不是整块呼吸 —— 幅度小到不会改变两行折句的观感高度。
  *
  * 单一时间轴 [LINE_SWAP_MS] = 600 ms（旧版是"前半淡出 160 + 后半淡入 160"，
  * 合计 320 ms 在真机上快得看不出交叉，只像闪一下）。
  *
- * 模糊走 [BlurMaskFilter] + `drawIntoCanvas` 的原生 Paint 绘制（见 [LyricLineText]）——
- * **API 1 起就有的能力**，小米（API 30）与一加（API 36）跑的是同一份代码、同一个效果。
- * 曾经按 API 31 分岔（RenderEffect vs 双层残影妥协）已废除：妥协即阉割。
+ * 模糊**两套实现、同一观感**（见 [LyricLineText]）：
+ *   · API 31+ 走 Compose 原生的 `RenderEffect.createBlurEffect`（真高斯，DECAL 钳制）；
+ *   · API 30（小米）退回 `BlurMaskFilter` + `drawIntoCanvas` 的原生 Paint 绘制。
+ * 两者都只在过渡期出现、稳态（进度 ≥ [SHARPEN_AT]）立即清零，不残留虚边。
  *
  * 过渡只由**行号**触发，不由逐字扫描触发：后者每 200ms 变一次 annotated 串，
  * 拿它当键会让每一句都在反复播过渡动画。
@@ -420,10 +425,12 @@ fun LyricStage(
                         maxWidth = maxLineWidth,
                         color = lyricColor,
                         alpha = 1f - p,
-                        // 往外张（1.00 → 1.06）：旧句是"被推散"。
+                        // 往外张（1.00 → 1.12）：旧句是"被推散"。
                         // 反过来缩小会让它像往屏幕里退，与"飘走"的观感相反。
                         scaleX = 1f + (LINE_SCALE_OUT_END - 1f) * p,
                         blurDp = BLUR_OUT_DP * p,
+                        // 旧句纵向恒为 1.00（只有横向散开）。
+                        scaleY = 1f,
                     )
                 }
                 LyricLineText(
@@ -434,8 +441,10 @@ fun LyricStage(
                     color = lyricColor,
                     // 稳态（没有过渡）恒为 1；过渡中从 0 长到 1。
                     alpha = p,
-                    // 从 1.08 收进来（新句是"被收拢"）。
+                    // 从 1.12 收进来（新句是"被收拢"）。
                     scaleX = LINE_SCALE_IN_START - (LINE_SCALE_IN_START - 1f) * p,
+                    // 纵向从 0.92 撑到 1.00（"被推近对焦"），与横向收拢同步。
+                    scaleY = LINE_SCALE_IN_START_Y + (1f - LINE_SCALE_IN_START_Y) * p,
                     // 最后 8% 直接把模糊清零（[SHARPEN_AT]）：插值到 0 会在 0~2dp 那一段
                     // 停很久（人眼对这段最敏感），看起来像"糊了很久才突然清楚"。
                     blurDp = if (p >= SHARPEN_AT) 0f else BLUR_IN_DP * (1f - p),
@@ -449,19 +458,22 @@ fun LyricStage(
 private const val LINE_SWAP_MS = 600
 
 /** 换句时旧句模糊的最大半径（dp）。比新句略小：它是"散开"，不是"糊住"。 */
-private const val BLUR_OUT_DP = 20f
+private const val BLUR_OUT_DP = 28f
 
 /** 换句时新句模糊的起始半径（dp）。略大于 [BLUR_OUT_DP] —— 新句要"从更虚的地方收进来"。 */
-private const val BLUR_IN_DP = 22f
+private const val BLUR_IN_DP = 30f
 
 /** 新句的模糊在进度到这一比例时直接归零。见 [LyricStage] 里 `blurDp` 的注释。 */
 private const val SHARPEN_AT = 0.92f
 
 /** 旧句横向展开的终值（1.00 → 这个值）。 */
-private const val LINE_SCALE_OUT_END = 1.06f
+private const val LINE_SCALE_OUT_END = 1.12f
 
 /** 新句横向收拢的起始值（这个值 → 1.00）。 */
-private const val LINE_SCALE_IN_START = 1.08f
+private const val LINE_SCALE_IN_START = 1.12f
+
+/** 新句纵向从 0.92 撑到 1.00：纵向也轻微"收拢对焦"，强化"被推近"的观感。 */
+private const val LINE_SCALE_IN_START_Y = 0.92f
 
 /** 还没唱到的音节的不透明度。唱过的是满色。 */
 private const val UPCOMING_SYLLABLE_ALPHA = 0.45f
@@ -504,8 +516,9 @@ private const val UPCOMING_SYLLABLE_ALPHA = 0.45f
  *   排版块再整体水平居中，所以折行后两行的中心仍在屏幕中线上。
  *   **试排（求字号）只用这个上限**：槽位宽在组合期拿不到（它是 `DrawScope` 的），
  *   而调用方保证 `maxLineWidth ≤ 槽位宽`（`MusicPage` 按安全宽 × 比例算出来）。
- * @param scaleX 横向缩放。**只缩横向**：纵向一起缩会让两行折句整块"呼吸"，
- *   那是布局变化不是过渡（见 [LyricStage] 的类注释）。
+ * @param scaleX 横向缩放。旧句 1.00 → 1.12（被推散），新句 1.12 → 1.00（被收拢）。
+ * @param scaleY 纵向缩放。仅新句过渡时从 0.92 撑到 1.00（"被推近对焦"的观感），
+ *   幅度很小、不会让两行折句整块"呼吸"；旧句与稳态恒为 1.00。
  * @param blurDp 模糊半径（dp），由调用方按过渡进度算好传进来。
  */
 @Composable
@@ -518,8 +531,14 @@ private fun LyricLineText(
     alpha: Float,
     scaleX: Float,
     blurDp: Float,
+    /** 纵向缩放。新句切句时从 0.92 撑到 1.00（"被推近对焦"），旧句恒为 1.00。 */
+    scaleY: Float = 1f,
 ) {
     val density = LocalDensity.current
+    // 真高斯模糊的开关：API 31+ 走 RenderEffect（系统级、真高斯、与 QQ 音乐同款观感）；
+    // API 30 的小米退回原生 BlurMaskFilter（见下方 drawBehind 的判据）。
+    // 两条路只走一条 —— 同时开会有双重模糊，且 RenderEffect 在 30 上不存在（运行时会崩）。
+    val useRenderEffect = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
     val textSizePx = with(density) { fontSize.toPx() }
     // StaticLayout 的行距用倍数表达：显式行高 ÷ 字号。Compose 的 lineHeight 是精确值，
     // 这里是"同一意图的最近近似"—— 布局整体在块高内居中，行距差只影响组内微偏心，
@@ -567,13 +586,29 @@ private fun LyricLineText(
             .graphicsLayer {
                 this.alpha = alpha
                 this.scaleX = scaleX
-                // 纵向恒为 1：见 KDoc。
-                this.scaleY = 1f
+                // 纵向缩放（仅新句切句时动）：旧句恒为 1.00，新句 0.92 → 1.00。
+                this.scaleY = scaleY
+                // API 31+ 用 RenderEffect 做**真高斯模糊**：在图形层对整块文字做一次模糊，
+                // 比 BlurMaskFilter 的逐字描边更"化得开"，正是参考视频里那种对焦的质感。
+                // DECAL 钳制模式：边缘不重复采样，文字四周不会出现半透明拖影。
+                // 进度到 92% 时 blurPx 已 <= 0.5，这里直接置 null（与下方 maskFilter 口径一致）。
+                this.renderEffect = if (useRenderEffect && blurPx > 0.5f) {
+                    RenderEffect.createBlurEffect(blurPx, blurPx, Shader.TileMode.DECAL)
+                        .asComposeRenderEffect()
+                } else {
+                    null
+                }
             }
             .drawBehind {
                 drawIntoCanvas { canvas ->
+                    // 非 RenderEffect 路径（API 30）才用 BlurMaskFilter 兜底；
+                    // API 31+ 的模糊交给上面的 graphicsLayer，这里不重复叠。
                     paint.maskFilter =
-                        if (blurPx > 0.5f) BlurMaskFilter(blurPx, BlurMaskFilter.Blur.NORMAL) else null
+                        if (!useRenderEffect && blurPx > 0.5f) {
+                            BlurMaskFilter(blurPx, BlurMaskFilter.Blur.NORMAL)
+                        } else {
+                            null
+                        }
                     paint.textSize = fitSizePx
                     paint.color = color.toArgb()
 

@@ -28,12 +28,11 @@ Phase 0 证明了「拿到合法凭证后，原生 ExoPlayer 能低开销地把 
 | 事实 | 出处 | 后果 |
 | --- | --- | --- |
 | `musicu.fcg` **无签名参数**，凭证只在 `Cookie` 头 | Phase 0 §2 | 一次普通 POST，`HttpURLConnection` 就够 |
-| `wss://mu.y.qq.com/ws/handshake` **标准 WS 握手、不校验 Origin** | folia topic「PWA/WebView 宿主三个硬事实」 | 客户端可自己持长连接 → **不需要 relay / Durable Object** |
+| `wss://mu.y.qq.com/ws/handshake` **标准 WS 握手、不校验 Origin** | 2026-10-14 手写握手实测（101 + `Sec-WebSocket-Protocol: mqtt`） | 客户端可自己持长连接 → **不需要 relay / Durable Object** |
 | `mobile`(=qq) 扫码是 **push** 通道（MQTT），`wechat` 是 pull | 同上 | 两条通道都可在客户端实现，本轮先做 qq |
 
-folia 之所以在 serverless 上只能用微信，是因为它的运行时挂不住长连接（`dist/src/serverless/index.js:74`：
-`channels: qqRelay ? ['qq','wechat'] : ['wechat']`）。**本项目是原生 App，长连接是免费的**，
-所以这条限制对我们不存在 —— 这是「原生重构」相对「WebView + 自建 Node」的又一笔白拿收益。
+短生命周期的服务端运行时挂不住长连接，所以只能宣告 wechat。**本项目是原生 App，长连接是免费的**，
+所以这条限制对我们不存在。
 
 ---
 
@@ -74,7 +73,7 @@ folia 之所以在 serverless 上只能用微信，是因为它的运行时挂�
 | AES-128-CBC（QIMEI payload，key=iv=16 字节 hex 串的 UTF-8） | `Cipher.getInstance("AES/CBC/PKCS5Padding")` |
 | 随机数 | `SecureRandom` |
 
-**没有 WASM、没有混淆 VM、没有 Node 专有 API** —— 与 folia 评估 §「三条可行性判据」的结论一致。
+**没有 WASM、没有混淆 VM、没有 Node 专有 API** —— 全部是标准加密原语，Kotlin 可直接复刻。
 
 ---
 
@@ -130,7 +129,7 @@ data class QqCredential(
     fun mask(): String = "uin=${musicId.take(4)}****  key=${musickey.length}字符  type=$loginType"
 }
 
-/** 合成设备档案。folia 造的就是一台 MI 6 —— 上游不校验真实性，只要求**稳定**。 */
+/** 合成设备档案。上游不校验真实性，只要求**稳定**。 */
 data class QqDeviceProfile(
     val display: String, val product: String, val device: String, val board: String,
     val model: String, val fingerprint: String, val procVersion: String,

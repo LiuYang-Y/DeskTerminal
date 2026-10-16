@@ -298,7 +298,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 音乐卡与**全屏音乐页**、Shizuku 状态指示与虚拟屏托管链路、投屏页、设置浮层。
 
 **音乐页**说明：它读的是**别的 App 正在播放**的内容（经通知使用权 + `MediaSessionManager`），
-歌词走 LRCLIB。**它自己不播放、不登录任何平台、不保存任何账号信息。**
+歌词在线抓取。**它自己不播放、不登录任何平台、不保存任何账号信息。**
 详见第四节与 `PROJECT-INTRO.md` §2。
 
 未完成 / 待接：智能家居（侧栏入口已预留 id 与分支）、投屏的真实链路

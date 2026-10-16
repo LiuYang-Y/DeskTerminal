@@ -18,9 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TileMode
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -251,10 +249,8 @@ fun rememberEffectPhase(active: Boolean, periodMs: Float): State<Float> {
  * 响度只可能来自我们自己的 `TeeAudioProcessor` —— 它挂在**自家 ExoPlayer** 的
  * AudioSink 上。而音乐页大部分时间是**外部**系统媒体会话在播（QQ 音乐 App 自己播，
  * 那个 PCM 根本不过我们的进程）。此时 `level` 恒 0，于是：
- *   · 径向渐变的每个色标 alpha 都乘 0 → **整片波完全不可见**；
- *   · 左侧那道细亮环的 alpha 是常量、半径是 `0.20W + 0.02W×bass` —— bass 恒 0，
- *     它被**冻在 0.20W**，看上去像一根静止的线。
- * 用户看到的就是"左右声波静止不动"。
+ *   · 径向渐变的每个色标 alpha 都乘 0 → **整片波完全不可见**。
+ * 用户看左右声波会"静止不动"。
  *
  * 所以这里把"页面在播"（[isPlaying]）与"有没有频谱"分开：
  * 拿不到频谱时，用一条**低频呼吸**兜底（`sin` 走 [FALLBACK_BREATH_HZ] 个周期/相位轮），
@@ -282,7 +278,6 @@ fun WaveRings(
     val density = LocalDensity.current
     val driftXPx = with(density) { driftX.toPx() }
     val driftYPx = with(density) { driftY.toPx() }
-    val sharpPx = with(density) { SHARP_RING_DP.dp.toPx() }
 
     val peak = ArtworkBackdrop.light(accent)
 
@@ -338,20 +333,6 @@ fun WaveRings(
                     tileMode = TileMode.Clamp,
                 ),
             )
-
-            // ---- 左组专属：一道细亮环 ----
-            //
-            // 参考视频左侧有一条 1.2 dp 的锐利白圈压在整片柔波上。它是这一层里**唯一的硬边**，
-            // 作用就是拿"锐"去衬"柔"。半径跟**有效响度**走（0.20W → 0.22W）：
-            // 这也是外部源播放时"这根线不是死的"的唯一证据（见类注释的有效响度）。
-            if (isLeft) {
-                drawCircle(
-                    color = Color.White.copy(alpha = SHARP_RING_ALPHA),
-                    radius = w * (SHARP_RING_RADIUS_RATIO + SHARP_RING_BASS_GAIN * bass),
-                    center = center,
-                    style = Stroke(width = sharpPx, cap = StrokeCap.Round),
-                )
-            }
         }
     }
 }
@@ -398,18 +379,6 @@ private const val TROUGH_ALPHA_LEFT = 0.35f
 
 /** 右组波谷的不透明度（浅黑，亮底上太浓会显脏）。 */
 private const val TROUGH_ALPHA_RIGHT = 0.25f
-
-/** 左组锐利细亮环的笔画宽度。 */
-private const val SHARP_RING_DP = 1.2f
-
-/** 左组锐利细亮环的不透明度。 */
-private const val SHARP_RING_ALPHA = 0.28f
-
-/** 左组锐利细亮环的基础半径比例（相对宽度）。 */
-private const val SHARP_RING_RADIUS_RATIO = 0.20f
-
-/** 左组锐利细亮环半径的响度附加比例。 */
-private const val SHARP_RING_BASS_GAIN = 0.02f
 
 /** 2π。写成 `val` 而不是 `const`：`PI` 本身是 Double，转 Float 不是编译期常量。 */
 private val TWO_PI = (2.0 * PI).toFloat()

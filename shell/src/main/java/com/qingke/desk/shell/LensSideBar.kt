@@ -142,13 +142,13 @@ private const val SIDEBAR_DARK_UNDERLAY_ALPHA = 0.55f
  *
  * | 状态 | 水滴边长 | 白底 alpha |
  * |---|---|---|
- * | 静止 `press = 0` | `fit.itemSize`（64dp，收在 76dp 侧栏内，每边留 6dp） | 0.14 |
- * | 按下 `press = 1` | `itemSize × (1 + 0.26) ≈ 80.6dp` | 0.02 |
+ * | 静止 `press = 0` | `fit.itemSize`（64dp，收在 76dp 侧栏内，每边留 6dp） | 0.06 |
+ * | 按下 `press = 1` | `itemSize × (1 + 0.22) ≈ 78.1dp` | 0.02 |
  *
  * **上一版有一条"按下也不越出侧栏"的硬约束**（`lensSize × 1.12 ≤ 侧栏宽`，于是 lensSize 被夹到 68dp），
  * 这一版**主动删掉**：需求要的就是"水滴鼓出侧栏边界、让左右边框线穿进水滴发生光学弯折"。
- * 64dp × 0.26 = 每边约 8.3dp 的横向鼓出。侧栏宽 76dp、水滴中心在正中，放大到 80.6dp 后
- * 每边已经越过 rail 边框线（38dp）约 2.3dp —— 边框线因此落进水滴内、被透镜弯折。
+ * 64dp × 0.22 = 每边约 7dp 的横向鼓出。侧栏宽 76dp、水滴中心在正中，放大到 78.1dp 后
+ * 每边越过 rail 边框线（38dp）约 1dp —— 边框线因此落进水滴内、被透镜弯折。
  * 相应的 `LensSpec.lensSize` 与它的夹取逻辑整段删除；横向越界不做任何 clip 拦截
  * （父级 Box 默认不裁剪，见 [LensSpec.PRESS_SCALE_EXTRA_LENS]）。
  *
@@ -183,19 +183,25 @@ object LensSpec {
     val lensCorner = 26.dp
 
     /**
-     * 按下/拖动时水滴整体放大的倍率增量（1.0 → 1.26），与**镜内图标**的放大是两件事。
+     * 按下/拖动时水滴整体放大的倍率增量（1.0 → 1.22），与**镜内图标**的放大是两件事。
      *
-     * 0.26 = 需求给的"允许横向鼓出侧栏边界"的量化：itemSize 64dp 时每边约 8.3dp。
+     * 0.22 = 需求给的"允许横向鼓出侧栏边界"的量化：itemSize 64dp 时每边约 7dp 鼓出；
+     * 鼓出后水滴半边长 ≈ 39dp，越过侧栏边框线（半宽 38dp）约 1dp，边框因此落进水滴内、
+     * 被透镜弯折。
      * （上一版的 0.12 是为了"按下也不越界"而夹出来的，见文件头 —— 本版不需要那个约束。）
      */
-    const val PRESS_SCALE_EXTRA_LENS: Float = 0.26f
+    const val PRESS_SCALE_EXTRA_LENS: Float = 0.22f
 
     /** 镜内内容的放大倍率：松手 / 按下。放大原点在水滴中心。 */
     const val GLYPH_BOOST_IDLE: Float = 1.25f
     const val GLYPH_BOOST_PRESSED: Float = 1.45f
 
-    /** 水滴玻璃的白色蒙版不透明度：静止 → 按下。它要"透"也要"亮"，按下时更透。 */
-    const val LENS_SURFACE_ALPHA_IDLE: Float = 0.14f
+    /**
+     * 水滴玻璃的白色蒙版不透明度：静止 → 按下。
+     * idle 已经压到很低（0.06）——"清澈水滴"要的就是几乎看不出白雾；
+     * 按下瞬间（press>0.01）直接打到 ~0.02，只留一点聚光高光，见 [dropSurfaceAlpha]。
+     */
+    const val LENS_SURFACE_ALPHA_IDLE: Float = 0.06f
     const val LENS_SURFACE_ALPHA_PRESSED: Float = 0.02f
 
     /** 水滴外缘描边宽度（真色散不可用的档位用它近似"镜片边缘"）。 */
@@ -207,9 +213,9 @@ object LensSpec {
     /** HIGHEST/MEDIUM 档的背景模糊半径。 */
     val blurRadius = 8.dp
 
-    /** 折射的"高度"与强度（HIGHEST 档才真的生效）。 */
-    val refractionHeight = 14.dp
-    val refractionAmount = 26.dp
+    /** 折射的"高度"与强度（HIGHEST 档才真的生效）。值越大，边框被弯折的弧度越明显。 */
+    val refractionHeight = 18.dp
+    val refractionAmount = 36.dp
 }
 
 /**
@@ -540,7 +546,15 @@ fun LensSideBar(
         // ------------------------------------------------------------------
         Box(
             modifier = Modifier
-                .offset { IntOffset(0, (innerPaddingPx + indicatorState.value * stepPx).roundToInt()) }
+                // X 偏移补上侧栏内边距（sideBarInnerPadding），让水滴**横向居中**于侧栏内容区
+            // （与 Column 的 padding 对齐），这样按下鼓出时左右边框才会被对称地弯折；
+            // 原来 X=0 会把水滴顶到侧栏左缘，鼓出只发生在左侧、右侧留一大段空。
+            .offset {
+                IntOffset(
+                    innerPaddingPx.roundToInt(),
+                    (innerPaddingPx + indicatorState.value * stepPx).roundToInt(),
+                )
+            }
                 .size(fit.itemSize)
                 .align(Alignment.TopStart),
             contentAlignment = Alignment.Center,
@@ -572,8 +586,7 @@ fun LensSideBar(
                         width = if (active && tier != LensTier.HIGHEST) LensSpec.rimStroke else 0.dp,
                         brush = lensRimBrush,
                         shape = RoundedCornerShape(lensCorner),
-                    )
-                    .clip(RoundedCornerShape(lensCorner)),
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 if (active) {
@@ -611,7 +624,11 @@ fun LensSideBar(
                                 scaleX = b
                                 scaleY = b
                                 transformOrigin = TransformOrigin.Center
-                            },
+                            }
+                            // 只裁"镜内内容"：把滚过水滴的相邻项裁在镜片圆角内，避免双影溢出镜外；
+                            // 这是**内层**裁切，外层的 graphicsLayer 放大发生在它之外，
+                            // 所以水滴整体仍能鼓出侧栏边界（见上面删掉的 `.clip`）。
+                            .clip(RoundedCornerShape(lensCorner)),
                     ) {
                         // **全部项都画，不按当前位置裁窗口**。
                         //
@@ -725,10 +742,21 @@ private fun Modifier.waterDropGlass(
     )
 }
 
-/** 水滴白蒙版的不透明度：静止 → 按下 线性插值。 */
-private fun dropSurfaceAlpha(press: Float): Float =
-    LensSpec.LENS_SURFACE_ALPHA_IDLE +
-        (LensSpec.LENS_SURFACE_ALPHA_PRESSED - LensSpec.LENS_SURFACE_ALPHA_IDLE) * press
+/**
+ * 水滴白蒙版的不透明度：静止（idle 0.06，几乎无白雾）→ 按下（~0.02，只留一点聚光）。
+ *
+ * 用 smoothstep 让"按下一开始"就把白雾清掉：press 在 0.01 以下维持 idle，
+ * 从 0.01 到 0.25 之间快速降到 pressed，之后保持 —— 这样"刚按下"立刻清澈，
+ * 而不是跟着弹簧线性慢慢淡（线性会在拖动中途还留着一层雾，看着像没清干净）。
+ */
+private fun dropSurfaceAlpha(press: Float): Float {
+    val idle = LensSpec.LENS_SURFACE_ALPHA_IDLE
+    val pressed = LensSpec.LENS_SURFACE_ALPHA_PRESSED
+    if (press <= 0.01f) return idle
+    val t = ((press - 0.01f) / 0.24f).coerceIn(0f, 1f)
+    val eased = t * t * (3f - 2f * t)
+    return pressed + (idle - pressed) * (1f - eased)
+}
 
 /**
  * 侧栏本体那条 1dp 细描边，画在 `onDrawFront` 里 —— 只有画在 front 的描边会进导出层，

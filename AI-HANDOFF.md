@@ -41,9 +41,9 @@
   存活判据用 pidof，崩溃看 tombstone 数量，不用 ps -A | grep。
 
 当前在做：给项目加"横屏歌词舞台 + 登录在线音乐平台"的能力。
-现状：路线 D（跟随系统媒体会话 + LRCLIB 歌词）**已真机可用**；
+现状：路线 D（跟随系统媒体会话 + 在线歌词）**已真机可用**；
       路线 B（原生自研播放器）Phase 0 五条断言**已真机全过**，但产物只是 debug 探针、未合入 master。
-已否决：不要建议引入开源 Web 播放器 folia（AGPL-3.0，30 万行）走 WebView/PWA ——
+已否决：不要建议用 WebView/PWA 承载第三方 Web 播放器 ——
         已按实测否决（播放中单核 CPU 71.4% vs 原生 5.4%），详见 §8 / §9。
 ```
 
@@ -80,7 +80,7 @@
 
 **注意 `:feature:media` 的性质**：它整体是**观察者**，用 `MediaSessionManager.getActiveSessions` +
 `NotificationListenerService` 读"别的 App 正在放什么"。**它自己不播放、不登录**。
-全屏音乐页（`media/music/`）是这套观察能力的展示层，歌词走 LRCLIB。播放实现通过
+全屏音乐页（`media/music/`）是这套观察能力的展示层，歌词走 QQ 音乐在线取词。播放实现通过
 `PlaybackSource` 抽象注入 —— 路线 B（原生播放器）落地时是新增实现，不是改页面。
 
 ---
@@ -175,10 +175,9 @@
   （含 Phase 0 两步的决策留档，那是决策记录，不是代码）。
 - `master` 近期提交链：`b55b23f`（路线 D 音乐页）← `ce3a75e`（阶段一前置材料）←
   `3d583ba`（UI 自适应修复 + 效果档位打通到玻璃/透镜）← `12f6216`（改用 TextureMapView 修跨尺寸纯黑）。
-- 其他分支：`archive/folia-webview-probe`（folia WebView 探针留档）、
+- 其他分支：`archive/folia-webview-probe`（历史 WebView 探针留档，**分支名保留**，内容不进 master）、
   `wip/mapview-resize`（试修已被 `12f6216` 取代，**废弃**）。
-- `.verify/` **未入库**（验证脚本、探针日志、`dumpsys` 快照、反编译源码副本都在本地）；
-  `tools/lyrics-probe/` 入库（LRCLIB 命中率实测脚本 + 结果）。
+- `.verify/` **未入库**（验证脚本、探针日志、`dumpsys` 快照、反编译源码副本都在本地）。
   `gemini_prompt.md` 仍未 `git add`。
 
 **接手这条音乐线要注意**：Phase 0 的产物分布在
@@ -194,7 +193,7 @@
 **需求**：横屏全屏歌词舞台（渐变底 + 音频涟漪 + 逐字高亮歌词），并能登录在线音乐平台。
 
 **现状**：路线 **D** 已落地并合入 `master` —— 音乐页是**观察者**，跟随系统媒体会话显示曲目 +
-LRCLIB 歌词（`PlaybackSource` 是抽象缝，未来换原生播放实现时页面不用改）。
+在线歌词（`PlaybackSource` 是抽象缝，未来换原生播放实现时页面不用改）。
 路线 **B**（自己会播 + 能登录）在 `spike/music-phase0-qq` 上做完 Phase 0 验证，**产品代码尚未开始**。
 `gradle/libs.versions.toml` 已加 `media3 = "1.11.1"`（**只在 Google Maven，不在 Central**，
 仓库声明里必须有 `google()`），并以 `debugImplementation` 挂在 `:app` 上供探针使用。
@@ -203,14 +202,14 @@ LRCLIB 歌词（`PlaybackSource` 是抽象缝，未来换原生播放实现时�
 
 | 方案 | 结论 |
 | --- | --- |
-| 引入开源 Web 播放器 **folia**（AGPL-3.0，30 万行）走 WebView/PWA | 只做 1 个平台时**不划算**：原生 UI 只值 ~700 行，却要背 AGPL 传染 + 实测 CPU 71.4%（常温 38→52℃）+ 19 MiB 资产 + 进不了玻璃体系 |
-| folia 的"多平台登录" | folia **已内建 4 家**（QQ / 网易云 / 酷狗 / 波点）——所以"多平台"**不构成选 folia 的理由** |
-| folia 是否零后端 | **不是**：需 `VITE_QQ_API_BASE` / `VITE_NETEASE_API_BASE` / `VITE_KUGOU_API_BASE` 三个后端 |
+| 用 WebView/PWA 承载第三方 Web 播放器 | 只做 1 个平台时**不划算**：原生 UI 只值 ~700 行，却要背上层应用的 AGPL 传染 + 实测 CPU 71.4%（常温 38→52℃）+ 19 MiB 资产 + 进不了玻璃体系 |
+| 那些播放器的"多平台登录" | 上游**已内建 4 家**（QQ / 网易云 / 酷狗 / 波点）——所以"多平台"**不构成选它们的理由** |
+| 那些播放器是否零后端 | **不是**：需 `VITE_QQ_API_BASE` / `VITE_NETEASE_API_BASE` / `VITE_KUGOU_API_BASE` 三个后端 |
 | PWA / TWA 路线 | **TWA 只能加载公网 https**，离线出局；自编译 Chromium 不现实；唯一现实的"自带内核"是 GeckoView（但要换渲染引擎） |
 | 浏览器能否直连音乐平台接口 | **不能**：`u.y.qq.com` 无任何 CORS 头（实测），必须有浏览器之外的转发层。**但 QQ 的 MQTT 登录走标准 WSS 且不校验 Origin（实测）→ 登录可浏览器直连** |
 | WebView 里的 MediaSession | **Android WebView 全版本不支持**（MDN / chromium bug 40611412），换内核也救不了 → 必须原生桥 |
 
-**当前判断**：先做 **QQ 一家 + 图上一屏**（约 2,500 行）。QQ 协议是四家里唯一已被本项目实测跑通的（登录成功、CDN 出声、`currentTime` 单调推进）。**酷狗先别碰**——folia 自己都没有它的协议包（靠外部服务）。
+**当前判断**：先做 **QQ 一家 + 图上一屏**（约 2,500 行）。QQ 协议是四家里唯一已被本项目实测跑通的（登录成功、CDN 出声、`currentTime` 单调推进）。**酷狗先别碰**——它连上游都要靠外部服务，没有可移植的协议包。
 
 ### 路线 B 的 Phase 0 已完成（小米 11 Ultra / API 30，2026-10-14）—— 五条断言全部成立
 
@@ -254,7 +253,7 @@ LRCLIB 歌词（`PlaybackSource` 是抽象缝，未来换原生播放实现时�
 
 方案级：
 
-1. **把 folia 集成进来当播放器** —— AGPL 传染 + 性能 + 视觉三件套。实测同机对比：
+1. **用 WebView 承载第三方 Web 播放器当播放器** —— AGPL 传染 + 性能 + 视觉三件套。实测同机对比：
    播放中单核 CPU **71.4% → 原生 5.4%**、30 分钟内存 **+178 MB 无平台期 → 无爬升**、
    30 分钟耗电 **−35%（且全程 USB 供电）→ −14%（不插线）**、电池 **38→52 ℃ → 39→40 ℃**（§8）
 2. **给地图或 WebView 内容加真高斯模糊** —— 独立图层，采样不到（§5）
