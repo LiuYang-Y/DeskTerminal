@@ -370,7 +370,13 @@ fun DeskRoot(
     // 歌词仓库。它内部只留 `applicationContext`，所以可以放心在组合里活很久；
     // 但**不**把它做成进程级单例 —— 它持有的内存 LRU 装的是解析结果，
     // 挂在组合上，页面一走就跟着走（与本项目的原生对象约束同一条理由）。
-    val lyricsRepository = remember(context) { LyricsRepository(context) }
+    //
+    // **注入凭证源**：QQ 歌词搜索走的是 `DoSearchForQQMusicLite`，那条端点要登录态
+    // （2026-10-16 修的就是这个 —— 之前方法名写错 + 没带凭证，QQ 一字没有地落回 LRCLIB，
+    // 用户看到的是"歌词不同步"）。`credentialOrNull()` 每次读盘判过期，不缓存明文。
+    val lyricsRepository = remember(context, loginController) {
+        LyricsRepository(context, credentialSource = loginController::credentialOrNull)
+    }
 
     // 播放源的生命周期归**壳层**（2026-10-15 改：原先挂在 `screen == MUSIC` 上，
     // "离开音乐页就停"）。放在壳上的理由与 mediaMonitor / loginController 一样：

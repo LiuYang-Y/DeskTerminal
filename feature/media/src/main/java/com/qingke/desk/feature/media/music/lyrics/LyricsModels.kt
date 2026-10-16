@@ -29,6 +29,9 @@ data class LyricSyllable(
  * "歌词不对/没歌词"时第一个要问的问题，而它不可见就没法回答。
  */
 enum class LyricsSource(val label: String) {
+    /** QQ 音乐官方歌词（免登录，musicu.fcg 搜 songmid → fcg_query_lyric_new.fcg）。 */
+    QQ_MUSIC("QQ 音乐"),
+
     /** LRCLIB `/api/get` 精确命中。 */
     NETWORK_GET("LRCLIB"),
 

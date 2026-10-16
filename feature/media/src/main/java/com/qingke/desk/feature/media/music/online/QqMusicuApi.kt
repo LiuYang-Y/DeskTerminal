@@ -1,8 +1,10 @@
 package com.qingke.desk.feature.media.music.online
 
 import android.util.Base64
+import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -70,6 +72,12 @@ class QqMusicuApi(private val client: OkHttpClient) {
 
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
+    private val TAG = "QqMusicu"
+    /** 网络层抖动只重试这一次：两次机会足够吃掉偶发连接超时，又不至于把失败拖成 30s+。 */
+    private val NETWORK_RETRY_LIMIT = 2
+    /** 第二次尝试前的退避，给抖动网络一点喘息。 */
+    private val NETWORK_RETRY_BACKOFF_MS = 400L
+
     /** 二维码。`pngBase64` 已剥掉 `data:image/png;base64,` 前缀，能直接喂 `BitmapFactory`。 */
     data class QrCode(val id: String, val pngBase64: String, val expiresInSec: Int)
 
@@ -109,19 +117,39 @@ class QqMusicuApi(private val client: OkHttpClient) {
         // 有凭证才加 Cookie 头 —— 引导阶段（GetSession / CreateQRCode）是匿名调用。
         credential?.let { builder.header("Cookie", cookieHeader(it)) }
 
-        client.newCall(builder.build()).execute().use { response ->
-            // OkHttp 5 起 `Response.body` 是非空的（4.x 才是可空）。
-            val text = response.body.string()
-            val root = runCatching { JSONObject(text) }.getOrNull()
-                ?: throw QqProtocolException(phase, -1, -1, response.code)
-            val item = root.optJSONObject("req_0") ?: JSONObject()
-            val globalCode = root.optInt("code", 0)
-            val upstreamCode = item.optInt("code", 0)
-            if (item.length() == 0 || globalCode != 0 || upstreamCode != 0) {
-                throw QqProtocolException(phase, upstreamCode, globalCode, response.code)
+        // **重试只包裹网络层 IOException（含 SocketTimeoutException）。**
+        // 小米私有 LAN 到 QQ CDN 偶发 15s 连接超时（抖动，不是硬墙）：同一份请求
+        // 复跑一遍常常立刻成功。上游拒绝（[QqProtocolException] 直接继承 Exception
+        // 而非 IOException）**不重试** —— 那种失败重试无意义、只会拖慢失败。
+        // 注：OkHttp 默认的 `retryOnConnectionFailure=true` 只处理"多 IP 选路失败"，
+        // 单个 IP 的连接超时不会自动重连，这里显式补一层。
+        var lastIo: IOException? = null
+        repeat(NETWORK_RETRY_LIMIT) { attempt ->
+            try {
+                return@withContext client.newCall(builder.build()).execute().use { response ->
+                    // OkHttp 5 起 `Response.body` 是非空的（4.x 才是可空）。
+                    val text = response.body.string()
+                    val root = runCatching { JSONObject(text) }.getOrNull()
+                        ?: throw QqProtocolException(phase, -1, -1, response.code)
+                    val item = root.optJSONObject("req_0") ?: JSONObject()
+                    val globalCode = root.optInt("code", 0)
+                    val upstreamCode = item.optInt("code", 0)
+                    if (item.length() == 0 || globalCode != 0 || upstreamCode != 0) {
+                        throw QqProtocolException(phase, upstreamCode, globalCode, response.code)
+                    }
+                    item.optJSONObject("data") ?: JSONObject()
+                }
+            } catch (e: IOException) {
+                lastIo = e
+                QqLog.w(
+                    TAG,
+                    "call($phase) 网络第 ${attempt + 1}/$NETWORK_RETRY_LIMIT 次失败：" +
+                        "${e.javaClass.simpleName}：${e.message ?: "no message"}",
+                )
+                if (attempt < NETWORK_RETRY_LIMIT - 1) delay(NETWORK_RETRY_BACKOFF_MS)
             }
-            item.optJSONObject("data") ?: JSONObject()
         }
+        throw lastIo ?: QqProtocolException(phase, -1, -1, -1)
     }
 
     /**

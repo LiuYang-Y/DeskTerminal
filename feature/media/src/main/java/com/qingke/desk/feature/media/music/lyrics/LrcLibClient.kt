@@ -1,14 +1,16 @@
 package com.qingke.desk.feature.media.music.lyrics
 
 import android.util.Log
+import com.qingke.desk.feature.media.music.online.QqLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 
 private const val TAG = "DeskLrcLib"
 
@@ -16,17 +18,15 @@ private const val TAG = "DeskLrcLib"
  * LRCLIB 客户端（https://lrclib.net）。
  *
  * ---------------------------------------------------------------------------
- * 为什么用 HttpURLConnection 而不是 Retrofit / OkHttp
+ * 为什么用 OkHttp（而不是 HttpURLConnection / Retrofit）
  *
  * 这个模块整个网络面只有两个 GET（`/api/get` 与 `/api/search`），没有认证、
- * 没有重试策略、没有拦截器。为它拉一套 HTTP 栈进来，换来的是：多两个依赖、
- * 多两条许可证要跟、以及**多一套与本项目无关的空闲线程池与连接池**。
- * 这台设备是 24 小时常亮的桌面终端，能省一层就省一层。
+ * 没有拦截器。但**不能**用 `HttpURLConnection`：在小米 11 Ultra（Android 11）上，
+ * 同一进程的 `HttpURLConnection` 取歌词稳定抛 `IOException`（系统 TLS 栈与该服务
+ * 协商失败），而同进程的 OkHttp（库加载、取链都走它）和 `curl` 都能正常 200。
+ * 所以这里直接复用与 [com.qingke.desk.feature.media.music.online.QqMusicuApi] 同一套
+ * OkHttp —— 它本就是传递依赖，不存在"为此多引入一套 HTTP 栈"的问题。
  * JSON 用 `org.json`（Android 平台自带，不是依赖）。
- *
- * 代价写清楚：没有连接复用、没有自动重试、没有 HTTP/2。这三条对"拉一份十几 KB 的
- * 歌词文本"都不是瓶颈，但如果以后要在这个模块里加第二个、第三个接口，
- * 就应该重新评估 —— 那时依赖的成本会被摊薄。
  *
  * ---------------------------------------------------------------------------
  * 命中判据（**这一条是本文件存在的意义**）
@@ -64,6 +64,20 @@ private const val TAG = "DeskLrcLib"
 class LrcLibClient(
     private val userAgent: String = "DeskTerminal/0.1.0",
 ) {
+
+    /**
+     * 网络栈改走 OkHttp（与 [com.qingke.desk.feature.media.music.online.QqMusicuApi] 同一套）。
+     *
+     * 原来用 `HttpURLConnection`，但在小米 11 Ultra（Android 11）上，`HttpURLConnection` 走系统 TLS
+     * 栈取歌词**稳定失败**（IOException），而同一个进程的 OkHttp（库加载、取链都走它）和 `curl`
+     * 都能正常 200。换成 OkHttp 后走与库加载一致的 TLS/连接栈，歌词取数才真正能联网。
+     * 备注：OkHttp 在本模块本来就是传递依赖（库加载在用），这里只是把"第二套 HTTP 栈"收掉。
+     */
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(CONNECT_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
+        .readTimeout(READ_TIMEOUT_MS.toLong(), TimeUnit.MILLISECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
 
     /** 一次命中结果。 */
     data class Hit(
@@ -263,44 +277,39 @@ class LrcLibClient(
      *   · 其它 4xx → null（请求本身有问题，重试也是同样的答案）。
      */
     private fun get(url: String): String? {
-        var connection: HttpURLConnection? = null
         return try {
-            connection = (URL(url).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = CONNECT_TIMEOUT_MS
-                readTimeout = READ_TIMEOUT_MS
-                // 服务端会按它识别调用方。缺了它 LRCLIB 有可能直接拒绝。
-                setRequestProperty("User-Agent", userAgent)
-                setRequestProperty("Accept", "application/json")
-                instanceFollowRedirects = true
-            }
-            val code = connection.responseCode
-            if (code == HttpURLConnection.HTTP_NOT_FOUND) {
-                // /api/get 对"库里没有"就是 404，属于正常路径，不当错误记。
-                Log.d(TAG, "404 $url")
-                return null
-            }
-            if (code !in 200..299) {
-                if (code >= 500 || code == 429) {
-                    // 临时性失败 —— 调用方应当稍后重试，而不是记住"没有"。
-                    throw NetworkUnavailable("http $code")
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", userAgent)
+                .header("Accept", "application/json")
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                val code = response.code
+                if (code == 404) {
+                    // /api/get 对"库里没有"就是 404，属于正常路径，不当错误记。
+                    Log.d(TAG, "404 $url")
+                    return null
                 }
-                Log.w(TAG, "http $code $url")
-                return null
+                if (code !in 200..299) {
+                    if (code >= 500 || code == 429) {
+                        // 临时性失败 —— 调用方应当稍后重试，而不是记住"没有"。
+                        QqLog.w(TAG, "transient http $code $url")
+                        throw NetworkUnavailable("http $code")
+                    }
+                    QqLog.w(TAG, "client http $code $url")
+                    return null
+                }
+                response.body.string().orEmpty()
             }
-            connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         } catch (e: IOException) {
-            // 桌面终端可能长期离线（没插网线/没连 Wi-Fi）。这里必须是 debug 级，
-            // 否则每换一首歌就往日志里怼一条 warning。
-            Log.d(TAG, "io error: ${e.javaClass.simpleName} ${e.message}")
+            // 桌面终端可能长期离线（没插网线/没连 Wi-Fi）。落到文件日志便于抓证。
+            QqLog.w(TAG, "io error: ${e.javaClass.simpleName} ${e.message}")
             throw NetworkUnavailable(e.message, e)
         } catch (e: NetworkUnavailable) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "unexpected: ${e.javaClass.simpleName} ${e.message}")
+            QqLog.w(TAG, "unexpected: ${e.javaClass.simpleName} ${e.message}")
             null
-        } finally {
-            runCatching { connection?.disconnect() }
         }
     }
 
