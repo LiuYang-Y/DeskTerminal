@@ -504,10 +504,12 @@ fun DeskRoot(
         // 选"关闭"（或者 Governor 因高温降级）之后，背景层照旧每帧被录一遍、侧栏照旧采样 ——
         // 档位改了，画面一分不变。[EffectTier.glassLayerEnabled] 的定义就是"这一档要不要建层"：
         // OFF 不建（建了不画仍然有合成开销），其余三档建。
-        val glassBackdrop = rememberDeskGlassBackdrop(
-            enabled = DeskGlass.ENABLED && effectTier.glassLayerEnabled,
-            background = MaterialTheme.colorScheme.background,
-        )
+        //
+        // 注意：**底色恒为不透明背景色**，不再按"是不是地图漫游态"改成透明。
+        // 上一版为了让水滴不把 `#101217` 采成黑块而在这里做特判，但那是治标 ——
+        // 水滴只要还在采样，地图页就必然采不到地图瓦片（高德是独立图层）。
+        // 2026-10-18 重写后的 [LensSideBar] 已**完全不采样 backdrop**，黑块的根被拔掉了，
+        // 这里就没有理由再动底色（动它反而会连带改变设置浮层、齿轮菜单的玻璃表现）。
 
         // ---- 侧栏在哪一侧 ----------------------------------------------------
         //
@@ -614,6 +616,21 @@ fun DeskRoot(
         // 高德隐私的同意状态。与 :map 的 MapPane 读的是同一条流，
         // 所以在这里撤回，地图屏那边会立刻换成隐私说明卡。
         val amapAgreed by AMapPrivacy.agreed.collectAsState()
+
+        // 地图漫游态 = 地图屏 + 不在导航 + 已同意隐私。导航中/隐私卡仍走内容区避让布局。
+        val mapRoamFullscreen = screen == DeskScreen.MAP && !naviActive && amapAgreed
+
+        // ---- 玻璃采样层 ------------------------------------------------------
+        //
+        // 注意：**底色恒为不透明背景色**，不再按"是不是地图漫游态"改成透明。
+        // 上一版为了让水滴不把 `#101217` 采成黑块而在这里做特判，但那是治标 ——
+        // 水滴只要还在采样，地图页就必然采不到地图瓦片（高德是独立图层）。
+        // 2026-10-18 重写后的 [LensSideBar] 已**完全不采样 backdrop**，黑块的根被拔掉了，
+        // 这里就没有理由再动底色（动它反而会连带改变设置浮层、齿轮菜单的玻璃表现）。
+        val glassBackdrop = rememberDeskGlassBackdrop(
+            enabled = DeskGlass.ENABLED && effectTier.glassLayerEnabled,
+            background = MaterialTheme.colorScheme.background,
+        )
         // 换屏（比如从设置面板点进 Shizuku 引导页）时自动收起，
         // 否则回来会看到一个浮在引导页上的设置面板。
         LaunchedEffect(screen) { settingsOpen = false }
@@ -759,8 +776,8 @@ fun DeskRoot(
                 top = cutoutTop,
                 bottom = cutoutBottom,
             )
-            // 地图漫游态 = 地图屏 + 不在导航 + 已同意隐私。导航中/隐私卡仍走内容区避让布局。
-            val mapRoamFullscreen = screen == DeskScreen.MAP && !naviActive && amapAgreed
+            // 地图漫游态（[mapRoamFullscreen]）已在上面算好，这里直接用：
+            // 它同时决定 MapPane 是否铺满、侧栏是否用深色底衬、玻璃层的底色是否透明。
 
             when {
                 screen == DeskScreen.MUSIC -> MusicPage(

@@ -30,9 +30,10 @@
    因为要同时跑 794×361dp 与 914×411dp 两种屏幕。heightIn(max=…) 这类"上限"也算写死。
 2. 不代用户点授权弹窗。Shizuku / 系统权限只能用户本人点，应用侧只发 launch intent。
 3. 调试入口只进 debug 变体，不进正式构建。
-4. 效果档位只有一个权威：`EffectTier`（`LocalEffectTier`）。玻璃层建不建、是否采样背景、
-   侧栏透镜拿哪一档，全部读它；不许再按 `SDK_INT` 自行分档（两条线永不相交，
+4. 效果档位只有一个权威：`EffectTier`（`LocalEffectTier`）。玻璃层建不建、是否采样背景，
+   全部读它；不许再按 `SDK_INT` 自行分档（两条线永不相交，
    症状是"用户在设置里切档、画面一分不变"）。
+   侧栏水滴 2026-10-18 重写后**不再依赖档位**：纯自绘不采样，任何档位/机型像素一致。
 
 两个反直觉事实（不知道就会误判）：
 · 地图浮层做不了真高斯模糊，也拿不到 Compose 玻璃层的采样——WebView / SurfaceView
@@ -92,8 +93,8 @@
 3. **导航状态是进程级 object**（`NaviSession`）：界面销毁/翻页/切侧栏/息屏/切后台都**不允许结束导航**，只有用户显式退出才 `stopNavi`。这是修过的真 bug，不要改成"跟着界面生命周期"。
 4. **高德用合包** `navi-3dmap-location-search`：导航包自带 3D 地图 SDK，与独立地图包并存会 duplicate class。**只能有一个包**。
 5. **效果档位随设备能力 + 运行时降级**，不写死；**唯一权威是 `EffectTier`（`LocalEffectTier`）**。
-   玻璃离屏层建不建（`EffectTier.glassLayerEnabled`）、`deskGlassSurface` 是否采样背景、
-   侧栏透镜拿哪一档镜片，全部读这一个 Local。
+   玻璃离屏层建不建（`EffectTier.glassLayerEnabled`）、`deskGlassSurface` 是否采样背景，
+   全部读这一个 Local（侧栏水滴已不依赖档位，见第 4 条）。
    **不许再按 `Build.VERSION.SDK_INT` 自行分档**（侧栏透镜曾经这么干）—— 那两条线永不相交，
    症状是"用户在设置里切高/中/低/关，画面一分不变"。已修，别改回去。
    **OFF 档的定义是"不建离屏层"，不是"整条侧栏消失"**：它仍画一块静态纯色半透明底，
@@ -114,7 +115,7 @@
 | **调试入口只进 debug 变体** | 探针代码不进正式构建 | |
 | **`MapViewHost.release()` 只在 `refCount == 0` 时才允许 detach + onPause** | 切屏那一帧是"新使用点 acquire → 旧使用点 release" | 无条件 detach 摘掉的是**刚挂好的新父容器**，MapView 成游离 View：不渲染也收不到触摸（整块黑且拖不动） |
 | **组合期不许读动画状态** | 每帧重组 → 重建图形层 → hwui 事务压爆 → **原生 SIGSEGV，Java 层抓不到** | 只许在 `offset {}` / `graphicsLayer {}` 这类布局/绘制阶段 lambda 里读 |
-| **玻璃透镜恒为叶子节点** | 自采样会成环 → RenderThread SIGSEGV | 一块层只有一个写入者，且不采样自己写的层 |
+| **玻璃采样层恒为叶子节点**（侧栏水滴已整条退出采样，见 `LensSideBar` 文件头） | 自采样会成环 → RenderThread SIGSEGV；且高德/WebView 独立图层的像素永远采不到，采到的只是底色（地图页黑饼根因） | 一块层只有一个写入者，且不采样自己写的层；**显示独立图层的页面上不要让任何 Compose 层去"采背景"** |
 | **效果档位只有一个权威（`EffectTier` / `LocalEffectTier`）** | 曾经同时存在三条档位来源（设置面板改 `EffectTier`、侧栏透镜读 `SDK_INT`、`DeskGlass` 层根本不读） | 症状："在设置里切高/中/低/关，画面一分不变"。改档位门槛只改 `core/platform/EffectTier.kt` 一处 |
 | **侧栏"容量"判据是纯图标下限 54dp，不是触控下限 64dp** | `fitSidebar` 里条目下限曾被夹在 64，而"只留图标"的阈值是 54 → `ICON_ONLY` 恒不触发，是死代码 | 判据是 64 会让矮屏**直接砍入口**、且 361dp 屏要么吞掉标签要么触发不了降级。现在：≥64 显示文字 → 54~64 只留图标 → <54 才减入口 |
 

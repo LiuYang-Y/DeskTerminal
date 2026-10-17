@@ -13,7 +13,7 @@
 
 | 库 | 版本 | 来源 | 许可证 | 核实 | 用途 |
 | --- | --- | --- | --- | --- | --- |
-| `io.github.kyant0:backdrop` | 2.0.0 | github.com/Kyant0/AndroidLiquidGlass | **Apache-2.0** | 2026-10-11，POM | 液态玻璃（`core:ui` 的 DeskGlass / 侧栏透镜） |
+| `io.github.kyant0:backdrop` | 2.0.0 | github.com/Kyant0/AndroidLiquidGlass | **Apache-2.0** | 2026-10-11，POM | 液态玻璃（`core:ui` 的 DeskGlass）。另注（2026-10-18）：侧栏水滴的视觉参数（按压鼓出、速度果冻 squash & stretch 比例、内缘厚度/高光弧结构）参考同仓库 `app/.../components/LiquidBottomTabs.kt` 示例（同许可）；当前实现为**纯自绘、不采样 backdrop**，仅借参数不借代码 |
 | `dev.rikka.shizuku:api` / `:provider` | 13.1.5 | github.com/RikkaApps/Shizuku-API | **MIT** | 2026-10-14，POM | 无 root 提权（`:hosting`）。MIT 要求在发行物中保留版权与许可声明 |
 | `com.amap.api:navi-3dmap-location-search` | 11.3.100_3dmap11.3.100_loc11.3.000_sea9.8.1 | repo1.maven.org（高德官方坐标） | **专有**（"Beijing Autonavi Tuqiang Technology Co., Ltd, Version 1.0"，amap.com/licenses/LICENSE-1.0.txt） | 2026-10-14，POM | 地图 + 导航（`:map`）。闭源 SDK：使用受高德开放平台服务条款约束，需 Key 与隐私合规闸门（`AMapPrivacy`），分发条件以高德条款为准 |
 | `com.mocharealm.accompanist:lyrics-core` | 0.5.0 | github.com/6xingyv/Accompanist（**非** Google 官方 Accompanist） | **Apache-2.0** | 2026-10-14，POM | 歌词解析（仅 `LyricsParser` 一个文件 import；逐字/TTML/KRC 能力）。纯 KMP，无 android 变体，Android 解析到 jvm 变体 |
